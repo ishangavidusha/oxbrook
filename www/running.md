@@ -146,6 +146,10 @@ setting `X-Forwarded-Host` makes every browser socket look cross-origin and
 refused with `403`; forward the original host, or list the public origin in
 `websocket_origins`.
 
+A proxy or CDN can serve [static files](guide/static.md) itself, with its own
+cache, and pass everything else through; for heavy static traffic that is still
+the better arrangement.
+
 If the proxy also adds CORS headers, configure CORS in one place only: two
 `Access-Control-Allow-Origin` headers on one response make a browser reject it.
 A proxy that buffers request bodies defeats a [streaming

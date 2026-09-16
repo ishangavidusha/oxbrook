@@ -249,6 +249,23 @@ rather than delivery.
 Above 100 connections the Python client saturates first, so those rates are a
 floor for the server rather than its ceiling.
 
+## Static files
+
+A 2 KiB file and a 1 MiB file from a static mount, beside a Python handler
+returning the same 2 KiB from memory, 64 connections:
+
+| target | req/s | p99 ms | throughput |
+|---|---:|---:|---:|
+| Python handler, bytes in memory | 181,852 | 2.04 | 355 MB/s |
+| static file, 2 KiB | 95,495 | 4.02 | 186 MB/s |
+| static file, 1 MiB | 5,983 | 26.16 | 5,975 MB/s |
+
+Serving from disk is slower than returning bytes already in memory. Every
+filesystem call for a request happens in one task on the blocking pool: resolved
+per call through the async file API, the same small file measured 22,670 req/s.
+Symlink containment checks only the path components inside the mount, rather
+than canonicalising the whole path, which walks every directory from `/`.
+
 ## What has not been measured
 
 These are open, not assumed. An unmeasured claim is not a result:

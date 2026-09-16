@@ -10,6 +10,7 @@
 
 mod body;
 mod cors;
+mod files;
 mod form;
 mod origin;
 mod queue;

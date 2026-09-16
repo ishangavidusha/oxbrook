@@ -328,6 +328,13 @@ def routes(args: argparse.Namespace) -> int:
         rows.append(("WS" if route.websocket else route.method, route.path, handler,
                      ", ".join(notes)))
 
+    for mount in app.mounts:
+        path = mount.prefix if mount.prefix == "/" else f"{mount.prefix}/"
+        notes = ["static files"]
+        if mount.fallback:
+            notes.append(f"fallback {mount.fallback}")
+        rows.append(("GET", f"{path}*", mount.directory, ", ".join(notes)))
+
     if args.json:
         print(json.dumps([
             {"method": m, "path": p, "handler": h, "notes": n.split(", ") if n else []}

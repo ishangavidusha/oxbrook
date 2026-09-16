@@ -25,6 +25,7 @@ use tokio_stream::StreamExt;
 
 use crate::body::BodyShared;
 use crate::cors::{Cors, CorsTuple};
+use crate::files::{Mount, MountTuple};
 use crate::origin::{OriginsTuple, SocketOrigins};
 use crate::queue::Pending;
 use crate::responder::{Body, Reply};
@@ -46,6 +47,9 @@ struct State {
     cors: Option<Arc<Cors>>,
     /// Checked on every upgrade, before the authorizer or handler.
     socket_origins: SocketOrigins,
+    /// Static mounts, indexed by `RouteSpec::mount`. Shared, because a file
+    /// is resolved on a blocking thread that outlives the borrow.
+    mounts: Vec<Arc<Mount>>,
 }
 
 #[pyclass(name = "Server", module = "oxbrook._core")]
@@ -70,6 +74,7 @@ pub struct Server {
     lifecycle: Py<PyAny>,
     cors: Option<CorsTuple>,
     socket_origins: OriginsTuple,
+    mounts: Vec<MountTuple>,
 }
 
 /// (method, path, handler, params, is_websocket, authorizer, streams_body)
@@ -86,7 +91,7 @@ type Route = (
 #[pymethods]
 impl Server {
     #[new]
-    /// Fifteen arguments, which clippy dislikes. This is the Python
+    /// Sixteen arguments, which clippy dislikes. This is the Python
     /// constructor: the signature *is* the API, and collapsing it into a
     /// config object would move the same fields behind a dict that Python has
     /// to build on every server start.
@@ -107,6 +112,7 @@ impl Server {
         lifecycle: Py<PyAny>,
         cors: Option<CorsTuple>,
         socket_origins: OriginsTuple,
+        mounts: Vec<MountTuple>,
     ) -> Self {
         Self {
             host,
@@ -128,6 +134,7 @@ impl Server {
             lifecycle,
             cors,
             socket_origins,
+            mounts,
         }
     }
 
@@ -177,7 +184,15 @@ impl Server {
                 )
             })
             .collect();
-        let router = Arc::new(Router::build(&specs).map_err(PyValueError::new_err)?);
+        let mounts = self
+            .mounts
+            .iter()
+            .cloned()
+            .map(|spec| Mount::build(spec).map(Arc::new))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(PyValueError::new_err)?;
+        let patterns: Vec<_> = mounts.iter().map(|m| m.patterns()).collect();
+        let router = Arc::new(Router::build(&specs, &patterns).map_err(PyValueError::new_err)?);
         let cors = self
             .cors
             .clone()
@@ -235,6 +250,7 @@ impl Server {
             max_message: self.max_message,
             cors,
             socket_origins: SocketOrigins::build(self.socket_origins.clone()),
+            mounts,
         });
 
         let addr: SocketAddr = format!("{}:{}", self.host, self.port)
@@ -390,9 +406,9 @@ async fn serve_loop(
 
 /// Responses are either a complete buffer or a stream of chunks, so every
 /// helper hands back the same boxed body type.
-type Out = BoxBody<Bytes, Infallible>;
+pub(crate) type Out = BoxBody<Bytes, Infallible>;
 
-fn full(bytes: Bytes) -> Out {
+pub(crate) fn full(bytes: Bytes) -> Out {
     Full::new(bytes).boxed()
 }
 
@@ -794,6 +810,19 @@ async fn handle(
             return Ok(json(StatusCode::UNPROCESSABLE_ENTITY, err.to_json()))
         }
     };
+
+    // A static file never reaches a worker, and its body, if any, is ignored.
+    if let Some(mount) = state.router.spec(matched.route).mount {
+        return Ok(crate::files::serve(
+            state.mounts[mount].clone(),
+            matched.file.as_deref(),
+            req.uri().path(),
+            req.uri().query(),
+            req.headers(),
+            head,
+        )
+        .await);
+    }
 
     if state.router.spec(matched.route).websocket {
         return Ok(upgrade_websocket(req, matched, state).await);

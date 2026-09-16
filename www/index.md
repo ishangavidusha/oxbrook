@@ -30,7 +30,7 @@ Three things, in one process:
 
 **A REST framework.** A radix-tree router with typed path and query parameters
 coerced in Rust, pydantic request and response bodies, forms and file uploads,
-streaming request bodies, routers, middleware, exception handlers, dependency
+streaming request bodies, static files, routers, middleware, exception handlers, dependency
 injection, per-worker lifespans, CORS, sessions, and OpenAPI 3.1 generated from
 the same route metadata the router uses.
 

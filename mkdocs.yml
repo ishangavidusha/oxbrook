@@ -92,6 +92,7 @@ nav:
       - guide/parameters.md
       - guide/bodies.md
       - guide/forms.md
+      - guide/static.md
       - guide/responses.md
       - guide/requests.md
       - guide/middleware.md

@@ -151,6 +151,8 @@ pub struct RouteSpec {
     pub gated: bool,
     /// Takes its body as a `BodyStream` rather than collected up front.
     pub streaming: bool,
+    /// A static mount, answered in Rust from `State::mounts[i]`.
+    pub mount: Option<usize>,
 }
 
 /// A parameter that was missing or would not coerce. Rendered in the shape
@@ -190,6 +192,9 @@ pub enum RouteError {
 pub struct Matched {
     pub route: usize,
     pub params: Vec<ParamValue>,
+    /// For a static mount, the path after the prefix, still percent-encoded.
+    /// None when the request named the prefix itself.
+    pub file: Option<String>,
 }
 
 /// (name, type, source, presence, repeated) from the Python side.
@@ -205,7 +210,11 @@ pub struct Router {
 }
 
 impl Router {
-    pub fn build(routes: &[RouteTuple]) -> Result<Self, String> {
+    /// `mounts` holds each static mount's patterns, as (pattern, captures the
+    /// file). Mounts sit in the same tree as routes, so a mount and a route
+    /// that cannot coexist are refused the same way two routes are, and a
+    /// POST under a mount gets the same 405.
+    pub fn build(routes: &[RouteTuple], mounts: &[Vec<(String, bool)>]) -> Result<Self, String> {
         let mut by_method: HashMap<String, Matcher<usize>> = HashMap::new();
         let mut specs = Vec::with_capacity(routes.len());
 
@@ -218,6 +227,7 @@ impl Router {
                 websocket: *websocket,
                 gated: *gated,
                 streaming: *streaming,
+                mount: None,
             };
             for (name, kind, source, presence, repeated) in params {
                 let kind = ParamKind::parse(kind)
@@ -242,6 +252,25 @@ impl Router {
                 .or_default()
                 .insert(path.as_str(), index)
                 .map_err(|e| format!("cannot register {method} {path}: {e}"))?;
+        }
+
+        for (mount, patterns) in mounts.iter().enumerate() {
+            for (pattern, _captures) in patterns {
+                let index = specs.len();
+                specs.push(RouteSpec {
+                    params: Vec::new(),
+                    has_query: false,
+                    websocket: false,
+                    gated: false,
+                    streaming: false,
+                    mount: Some(mount),
+                });
+                by_method
+                    .entry("GET".to_owned())
+                    .or_default()
+                    .insert(pattern.as_str(), index)
+                    .map_err(|e| format!("cannot mount static files at {pattern}: {e}"))?;
+            }
         }
 
         let methods = by_method.keys().cloned().collect();
@@ -271,6 +300,14 @@ impl Router {
 
         let route = *found.value;
         let spec = &self.specs[route];
+
+        if spec.mount.is_some() {
+            return Ok(Matched {
+                route,
+                params: Vec::new(),
+                file: found.params.get("file").map(str::to_owned),
+            });
+        }
 
         // Parsed once per request, and only when the route declares query
         // parameters, so routes without them pay nothing.
@@ -342,7 +379,11 @@ impl Router {
             params.push(value);
         }
 
-        Ok(Matched { route, params })
+        Ok(Matched {
+            route,
+            params,
+            file: None,
+        })
     }
 
     /// Distinguishes "no such path" from "wrong method for this path".

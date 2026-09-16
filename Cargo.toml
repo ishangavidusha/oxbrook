@@ -11,13 +11,15 @@ crate-type = ["cdylib"]
 [dependencies]
 pyo3 = { version = "0.29", features = ["extension-module"] }
 pythonize = "0.29"
-tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "macros", "signal", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "macros", "signal", "time", "fs", "io-util"] }
 tokio-stream = "0.1"
 tokio-tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
 hyper = { version = "1", features = ["http1", "server"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 form_urlencoded = "1.2"
 multer = "3"
+mime_guess = "2"
+httpdate = "1"
 percent-encoding = "2.3"
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
 matchit = "0.9"

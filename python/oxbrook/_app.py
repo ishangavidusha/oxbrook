@@ -7,6 +7,7 @@ from . import _openapi
 from ._cors import CORS, check_origin
 from ._errors import DEFAULT_HANDLERS
 from ._errors import guard as guard_exceptions
+from ._files import StaticMount, build_mount
 from ._lifecycle import Lifecycle, ServerHandle, State, check_hook
 from ._middleware import as_reply, make_gate
 from ._middleware import wrap as wrap_middleware
@@ -93,6 +94,7 @@ class App:
         `["*"]` turns the check off.
         """
         self.routes: list[RouteInfo] = []
+        self.mounts: list[StaticMount] = []
         self._middleware: list[Any] = []
         self._exception_handlers: dict[type, Any] = {}
         if access_log:
@@ -154,6 +156,13 @@ class App:
         ever run.
         """
         shape = route_shape(route.path)
+        if route.method == "GET":
+            for mount in self.mounts:
+                if shape in mount.shapes():
+                    raise ValueError(
+                        f"GET {route.path} conflicts with the static files mounted at "
+                        f"{mount.prefix}: the router cannot hold both"
+                    )
         for existing in self.routes:
             if existing.method == route.method and route_shape(existing.path) == shape:
                 same = existing.path == route.path
@@ -177,6 +186,60 @@ class App:
 
     def put(self, path: str, tool: bool = False):
         return self.route("PUT", path, tool=tool)
+
+    def static(
+        self,
+        prefix: str,
+        directory: Any,
+        *,
+        index: str | None = "index.html",
+        fallback: str | None = None,
+        dotfiles: bool = False,
+        cache_control: str | None = None,
+    ) -> None:
+        """Serve the files in `directory` under the URL `prefix`.
+
+            app.static("/assets", "public")
+            app.static("/", "frontend/dist", fallback="index.html")
+
+        Served in Rust, streamed from disk, with conditional and range requests
+        answered. A file request never wakes a Python worker, and middleware does
+        not run for it.
+
+        `index` is served for a directory; `None` makes directories 404. A path
+        naming a directory without its trailing slash is redirected to it.
+
+        `fallback` is served, with status 200, for a page load under the prefix
+        that matches no file: no file extension, and `Accept` including
+        `text/html`, as a browser sends when loading a page. That is how a
+        single-page app's client-side routes load. A missing `app.js` is still
+        404, and so is a mistyped API call from `fetch`, which does not ask for
+        HTML.
+
+        `dotfiles` allows files and directories whose names start with a dot.
+        Off by default: `.env` and `.git` are the files most likely to sit in a
+        static directory by accident.
+
+        `cache_control` sets that header on every file served.
+
+        `directory` resolves from the working directory when relative, and must
+        exist now. Paths that leave the directory — `..`, encoded or not, or a
+        symlink pointing outside it — are answered 404.
+        """
+        mount = build_mount(prefix, directory, index=index, fallback=fallback,
+                            dotfiles=dotfiles, cache_control=cache_control)
+        taken = set(mount.shapes())
+        for route in self.routes:
+            if route.method == "GET" and route_shape(route.path) in taken:
+                raise ValueError(
+                    f"static files at {prefix} conflict with {route.method} {route.path}: "
+                    f"the router cannot hold both"
+                )
+        for existing in self.mounts:
+            if taken & set(existing.shapes()):
+                raise ValueError(f"static files at {prefix} conflict with the mount at "
+                                 f"{existing.prefix}")
+        self.mounts.append(mount)
 
     def patch(self, path: str, tool: bool = False):
         return self.route("PATCH", path, tool=tool)
@@ -550,6 +613,7 @@ class App:
             lifecycle,
             None if self.cors is None else self.cors.as_spec(),
             self._socket_origins(),
+            [mount.as_spec() for mount in self.mounts],
         )
         return ServerHandle(core, lifecycle)
 

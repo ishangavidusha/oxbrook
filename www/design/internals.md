@@ -43,6 +43,9 @@ python/oxbrook/  App, routing, pydantic, OpenAPI, topics, SSE, sockets, runtime
 Two properties carry the design: Python is only ever touched from the worker's
 own thread, and a burst of requests collapses into one wakeup.
 
+A request under a static mount takes a branch after step 2: the file is resolved
+and read on tokio's blocking pool, in one task, and answered without a worker.
+
 A WebSocket upgrade takes a branch after step 2: its `Origin` is checked in Rust,
 and a refused origin is answered `403` before an authorizer or handler is ever
 queued.
@@ -132,7 +135,7 @@ then runs the process `lifespan`'s teardown.
 
 ## Testing
 
-Twenty-five standalone scripts under `tests/`, each exiting non-zero on
+Twenty-six standalone scripts under `tests/`, each exiting non-zero on
 failure, run against a real server on a real socket.
 
 ```bash
