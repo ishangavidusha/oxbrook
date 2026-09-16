@@ -1,33 +1,56 @@
 # Install
 
-Oxbrook is not published to PyPI. Build it from the repository.
+```bash
+pip install oxbrook
+```
 
 ## Requirements
 
-- **Python 3.13 or newer.** Free-threaded CPython 3.14 (`python3.14t`) is the
-  primary target. The standard GIL build works, with a single worker loop.
-- **A Rust toolchain**, to build the extension module.
-- **[uv](https://docs.astral.sh/uv/)**, for the virtual environments.
-- **Docker**, only if you want durable topics: Redis runs in a container.
-- **[oha](https://github.com/hatoo/oha)**, only if you want to run the benchmarks.
+- **CPython 3.14.** The free-threaded build (`python3.14t`) is the primary
+  target and runs several worker loops; the standard build runs one.
+- **Linux or macOS.** Wheels are published for both interpreter builds on
+  x86-64 and ARM (manylinux 2.28 and macOS 11 or newer). Elsewhere pip builds
+  from the source distribution, which needs a Rust toolchain. Windows is not
+  supported: the core relies on Unix sockets and signals.
+- **Redis**, only for durable topics: `pip install oxbrook redis`.
 
-## Build
+With [uv](https://docs.astral.sh/uv/), a free-threaded environment is one
+command:
 
 ```bash
+uv venv --python 3.14t
+uv pip install oxbrook
+```
+
+Check which build is running with `oxbrook --version`.
+
+## Versions
+
+Oxbrook is alpha. While the version is `0.x`:
+
+- a **patch** release (`0.1.1`) fixes bugs and never changes the API;
+- a **minor** release (`0.2.0`) may change the API, and lists every change
+  that breaks existing code under **Breaking** in the
+  [changelog](changelog.md).
+
+Pin a minor version, `oxbrook~=0.1.0`, to take fixes without changes. `1.0`
+will mean the API is committed to.
+
+## From source
+
+Building from the repository needs a Rust toolchain, uv, and Docker if the
+suites should cover durable topics:
+
+```bash
+git clone https://github.com/ishangavidusha/oxbrook
+cd oxbrook
 make venvs     # .venv (free-threaded 3.14t) and .venv-gil (standard 3.14)
 make build     # maturin develop --release into both
 make run       # examples/hello.py
 ```
 
-`make build` compiles the Rust crate into `oxbrook._core` and installs the
-package into both environments. Rebuild after any change to `src/`; the `make`
-targets that need it already do.
-
-To build into one environment only:
-
-```bash
-maturin develop --release
-```
+Rebuild after any change to `src/`; the `make` targets that need it already
+do. The contributing guide covers the test suites and conventions.
 
 ## First app
 

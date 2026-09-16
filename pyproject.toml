@@ -4,12 +4,38 @@ build-backend = "maturin"
 
 [project]
 name = "oxbrook"
-version = "0.0.1"
+# Taken from Cargo.toml by maturin, so the version is written in one place.
+dynamic = ["version"]
 description = "Fast Python REST framework with a Rust core, built-in streams, and agent-native interfaces"
-requires-python = ">=3.13"
+readme = "README.md"
+# 3.14 only, in both builds: the only interpreters the suites run on.
+requires-python = ">=3.14"
 license = "MIT"
 license-files = ["LICENSE"]
+authors = [{ name = "Ishanga Vidusha" }]
+keywords = ["web", "framework", "rest", "api", "rust", "free-threading", "sse", "websocket", "mcp"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Framework :: Pydantic :: 2",
+    "Intended Audience :: Developers",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: Free Threading :: 3 - Stable",
+    "Programming Language :: Rust",
+    "Topic :: Internet :: WWW/HTTP :: HTTP Servers",
+    "Typing :: Typed",
+]
 dependencies = ["pydantic>=2.9"]
+
+[project.urls]
+Homepage = "https://github.com/ishangavidusha/oxbrook"
+Documentation = "https://ishangavidusha.github.io/oxbrook/"
+Source = "https://github.com/ishangavidusha/oxbrook"
+Changelog = "https://github.com/ishangavidusha/oxbrook/blob/main/CHANGELOG.md"
+Issues = "https://github.com/ishangavidusha/oxbrook/issues"
 
 
 [project.scripts]
@@ -61,3 +87,20 @@ ignore = [
 # would count as unexecuted. `make coverage` passes absolute paths for the data
 # file and the source, because those processes run from another directory.
 patch = ["subprocess"]
+
+[tool.cibuildwheel]
+# Both 3.14 builds, nothing else: the only interpreters the suites run on.
+build = ["cp314-*", "cp314t-*"]
+# musl would need its own CI leg to mean anything; pip builds from the sdist.
+skip = ["*-musllinux_*"]
+build-verbosity = 1
+# Each wheel is installed into a clean environment and a handful of suites run
+# against it from a copy of tests/, away from the source tree, so the import
+# can only resolve to the wheel. The durable suite is left out: no Redis there.
+test-sources = ["tests"]
+test-requires = ["httpx[http2]", "cryptography", "websockets"]
+test-command = "bash -c 'for s in routing bodies hardening verify files cancellation protocols; do echo \"== $s\"; python tests/$s.py || exit 1; done'"
+
+[tool.cibuildwheel.linux]
+before-all = "curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal"
+environment = { PATH = "$HOME/.cargo/bin:$PATH" }

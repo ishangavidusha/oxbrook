@@ -5,6 +5,9 @@ coerced in Rust, pydantic request and response bodies, bounded concurrency,
 and OpenAPI 3.1 generated from the same route metadata.
 """
 
+from importlib.metadata import PackageNotFoundError as _NotInstalled
+from importlib.metadata import version as _version
+
 from ._app import App
 from ._bodies import BodyStream
 from ._capabilities import Capability, CapabilityError
@@ -23,6 +26,11 @@ from ._sessions import Session, Sessions
 from ._sse import SSE, Event
 from ._streams import BLOCK, DROP_NEWEST, DROP_OLDEST, ERROR, Subscription, Topic, TopicFull
 from ._websocket import WebSocket, WebSocketClosed
+
+try:
+    __version__ = _version("oxbrook")
+except _NotInstalled:  # imported from a source tree that was never installed
+    __version__ = "0+unknown"
 
 __all__ = [
     "BLOCK",

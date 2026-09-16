@@ -399,10 +399,10 @@ def rapid_reset(port: int) -> None:
     global slow_peak
     slow_peak = 0
     flood = RawH2(port)
-    closed = False
+    closed_by_server = 0
     for _ in range(60):
-        streams = [flood.open("/slow") for _ in range(100)]
         try:
+            streams = [flood.open("/slow") for _ in range(100)]
             flood.flush()
             # Long enough for the requests to reach their handlers, which is
             # what hyper's own reset limit does not cover.
@@ -412,20 +412,30 @@ def rapid_reset(port: int) -> None:
                 with contextlib.suppress(h2.exceptions.StreamClosedError):
                     flood.conn.reset_stream(stream)
             flood.flush()
-        except OSError:
-            closed = True
-            break
+        except (OSError, h2.exceptions.ProtocolError):
+            # hyper sends GOAWAY when too many streams are reset before it
+            # accepts them, which happens when the server is slow to accept.
+            # That is a defence working; an attacker would reconnect, so this
+            # does too, and the limits below must still hold.
+            closed_by_server += 1
+            flood.sock.close()
+            flood = RawH2(port)
     check(slow_peak <= 200, f"one connection ran {slow_peak} handlers at once")
-    check(slow_peak >= 50, f"flood never reached its handlers (peak {slow_peak}); test is void")
+    check(slow_peak >= 50, f"flood never reached its handlers (peak {slow_peak}, "
+                           f"{closed_by_server} connections closed); test is void")
     others = httpx.get(f"http://127.0.0.1:{port}/").status_code
     check(others == 200, f"another client got {others} during the flood")
 
     # The count follows the handlers: once they finish, the same connection
     # is served again.
-    if not closed:
-        time.sleep(2)
-        check(flood.status(flood.open("/")) == "200",
-              "the flooded connection stayed refused after its handlers finished")
+    time.sleep(2)
+    try:
+        status = flood.status(flood.open("/"))
+    except (OSError, h2.exceptions.ProtocolError):
+        flood.sock.close()
+        flood = RawH2(port)
+        status = flood.status(flood.open("/"))
+    check(status == "200", f"the flooded connection got {status} after its handlers finished")
     flood.sock.close()
 
 

@@ -9,8 +9,8 @@ ceremony.
 
 ## Requirements
 
-- **Python 3.13 or newer.** Free-threaded CPython 3.14 (`python3.14t`) is the
-  primary target; the standard GIL build must keep working too.
+- **CPython 3.14.** The free-threaded build (`python3.14t`) is the primary
+  target; the standard GIL build must keep working too.
 - **A Rust toolchain**, for the extension module.
 - **[uv](https://docs.astral.sh/uv/)**, for the environments.
 - **Docker**, for Redis. Services run in containers, never on the host.
@@ -164,6 +164,41 @@ detail.
 add queue-based dispatch
 fix startup deadlock on free-threaded build
 ```
+
+## Releases
+
+Versions follow the policy on the install page: while `0.x`, a patch release
+never changes the API and a minor release may, listing every break under
+**Breaking** in [`CHANGELOG.md`](CHANGELOG.md). The version is written once, in
+`Cargo.toml`; maturin copies it into the package metadata.
+
+Wheels are built by [cibuildwheel](https://cibuildwheel.pypa.io/) for CPython
+3.14 and 3.14t on Linux (x86-64, arm64) and macOS (arm64, x86-64), and each one
+is installed and tested before anything is published. The settings are in
+`pyproject.toml`, so the Linux half runs locally too, in Docker:
+
+```bash
+uvx cibuildwheel --platform linux --output-dir wheelhouse
+```
+
+To cut a release:
+
+1. Move the `CHANGELOG.md` entry from *unreleased* to a date, and set the
+   version in `Cargo.toml`.
+2. Run the `release` workflow by hand. It builds everything with a `.devN`
+   version, publishes that to TestPyPI and installs it back from there.
+3. When that is green, commit, tag and push:
+
+   ```bash
+   git tag v0.1.0
+   git push origin v0.1.0
+   ```
+
+   The tag must match `Cargo.toml`. The workflow builds and checks again, then
+   waits on the `pypi` environment before uploading.
+
+A version on PyPI can never be uploaded again, even after it is deleted, so a
+broken release is fixed with a new patch version.
 
 ## License
 

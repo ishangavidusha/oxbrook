@@ -116,6 +116,7 @@ nav:
       - design/why.md
       - design/internals.md
       - design/performance.md
+  - Changelog: changelog.md
   - Reference:
       - reference/app.md
       - reference/http.md

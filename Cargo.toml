@@ -1,8 +1,16 @@
 [package]
 name = "oxbrook-core"
-version = "0.0.1"
+version = "0.1.0"
 edition = "2021"
-description = "Rust runtime for the Oxbrook Python framework (milestone-1 spike)"
+description = "Rust core of the Oxbrook Python web framework"
+license = "MIT"
+repository = "https://github.com/ishangavidusha/oxbrook"
+# The crate is only ever built as the Python extension, through maturin.
+publish = false
+# What the source distribution carries: the crate, the tests, the licence and
+# the README. maturin adds pyproject.toml and python/ itself. Without this the
+# sdist held the whole repository, documentation site and benchmarks included.
+include = ["/src", "/tests/*.py", "/Cargo.toml", "/Cargo.lock", "/LICENSE", "/README.md"]
 
 [lib]
 name = "_core"
