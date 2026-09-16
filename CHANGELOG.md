@@ -4,7 +4,7 @@ Every release, newest first. While the version is `0.x`, a minor release may
 change the API and a patch release does not; changes that break existing code
 are listed under **Breaking** in the release that makes them.
 
-## 0.1.0 — unreleased
+## 0.1.0 — 2026-09-16
 
 The first release.
 
