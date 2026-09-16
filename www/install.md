@@ -11,7 +11,8 @@ pip install oxbrook
 - **Linux or macOS.** Wheels are published for both interpreter builds on
   x86-64 and ARM (manylinux 2.28 and macOS 11 or newer). Elsewhere pip builds
   from the source distribution, which needs a Rust toolchain. Windows is not
-  supported: the core relies on Unix sockets and signals.
+  supported yet: the core relies on Unix sockets and signals. Until it is,
+  WSL2 runs Oxbrook as on Linux.
 - **Redis**, only for durable topics: `pip install oxbrook redis`.
 
 With [uv](https://docs.astral.sh/uv/), a free-threaded environment is one

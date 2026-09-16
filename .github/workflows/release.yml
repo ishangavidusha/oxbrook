@@ -167,13 +167,26 @@ jobs:
       - name: Install the published wheel, not a local build
         run: |
           uv venv --python ${{ matrix.python }} venv
-          # The index takes a minute or two to show a new upload.
+          version=${{ needs.version.outputs.version }}
+          # Oxbrook alone from TestPyPI, which also hosts unrelated old copies
+          # of common packages (its pydantic stops at 1.5a1); its dependencies
+          # from PyPI in a second step. The index takes a minute or two to
+          # show a new upload, hence the retries.
+          installed=no
           for attempt in 1 2 3 4 5 6 7 8 9 10; do
-            uv pip install --python venv/bin/python --no-cache \
-              --index https://test.pypi.org/simple/ --default-index https://pypi.org/simple/ \
-              "oxbrook==${{ needs.version.outputs.version }}" && break
+            if uv pip install --python venv/bin/python --no-cache --no-deps \
+                --default-index https://test.pypi.org/simple/ "oxbrook==$version"; then
+              installed=yes
+              break
+            fi
             sleep 30
           done
+          test "$installed" = yes || { echo "::error::oxbrook $version never appeared on TestPyPI"; exit 1; }
+          venv/bin/python - > requirements.txt <<'EOF'
+          from importlib.metadata import requires
+          print("\n".join(r for r in requires("oxbrook") if "extra ==" not in r))
+          EOF
+          uv pip install --python venv/bin/python -r requirements.txt
           venv/bin/python -c "import oxbrook; assert oxbrook.__version__ == '${{ needs.version.outputs.version }}', oxbrook.__version__"
       - name: Serve a request
         run: |

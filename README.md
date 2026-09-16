@@ -36,7 +36,7 @@ This is a personal project, not a supported product.
 Requires CPython 3.14, free-threaded (`python3.14t`) or standard, on Linux or
 macOS. Wheels are published for both builds on x86-64 and ARM; anywhere else
 pip builds from source, which needs a Rust toolchain. Windows is not
-supported.
+supported yet; WSL2 works in the meantime.
 
 ## What it does
 
