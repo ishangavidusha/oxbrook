@@ -52,6 +52,7 @@ class _Declared:
     tool: bool
     websocket: bool
     authorize: Any
+    cancel_on_disconnect: bool = True
 
 
 class Router:
@@ -98,30 +99,37 @@ class Router:
                 )
         self._declared.append(declared)
 
-    def route(self, method: str, path: str, tool: bool = False):
+    def route(
+        self, method: str, path: str, tool: bool = False, *, cancel_on_disconnect: bool = True
+    ):
         """Register a route. See `App.route`."""
         method = method.upper()
 
         def decorator(fn):
-            self._declare(_Declared(method, path, fn, tool, False, None))
+            self._declare(_Declared(method, path, fn, tool, False, None, cancel_on_disconnect))
             return fn
 
         return decorator
 
-    def get(self, path: str, tool: bool = False):
-        return self.route("GET", path, tool=tool)
+    def get(self, path: str, tool: bool = False, *, cancel_on_disconnect: bool = True):
+        return self.route("GET", path, tool=tool,
+                          cancel_on_disconnect=cancel_on_disconnect)
 
-    def post(self, path: str, tool: bool = False):
-        return self.route("POST", path, tool=tool)
+    def post(self, path: str, tool: bool = False, *, cancel_on_disconnect: bool = True):
+        return self.route("POST", path, tool=tool,
+                          cancel_on_disconnect=cancel_on_disconnect)
 
-    def put(self, path: str, tool: bool = False):
-        return self.route("PUT", path, tool=tool)
+    def put(self, path: str, tool: bool = False, *, cancel_on_disconnect: bool = True):
+        return self.route("PUT", path, tool=tool,
+                          cancel_on_disconnect=cancel_on_disconnect)
 
-    def patch(self, path: str, tool: bool = False):
-        return self.route("PATCH", path, tool=tool)
+    def patch(self, path: str, tool: bool = False, *, cancel_on_disconnect: bool = True):
+        return self.route("PATCH", path, tool=tool,
+                          cancel_on_disconnect=cancel_on_disconnect)
 
-    def delete(self, path: str, tool: bool = False):
-        return self.route("DELETE", path, tool=tool)
+    def delete(self, path: str, tool: bool = False, *, cancel_on_disconnect: bool = True):
+        return self.route("DELETE", path, tool=tool,
+                          cancel_on_disconnect=cancel_on_disconnect)
 
     def websocket(self, path: str, authorize: Any = None):
         """Register a WebSocket endpoint. See `App.websocket`."""
@@ -166,6 +174,7 @@ class Router:
                 base + declared.path,
                 websocket=declared.websocket,
                 tool=declared.tool,
+                cancel_on_disconnect=declared.cancel_on_disconnect,
             )
             if declared.authorize is not None:
                 route.authorizer = make_gate(declared.authorize)

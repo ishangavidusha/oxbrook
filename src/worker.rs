@@ -94,10 +94,26 @@ impl Drainer {
             }
         }
 
+        // Cancellations before new work, so a handler whose client is gone
+        // stops before more are started beside it.
+        while let Some(cell) = self.queue.pop_cancel() {
+            if let Err(err) = cell.cancel(py) {
+                err.write_unraisable(py, None);
+            }
+        }
+
         let run_handler = self.run_handler.bind(py);
         let create_task = self.create_task.bind(py);
 
         while let Some(item) = self.queue.pop() {
+            // The client left while this waited in the queue: nothing has
+            // started, so there is nothing to stop and nothing to run.
+            if item.cancel.as_ref().is_some_and(|cell| cell.abandoned()) {
+                if let Some(load) = &item.connection {
+                    load.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                continue;
+            }
             self.queue.claim();
             let handler = match (item.gate, self.gates[item.route].as_ref()) {
                 (true, Some(gate)) => gate.bind(py),
@@ -140,6 +156,7 @@ impl Drainer {
                     self.queue.clone(),
                     self.runtime.clone(),
                     item.connection,
+                    item.cancel.clone(),
                 ),
             )?;
             let coro = match item.websocket {
@@ -151,7 +168,10 @@ impl Drainer {
                 }
                 None => run_handler.call1((handler, request, responder, params, self.debug))?,
             };
-            create_task.call1((coro,))?;
+            let task = create_task.call1((coro,))?;
+            if let Some(cell) = item.cancel {
+                cell.attach(py, task.unbind())?;
+            }
         }
 
         self.queue.rewake_if_pending();

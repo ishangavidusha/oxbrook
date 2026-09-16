@@ -105,7 +105,7 @@ failures come from pydantic, on the worker.
 | `max_body` | 16 MiB | `413`, without buffering the body; on a streaming route, as the chunks arrive |
 | `max_concurrency` | 1024 per worker | `503` with `Retry-After: 1` |
 | `max_connections` | 2048 | the listener stops accepting; the OS backlog holds the wait |
-| `request_timeout` | 30s | `504`, and the connection is freed; on a streaming route, counted from the last progress, and `408` when the client is the one that stalled |
+| `request_timeout` | 30s | `504`, the handler is [cancelled](#when-the-client-leaves), and the connection is freed; on a streaming route, counted from the last progress, and `408` when the client is the one that stalled |
 | form `max_parts` | 1000 | `413` |
 | header read timeout | 15s | the connection is dropped |
 | `shutdown_grace` | 10s | in-flight requests are abandoned |
@@ -132,6 +132,56 @@ reading or never answers gets `504`.
 
 It costs about 5-8% of hello-world throughput. Set it to `0` for a service
 whose handlers are legitimately long-running.
+
+## When the client leaves
+
+A handler whose client disconnects before it has answered is cancelled:
+`asyncio.CancelledError` is raised at its next `await`. The same happens when
+`request_timeout` answers `504` for it, and when an HTTP/2 client resets the
+stream. Its answer could no longer reach anyone, and a handler left running
+would keep its share of the worker's `max_concurrency`, so clients that sent
+requests and hung up in a loop could fill every worker and have everyone else
+refused with `503`. A request still waiting in the queue when its client leaves
+is dropped without running, unless its route opts out as shown below.
+
+Cancellation is ordinary asyncio cancellation:
+
+- `finally` blocks run, and so does [dependency](dependencies.md) teardown,
+  including an `await` inside it.
+- `CancelledError` is not an `Exception`, so middleware `except Exception`
+  clauses and exception handlers do not see it, and nothing is logged.
+- A database transaction interrupted by it is rolled back by the driver, as it
+  would be by any other error.
+
+Two ways to keep work from being cut short:
+
+```python
+import asyncio
+
+@app.post("/orders")
+async def place_order(request: Request, body: Order):
+    order = await charge_and_record(body)          # may be cancelled
+    await asyncio.shield(send_receipt(order))      # finishes even if cancelled
+    return order
+
+
+@app.post("/webhooks/payment", cancel_on_disconnect=False)
+async def payment_webhook(request: Request):
+    # The sender may time out and retry; this still runs to the end.
+    await process(request.body)
+    return None
+```
+
+`asyncio.shield` protects one step: the handler itself still stops there, but
+the shielded work completes. `cancel_on_disconnect=False`, on any route
+decorator of an app or a router, lets the whole handler finish. Use it for work
+whose side effects must not stop halfway and are not wrapped in a transaction.
+
+Only the wait for the *first* response is covered. Once a handler has answered,
+there is nothing left to cancel; a stream that has started stops through its own
+disconnect handling, as described for [SSE](../streams/sse.md) and
+[WebSockets](../streams/websockets.md). A task a handler starts with
+`asyncio.create_task` is its own task and is not cancelled with it.
 
 ## Shutdown
 

@@ -15,6 +15,7 @@ src/            Rust crate, built as the oxbrook._core extension module
   worker.rs     one OS thread + one asyncio loop per worker, drain callback
   request.rs    the frozen Request handed to handlers
   responder.rs  reply channel, streaming bodies, client-disconnect signal
+  cancel.rs     cancelling a handler whose client is gone
   websocket.rs  tokio-tungstenite bridge
 python/oxbrook/  App, routing, pydantic, OpenAPI, topics, SSE, sockets, runtime
 ```
@@ -65,6 +66,20 @@ watcher that looks every 5 s. A connection with nothing in flight and nothing
 started for three looks gets a graceful shutdown, which is a `GOAWAY` on
 HTTP/2; three looks later it is dropped. The watcher stops once the connection
 turns out to be HTTP/1.1, and requests on HTTP/1.1 are not counted at all.
+
+### Cancellation
+
+A request on a route that allows it carries a small shared cell. If the tokio
+task waiting for the reply ends before the first reply arrives — the client
+closed, the stream was reset, the timeout fired — dropping it marks the cell
+abandoned and queues it for the request's worker, with the same coalesced wake
+as a request. The worker cancels the asyncio task on its own thread; a request
+it pops that is already abandoned is dropped without being started. The tokio
+side only flips an atomic and pushes an `Arc`: the task handle is stored in the
+cell by the worker after `create_task` and removed by the `Responder` when it
+releases the request, so no Python reference is ever dropped on a tokio thread.
+If the abandon races the task's creation, the worker checks the flag again
+after storing the task.
 
 An HTTP/2 connection also counts its running handlers. The count is taken
 before the body is read and released by the `Responder`, together with the

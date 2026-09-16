@@ -49,6 +49,8 @@ pub struct Pending {
     pub body_stream: Option<std::sync::Arc<crate::body::BodyShared>>,
     /// Set for a request on an HTTP/2 connection.
     pub connection: Option<ConnectionLoad>,
+    /// Set for a route that is cancelled when its client leaves.
+    pub cancel: Option<std::sync::Arc<crate::cancel::Cancel>>,
 }
 
 pub struct WorkerQueue {
@@ -62,6 +64,8 @@ pub struct WorkerQueue {
     /// shutdown (I-038). Holding and moving a `Py<PyAny>` touches no refcount,
     /// so the wake path that already exists for requests carries these too.
     wakeups: SegQueue<Py<PyAny>>,
+    /// Requests whose client is gone, to cancel on this loop.
+    cancels: SegQueue<std::sync::Arc<crate::cancel::Cancel>>,
     /// True when a wake byte is in flight and not yet consumed. Collapses a
     /// burst of requests into a single wakeup.
     notified: AtomicBool,
@@ -85,6 +89,7 @@ impl WorkerQueue {
         Self {
             queue: SegQueue::new(),
             wakeups: SegQueue::new(),
+            cancels: SegQueue::new(),
             notified: AtomicBool::new(false),
             waker,
             inflight: AtomicUsize::new(0),
@@ -148,6 +153,17 @@ impl WorkerQueue {
         self.wakeups.pop()
     }
 
+    /// From a tokio thread: a request's client is gone. Carries no Python
+    /// object, only the cell the worker finds the task in.
+    pub fn push_cancel(&self, cell: std::sync::Arc<crate::cancel::Cancel>) {
+        self.cancels.push(cell);
+        self.wake();
+    }
+
+    pub fn pop_cancel(&self) -> Option<std::sync::Arc<crate::cancel::Cancel>> {
+        self.cancels.pop()
+    }
+
     /// Called by the drain callback before it starts popping, so that a
     /// producer racing with the drain always triggers a fresh wakeup.
     pub fn clear_notified(&self) {
@@ -158,7 +174,7 @@ impl WorkerQueue {
     /// a disconnect notification that lands mid-drain and does not re-arm sits
     /// unserved until the next request, which for an idle stream is never.
     pub fn rewake_if_pending(&self) {
-        if !self.queue.is_empty() || !self.wakeups.is_empty() {
+        if !self.queue.is_empty() || !self.wakeups.is_empty() || !self.cancels.is_empty() {
             self.wake();
         }
     }

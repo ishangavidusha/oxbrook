@@ -96,6 +96,9 @@ class RouteInfo:
     """Runs before the handshake; may refuse the upgrade."""
     tool: bool = False
     """Exposed to agents over MCP. Opt-in, never the default."""
+    cancel_on_disconnect: bool = True
+    """Cancel the handler if its client leaves, or its request times out,
+    before it answers."""
     middleware: list[Any] = field(default_factory=list)
     """Middleware from the routers this route was included through, outermost
     first. Runs inside the app's own middleware."""
@@ -228,6 +231,7 @@ def build_route(
     path: str,
     websocket: bool = False,
     tool: bool = False,
+    cancel_on_disconnect: bool = True,
 ) -> RouteInfo:
     where = f"{'WEBSOCKET' if websocket else method} {path} -> {getattr(fn, '__qualname__', fn)}"
 
@@ -422,4 +426,5 @@ def build_route(
         description=description.strip(),
         websocket=websocket,
         tool=tool,
+        cancel_on_disconnect=bool(cancel_on_disconnect),
     )

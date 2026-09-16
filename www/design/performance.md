@@ -188,6 +188,7 @@ that oversubscribing the performance cores hurts.
 | pydantic body validation | ~13% against hello world |
 | `request_timeout=30` | 5-8% |
 | headers on every request, explicit slot release | the rest of ~12% at M6 |
+| cancelling handlers whose client left | ~0.8%, against a route with `cancel_on_disconnect=False` |
 
 The request timeout is on by default despite that cost. A handler that hangs
 otherwise holds a connection and a concurrency slot indefinitely. The same

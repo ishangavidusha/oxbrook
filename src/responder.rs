@@ -6,6 +6,7 @@ use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use tokio::sync::{mpsc, oneshot};
 
+use crate::cancel::Cancel;
 use crate::queue::{ConnectionLoad, WorkerQueue};
 
 /// Chunks a streaming response can buffer before the producer is told to slow
@@ -72,6 +73,8 @@ pub struct Responder {
     /// slot and for the same reason: a client resetting its stream does not
     /// stop the handler, so the count must follow the handler, not the stream.
     connection: Option<ConnectionLoad>,
+    /// Where the handler's task is kept for cancellation, if the route allows it.
+    cancel: Option<Arc<Cancel>>,
     /// Guards against releasing twice, since both `finish` and `Drop` release.
     released: AtomicBool,
 }
@@ -91,6 +94,9 @@ impl Responder {
             if let Some(load) = &self.connection {
                 load.fetch_sub(1, Ordering::Relaxed);
             }
+            if let Some(cancel) = &self.cancel {
+                cancel.forget();
+            }
         }
     }
 }
@@ -101,6 +107,7 @@ impl Responder {
         queue: Arc<WorkerQueue>,
         runtime: tokio::runtime::Handle,
         connection: Option<ConnectionLoad>,
+        cancel: Option<Arc<Cancel>>,
     ) -> Self {
         Self {
             tx: Mutex::new(Some(tx)),
@@ -109,6 +116,7 @@ impl Responder {
             runtime,
             queue,
             connection,
+            cancel,
             released: AtomicBool::new(false),
         }
     }
@@ -128,6 +136,11 @@ impl Responder {
         // CPU-bound handler, and be assigned to the held one — seen on CI as a
         // 255 ms wait (least-loaded assignment, D-031). A stream keeps its slot
         // until `finish`, because it is still being served.
+        // Answered: a client leaving from now on is no reason to cancel. A
+        // stream learns of it through `notify_disconnect` instead.
+        if let Some(cancel) = &self.cancel {
+            cancel.answer();
+        }
         if matches!(reply.body, Body::Full(_)) {
             self.release_once();
         }

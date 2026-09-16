@@ -26,6 +26,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt;
 
 use crate::body::BodyShared;
+use crate::cancel::{Abandon, Cancel};
 use crate::cors::{Cors, CorsTuple};
 use crate::files::{Mount, MountTuple};
 use crate::origin::{OriginsTuple, SocketOrigins};
@@ -83,7 +84,8 @@ pub struct Server {
     http2: bool,
 }
 
-/// (method, path, handler, params, is_websocket, authorizer, streams_body)
+/// (method, path, handler, params, is_websocket, authorizer, streams_body,
+/// cancel_on_disconnect)
 type Route = (
     String,
     String,
@@ -91,6 +93,7 @@ type Route = (
     Vec<SpecTuple>,
     bool,
     Option<Py<PyAny>>,
+    bool,
     bool,
 );
 
@@ -168,7 +171,7 @@ impl Server {
         let handlers: Arc<Vec<Py<PyAny>>> = Arc::new(
             self.routes
                 .iter()
-                .map(|(_, _, handler, _, _, _, _)| handler.clone_ref(py))
+                .map(|(_, _, handler, _, _, _, _, _)| handler.clone_ref(py))
                 .collect(),
         );
 
@@ -176,23 +179,26 @@ impl Server {
         let gates: Arc<Vec<Option<Py<PyAny>>>> = Arc::new(
             self.routes
                 .iter()
-                .map(|(_, _, _, _, _, gate, _)| gate.as_ref().map(|g| g.clone_ref(py)))
+                .map(|(_, _, _, _, _, gate, _, _)| gate.as_ref().map(|g| g.clone_ref(py)))
                 .collect(),
         );
 
         let specs: Vec<RouteTuple> = self
             .routes
             .iter()
-            .map(|(method, path, _, params, websocket, gate, streaming)| {
-                (
-                    method.clone(),
-                    path.clone(),
-                    params.clone(),
-                    *websocket,
-                    gate.is_some(),
-                    *streaming,
-                )
-            })
+            .map(
+                |(method, path, _, params, websocket, gate, streaming, cancel)| {
+                    (
+                        method.clone(),
+                        path.clone(),
+                        params.clone(),
+                        *websocket,
+                        gate.is_some(),
+                        *streaming,
+                        *cancel,
+                    )
+                },
+            )
             .collect();
         let mounts = self
             .mounts
@@ -746,8 +752,8 @@ where
     }
 }
 
-/// Hand the request to the least-loaded worker with room. False means every
-/// worker is at its limit.
+/// Hand the request to the least-loaded worker with room, and say which one
+/// took it. None means every worker is at its limit.
 ///
 /// Round-robin alone sent every Nth request to a loop held by a handler that
 /// computes rather than awaits, where it waited out the whole computation while
@@ -759,7 +765,7 @@ where
 /// The scan starts at a rotating offset so ties still spread evenly, and stops
 /// at the first idle worker, which on a lightly loaded server is the first one
 /// it looks at.
-fn enqueue(state: &State, pending: Pending) -> bool {
+fn enqueue(state: &State, pending: Pending) -> Option<usize> {
     let mut pending = pending;
     let rotation = state.next_worker.fetch_add(1, Ordering::Relaxed);
     let count = state.workers.len();
@@ -797,12 +803,12 @@ fn enqueue(state: &State, pending: Pending) -> bool {
                 if let Some(shared) = body {
                     shared.bind_queue(state.workers[idx].queue.clone());
                 }
-                return true;
+                return Some(idx);
             }
             Err(returned) => pending = returned,
         }
     }
-    false
+    None
 }
 
 /// Complete a WebSocket handshake and hand the socket to a handler.
@@ -871,9 +877,10 @@ async fn upgrade_websocket(
                 gate: true,
                 body_stream: None,
                 connection: None,
+                cancel: None,
             },
         );
-        if !queued {
+        if queued.is_none() {
             return overloaded();
         }
 
@@ -936,9 +943,10 @@ async fn upgrade_websocket(
             gate: false,
             body_stream: None,
             connection: None,
+            cancel: None,
         },
     );
-    if !queued {
+    if queued.is_none() {
         return overloaded();
     }
 
@@ -1142,6 +1150,11 @@ async fn handle(
 
     let (reply_tx, reply_rx) = oneshot::channel::<Reply>();
     let connection = reservation.hand_over();
+    let cancel = state
+        .router
+        .spec(matched.route)
+        .cancellable
+        .then(Cancel::new);
     let pending = Pending {
         route: matched.route,
         params: matched.params,
@@ -1155,11 +1168,12 @@ async fn handle(
         gate: false,
         body_stream: stream.clone(),
         connection: connection.clone(),
+        cancel: cancel.clone(),
     };
 
     // No Python involvement on this thread: plain Rust data plus one byte
     // written to the worker's wake socket.
-    if !enqueue(&state, pending) {
+    let Some(worker) = enqueue(&state, pending) else {
         // The request was dropped with its copy of the count unreleased.
         if let Some(load) = connection {
             load.fetch_sub(1, Ordering::Relaxed);
@@ -1167,7 +1181,11 @@ async fn handle(
         // Every worker is at its limit. Shed the request now rather than let it
         // wait behind work the server has already failed to keep up with.
         return Ok(overloaded());
-    }
+    };
+    // From here until the first reply, this future ending for any reason —
+    // the client closing, an HTTP/2 reset, the timeout below — abandons the
+    // request, and the worker cancels its handler.
+    let abandon = cancel.map(|cell| Abandon::new(cell, &state.workers[worker].queue));
 
     // Waiting only for the *first* reply, so a long-lived SSE stream is not
     // affected: its headers go out as soon as the handler starts streaming.
@@ -1189,6 +1207,9 @@ async fn handle(
 
     match replied {
         Ok(reply) => {
+            if let Some(abandon) = abandon {
+                abandon.answered();
+            }
             // A HEAD reply carries the headers a GET would, including the
             // length it would have had, but no body.
             if head {

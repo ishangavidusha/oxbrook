@@ -126,19 +126,32 @@ class App:
         #: What `lifespan` yielded, while a server is running. Empty otherwise.
         self.state = State()
 
-    def route(self, method: str, path: str, tool: bool = False):
+    def route(
+        self, method: str, path: str, tool: bool = False, *, cancel_on_disconnect: bool = True
+    ):
         """Register a route.
 
         `tool=True` also exposes it to agents over MCP. Opt-in on purpose:
         every route being agent-callable by default would mean an
         administrative delete endpoint is agent-callable by default.
+
+        A handler is cancelled when its client disconnects, or its request
+        times out, before it has answered: `asyncio.CancelledError` is raised
+        at the handler's next `await`, and `finally` blocks and dependency
+        teardown run as usual. Its answer could no longer reach anyone, and
+        left running it would hold a worker's capacity for nothing. Wrap a
+        step that must finish in `asyncio.shield`, or pass
+        `cancel_on_disconnect=False` to let the whole handler run to the end.
+        Once a handler has answered — including a stream that has started —
+        this no longer applies.
         """
         method = method.upper()
 
         def decorator(fn):
             # Validates the handler against its path and fails here, at import
             # time, rather than on the first request.
-            self._add(build_route(fn, method, path, tool=tool))
+            self._add(build_route(fn, method, path, tool=tool,
+                                  cancel_on_disconnect=cancel_on_disconnect))
             return fn
 
         return decorator
@@ -179,14 +192,17 @@ class App:
                 )
         self.routes.append(route)
 
-    def get(self, path: str, tool: bool = False):
-        return self.route("GET", path, tool=tool)
+    def get(self, path: str, tool: bool = False, *, cancel_on_disconnect: bool = True):
+        return self.route("GET", path, tool=tool,
+                          cancel_on_disconnect=cancel_on_disconnect)
 
-    def post(self, path: str, tool: bool = False):
-        return self.route("POST", path, tool=tool)
+    def post(self, path: str, tool: bool = False, *, cancel_on_disconnect: bool = True):
+        return self.route("POST", path, tool=tool,
+                          cancel_on_disconnect=cancel_on_disconnect)
 
-    def put(self, path: str, tool: bool = False):
-        return self.route("PUT", path, tool=tool)
+    def put(self, path: str, tool: bool = False, *, cancel_on_disconnect: bool = True):
+        return self.route("PUT", path, tool=tool,
+                          cancel_on_disconnect=cancel_on_disconnect)
 
     def static(
         self,
@@ -242,11 +258,13 @@ class App:
                                  f"{existing.prefix}")
         self.mounts.append(mount)
 
-    def patch(self, path: str, tool: bool = False):
-        return self.route("PATCH", path, tool=tool)
+    def patch(self, path: str, tool: bool = False, *, cancel_on_disconnect: bool = True):
+        return self.route("PATCH", path, tool=tool,
+                          cancel_on_disconnect=cancel_on_disconnect)
 
-    def delete(self, path: str, tool: bool = False):
-        return self.route("DELETE", path, tool=tool)
+    def delete(self, path: str, tool: bool = False, *, cancel_on_disconnect: bool = True):
+        return self.route("DELETE", path, tool=tool,
+                          cancel_on_disconnect=cancel_on_disconnect)
 
     def include(self, router: Router, prefix: str = "") -> None:
         """Mount a router's routes, under `prefix` if given.
@@ -532,8 +550,10 @@ class App:
         message, where the connection is closed rather than answered.
 
         `request_timeout` is how long to wait for a handler's first response
-        before answering 504. It does not cut short a stream that has already
-        started, so SSE and WebSocket are unaffected. Zero disables it.
+        before answering 504, and the handler is then cancelled unless its route
+        says `cancel_on_disconnect=False`. It does not cut short a stream that
+        has already started, so SSE and WebSocket are unaffected. Zero disables
+        it.
 
         `shutdown_grace` is how long Ctrl-C waits for in-flight requests to
         finish before stopping anyway.
@@ -615,6 +635,7 @@ class App:
                 # the socket handler itself.
                 None if r.authorizer is None else self._compose(r.authorizer, r.middleware),
                 r.stream is not None,
+                r.cancel_on_disconnect and not r.websocket,
             )
             for r in self.routes
         ]

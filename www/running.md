@@ -27,7 +27,7 @@ uses.
 | `--max-connections` | `max_connections` | 2048 | sockets held open |
 | `--max-body` | `max_body` | 16 MiB | largest request body, in bytes |
 | `--max-message` | `max_message` | 16 MiB | largest WebSocket message, in bytes |
-| `--request-timeout` | `request_timeout` | 30.0 | seconds to a handler's first response |
+| `--request-timeout` | `request_timeout` | 30.0 | seconds to a handler's first response, then `504` and the handler is cancelled |
 | `--shutdown-grace` | `shutdown_grace` | 10.0 | seconds a stop waits for in-flight requests |
 | `--tls-cert` | `tls_cert` | none | PEM certificate chain; serve HTTPS |
 | `--tls-key` | `tls_key` | none | PEM private key for that certificate |
@@ -193,10 +193,11 @@ Limits specific to connections:
 | handlers per HTTP/2 connection | 200 | including handlers whose stream the client reset; beyond it, new requests get `503` |
 
 The last row exists because a client can reset a stream the moment it opens
-it. The stream closes at once, but its handler has already started and runs
-to the end, so without a limit that counts those handlers, one connection
-could open and reset streams in a loop and take every worker's capacity
-(CVE-2023-44487, "rapid reset").
+it (CVE-2023-44487, "rapid reset"). The reset [cancels the
+handler](guide/errors.md#when-the-client-leaves), but only once its worker gets
+to it, and a handler with `cancel_on_disconnect=False` is not cancelled at all;
+counting handlers until they actually end keeps one connection from starting
+more of them than its share.
 
 Not supported: reloading a renewed certificate without a restart, client
 certificates, HTTP/3, and the `Upgrade: h2c` handshake from HTTP/1.1. A

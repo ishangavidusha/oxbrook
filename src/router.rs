@@ -153,6 +153,8 @@ pub struct RouteSpec {
     pub streaming: bool,
     /// A static mount, answered in Rust from `State::mounts[i]`.
     pub mount: Option<usize>,
+    /// The handler is cancelled if its client leaves before it answers.
+    pub cancellable: bool,
 }
 
 /// A parameter that was missing or would not coerce. Rendered in the shape
@@ -201,7 +203,8 @@ pub struct Matched {
 pub type SpecTuple = (String, String, String, String, bool);
 
 /// (method, path, params, is_websocket, has_authorizer, streams_body)
-pub type RouteTuple = (String, String, Vec<SpecTuple>, bool, bool, bool);
+/// (method, path, params, websocket, gated, streaming, cancellable)
+pub type RouteTuple = (String, String, Vec<SpecTuple>, bool, bool, bool, bool);
 
 pub struct Router {
     by_method: HashMap<String, Matcher<usize>>,
@@ -218,7 +221,7 @@ impl Router {
         let mut by_method: HashMap<String, Matcher<usize>> = HashMap::new();
         let mut specs = Vec::with_capacity(routes.len());
 
-        for (index, (method, path, params, websocket, gated, streaming)) in
+        for (index, (method, path, params, websocket, gated, streaming, cancellable)) in
             routes.iter().enumerate()
         {
             let mut spec = RouteSpec {
@@ -227,6 +230,7 @@ impl Router {
                 websocket: *websocket,
                 gated: *gated,
                 streaming: *streaming,
+                cancellable: *cancellable,
                 mount: None,
             };
             for (name, kind, source, presence, repeated) in params {
@@ -263,6 +267,7 @@ impl Router {
                     websocket: false,
                     gated: false,
                     streaming: false,
+                    cancellable: false,
                     mount: Some(mount),
                 });
                 by_method

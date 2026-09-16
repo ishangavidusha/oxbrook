@@ -9,6 +9,7 @@
 //! be feature complete.
 
 mod body;
+mod cancel;
 mod cors;
 mod files;
 mod form;
