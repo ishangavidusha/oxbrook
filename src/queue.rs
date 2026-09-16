@@ -22,6 +22,11 @@ use crate::responder::Reply;
 use crate::router::ParamValue;
 use crate::websocket::Shared;
 
+/// Handlers still running for one HTTP/2 connection, counting those whose
+/// stream the client has already reset. Incremented before the request is
+/// queued and decremented when its `Responder` releases its slot.
+pub type ConnectionLoad = std::sync::Arc<AtomicUsize>;
+
 /// One request waiting for a Python worker. No Python objects: the handler is
 /// referenced by index into the shared route table.
 pub struct Pending {
@@ -42,6 +47,8 @@ pub struct Pending {
     pub gate: bool,
     /// Set for a route that streams its body; `body` is then empty.
     pub body_stream: Option<std::sync::Arc<crate::body::BodyShared>>,
+    /// Set for a request on an HTTP/2 connection.
+    pub connection: Option<ConnectionLoad>,
 }
 
 pub struct WorkerQueue {

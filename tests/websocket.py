@@ -300,6 +300,52 @@ async def message_size_cap() -> list[str]:
     return bad
 
 
+async def sockets_hold_connection_slots() -> list[str]:
+    """An open socket counts against `max_connections` until it closes.
+
+    The slot belonged to the connection task, and hyper ends that task when it
+    hands the connection over to the upgrade, so every socket released its slot
+    at the handshake: with `max_connections=2`, five sockets stayed open and
+    plain requests were still accepted beside them.
+    """
+    from oxbrook.testing import TestClient
+
+    bad: list[str] = []
+    limited = App(openapi_url=None, docs_url=None, mcp_url=None)
+
+    @limited.get("/plain")
+    async def limited_plain(_: Request):
+        return {"ok": True}
+
+    @limited.websocket("/echo")
+    async def limited_echo(_: Request, ws):
+        async for message in ws:
+            await ws.send(message)
+
+    with TestClient(limited, workers=1, max_connections=2) as client:
+        url = f"{client.ws_url}/echo"
+        first = await websockets.connect(url)
+        second = await websockets.connect(url)
+        for sock in (first, second):
+            await sock.send("hi")
+            await asyncio.wait_for(sock.recv(), 5)
+
+        async with httpx.AsyncClient(timeout=10) as http:
+            waiting = asyncio.ensure_future(http.get(f"{client.base_url}/plain"))
+            await asyncio.sleep(0.5)
+            if waiting.done():
+                bad.append("a request was served while two sockets held both slots")
+            await first.close()
+            try:
+                reply = await asyncio.wait_for(waiting, 5)
+                if reply.status_code != 200:
+                    bad.append(f"the waiting request got {reply.status_code}")
+            except Exception as e:
+                bad.append(f"closing a socket did not free its slot: {type(e).__name__}")
+        await second.close()
+    return bad
+
+
 def main() -> None:
     failures = registration_checks()
     print(f"registration checks: {'PASS' if not failures else 'FAIL'}")
@@ -318,6 +364,7 @@ def main() -> None:
 
     ws = asyncio.run(run())
     ws += asyncio.run(message_size_cap())
+    ws += asyncio.run(sockets_hold_connection_slots())
     print(f"socket checks:       {'PASS' if not ws else 'FAIL'} "
           f"({WORKERS} loops, {CLIENTS} sockets)")
     failures += ws

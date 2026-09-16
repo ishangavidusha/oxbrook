@@ -19,7 +19,8 @@ oxbrook run main:app --reload
 ```
 
 **Status: working, not API-stable.** Routing and routers, typed parameters,
-pydantic bodies, forms and file uploads, streaming request bodies, static files, backpressure,
+pydantic bodies, forms and file uploads, streaming request bodies, static files,
+HTTPS and HTTP/2, backpressure,
 CORS, OpenAPI 3.1, in-process topics, Server-Sent Events, WebSocket, durable
 topics over Redis, an MCP endpoint, middleware, exception handlers,
 dependencies, lifespans, sessions, logging and a test client all work.
@@ -147,7 +148,6 @@ MIT. See [LICENSE](LICENSE).
 
 ## Known gaps
 
-- No TLS and no HTTP/2. Expects a terminating proxy in front.
 - Middleware does not wrap socket handlers, only their authorizer.
 - MCP is POST/JSON only: no streaming responses, no server-to-client channel,
   no resource subscriptions.

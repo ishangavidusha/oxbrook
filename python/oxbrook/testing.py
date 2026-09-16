@@ -15,11 +15,16 @@ so the client goes through them.
 
 `client.websocket(path)` and `client.mcp(payload)` cover the other two
 transports.
+
+Given `tls_cert` and `tls_key`, the server speaks HTTPS and the client trusts
+that certificate file, so a test certificate issued for the host works without
+touching the system trust store.
 """
 
 import contextlib
 import json
 import socket
+import ssl
 import threading
 from typing import Any
 
@@ -53,8 +58,12 @@ class TestClient:
         self.app = app
         self.host = host
         self.port = port or free_port()
-        self.base_url = f"http://{host}:{self.port}"
-        self.ws_url = f"ws://{host}:{self.port}"
+        # Loaded once the server has started, so a bad certificate is reported
+        # by the server, which says what is wrong with it.
+        self._trust: ssl.SSLContext | None = None
+        secure = "s" if server_options.get("tls_cert") is not None else ""
+        self.base_url = f"http{secure}://{host}:{self.port}"
+        self.ws_url = f"ws{secure}://{host}:{self.port}"
         self.timeout = timeout
         self._options = server_options
         self._server: Any = None
@@ -97,7 +106,12 @@ class TestClient:
         else:
             raise RuntimeError(f"server did not start on {self.base_url}")
 
-        self._client = httpx.Client(base_url=self.base_url, timeout=self.timeout)
+        cert = self._options.get("tls_cert")
+        if cert is not None:
+            self._trust = ssl.create_default_context(cafile=cert)
+        self._client = httpx.Client(
+            base_url=self.base_url, timeout=self.timeout, verify=self._trust or True
+        )
         return self
 
     def stop(self) -> None:
@@ -172,7 +186,7 @@ class TestClient:
         """
         import websockets
 
-        return websockets.connect(f"{self.ws_url}{path}")
+        return websockets.connect(f"{self.ws_url}{path}", ssl=self._trust)
 
     def mcp(self, method: str, params: dict | None = None, request_id: int = 1) -> Any:
         """One JSON-RPC call against the app's MCP endpoint.

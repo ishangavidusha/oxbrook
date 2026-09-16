@@ -9,6 +9,7 @@ workload.
 ```
 src/            Rust crate, built as the oxbrook._core extension module
   server.rs     tokio accept loop, hyper 1, HEAD/405/413, upgrade handshake
+  tls.rs        rustls configuration and ALPN
   router.rs     matchit radix tree per method, path and query coercion
   queue.rs      bounded per-worker queue + socketpair wakeup
   worker.rs     one OS thread + one asyncio loop per worker, drain callback
@@ -20,7 +21,8 @@ python/oxbrook/  App, routing, pydantic, OpenAPI, topics, SSE, sockets, runtime
 
 ## The request path
 
-1. A tokio thread accepts the connection and hyper parses the request.
+1. A tokio thread accepts the connection, completes the TLS handshake if there
+   is one, and hyper parses the request as HTTP/1.1 or HTTP/2.
 2. If the app has a CORS policy, a preflight is answered here. The router
    matches the request against a radix tree built per HTTP method, and coerces
    path and query parameters into owned Rust values. A request that cannot
@@ -52,6 +54,23 @@ queued.
 
 On the way back out, CORS headers are added in Rust to every response, including
 the ones the server produced itself in step 2.
+
+## Connections
+
+With HTTP/2 enabled, one connection handler serves both protocols: over TLS,
+ALPN has already chosen; in cleartext, the first bytes are compared with the
+HTTP/2 preface. hyper times out slow HTTP/1.1 headers itself, but has no idle
+timeout for HTTP/2 or for those first bytes, so each such connection has a
+watcher that looks every 5 s. A connection with nothing in flight and nothing
+started for three looks gets a graceful shutdown, which is a `GOAWAY` on
+HTTP/2; three looks later it is dropped. The watcher stops once the connection
+turns out to be HTTP/1.1, and requests on HTTP/1.1 are not counted at all.
+
+An HTTP/2 connection also counts its running handlers. The count is taken
+before the body is read and released by the `Responder`, together with the
+worker's concurrency slot, rather than when the stream ends: a client can
+reset a stream while its handler keeps running, and a count that followed the
+stream would let one connection start handlers without limit.
 
 ## Invariants
 
@@ -153,7 +172,8 @@ a running server before it was fixed.
 
 ## Known gaps
 
-- No TLS and no HTTP/2. Expects a terminating proxy in front.
+- WebSockets are HTTP/1.1 only; there is no WebSocket over HTTP/2 (RFC 8441).
+- A certificate is read at startup; a renewed one needs a restart.
 - Middleware does not wrap socket handlers, only their authorizer.
 - WebSocket origins are exact strings; there are no patterns for preview
   deployments.

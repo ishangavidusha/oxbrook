@@ -135,7 +135,12 @@ impl Drainer {
             )?;
             let responder = Py::new(
                 py,
-                Responder::new(item.reply, self.queue.clone(), self.runtime.clone()),
+                Responder::new(
+                    item.reply,
+                    self.queue.clone(),
+                    self.runtime.clone(),
+                    item.connection,
+                ),
             )?;
             let coro = match item.websocket {
                 Some(shared) => {

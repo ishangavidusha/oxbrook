@@ -142,6 +142,9 @@ def serve(args: argparse.Namespace) -> int:
         request_timeout=args.request_timeout,
         shutdown_grace=grace,
         max_connections=args.max_connections,
+        tls_cert=args.tls_cert,
+        tls_key=args.tls_key,
+        http2=args.http2,
     )
     return 0
 
@@ -408,6 +411,11 @@ def parser() -> argparse.ArgumentParser:
                            help="directory to watch, repeatable (default: the app directory)")
     serve_cmd.add_argument("--reload-include", action="append", default=[], metavar="GLOB",
                            help="also restart for files matching this, e.g. '*.html'")
+    serve_cmd.add_argument("--tls-cert", metavar="FILE",
+                           help="PEM certificate chain; serve HTTPS (needs --tls-key)")
+    serve_cmd.add_argument("--tls-key", metavar="FILE", help="PEM private key for --tls-cert")
+    serve_cmd.add_argument("--http2", action=argparse.BooleanOptionalAction, default=True,
+                           help="serve HTTP/2 as well as HTTP/1.1 (default: on)")
     serve_cmd.add_argument("--access-log", action="store_true", help="log every request")
     serve_cmd.add_argument("--log-level", default="info",
                            choices=["debug", "info", "warning", "error"])

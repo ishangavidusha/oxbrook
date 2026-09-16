@@ -96,7 +96,7 @@ jobs:
         run: |
           uv venv --python ${{ matrix.python }} ${{ matrix.venv }}
           uv pip install --python ${{ matrix.venv }}/bin/python \
-            maturin httpx openapi-spec-validator websockets redis mcp coverage pydantic
+            maturin "httpx[http2]" cryptography openapi-spec-validator websockets redis mcp coverage pydantic
 
       - name: Confirm the interpreter is the one asked for
         run: |

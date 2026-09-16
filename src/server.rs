@@ -9,15 +9,17 @@ use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Full, LengthLimitError, Limited, StreamBody};
 use hyper::body::{Frame, Incoming};
 use hyper::header::{
-    ALLOW, CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, RETRY_AFTER, SEC_WEBSOCKET_ACCEPT,
+    ALLOW, CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, HOST, RETRY_AFTER, SEC_WEBSOCKET_ACCEPT,
     SEC_WEBSOCKET_KEY, SEC_WEBSOCKET_VERSION, UPGRADE,
 };
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
-use hyper::{Method, Response, StatusCode};
-use hyper_util::rt::{TokioIo, TokioTimer};
+use hyper::{Method, Response, StatusCode, Version};
+use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
+use hyper_util::server::conn::auto;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpListener;
 use tokio::sync::{oneshot, Notify};
 use tokio_stream::wrappers::ReceiverStream;
@@ -27,9 +29,10 @@ use crate::body::BodyShared;
 use crate::cors::{Cors, CorsTuple};
 use crate::files::{Mount, MountTuple};
 use crate::origin::{OriginsTuple, SocketOrigins};
-use crate::queue::Pending;
+use crate::queue::{ConnectionLoad, Pending};
 use crate::responder::{Body, Reply};
 use crate::router::{RouteError, RouteTuple, Router, SpecTuple};
+use crate::tls::TlsTuple;
 use crate::websocket;
 use crate::worker::Worker;
 
@@ -75,6 +78,9 @@ pub struct Server {
     cors: Option<CorsTuple>,
     socket_origins: OriginsTuple,
     mounts: Vec<MountTuple>,
+    /// Certificate and key paths; None serves plain HTTP.
+    tls: Option<TlsTuple>,
+    http2: bool,
 }
 
 /// (method, path, handler, params, is_websocket, authorizer, streams_body)
@@ -91,7 +97,7 @@ type Route = (
 #[pymethods]
 impl Server {
     #[new]
-    /// Sixteen arguments, which clippy dislikes. This is the Python
+    /// Eighteen arguments, which clippy dislikes. This is the Python
     /// constructor: the signature *is* the API, and collapsing it into a
     /// config object would move the same fields behind a dict that Python has
     /// to build on every server start.
@@ -113,6 +119,8 @@ impl Server {
         cors: Option<CorsTuple>,
         socket_origins: OriginsTuple,
         mounts: Vec<MountTuple>,
+        tls: Option<TlsTuple>,
+        http2: bool,
     ) -> Self {
         Self {
             host,
@@ -135,6 +143,8 @@ impl Server {
             cors,
             socket_origins,
             mounts,
+            tls,
+            http2,
         }
     }
 
@@ -193,6 +203,14 @@ impl Server {
             .map_err(PyValueError::new_err)?;
         let patterns: Vec<_> = mounts.iter().map(|m| m.patterns()).collect();
         let router = Arc::new(Router::build(&specs, &patterns).map_err(PyValueError::new_err)?);
+        // Read before any worker starts, so a missing or mismatched
+        // certificate is a startup error with nothing to tear down.
+        let tls = self
+            .tls
+            .as_ref()
+            .map(|files| crate::tls::acceptor(files, self.http2))
+            .transpose()
+            .map_err(PyValueError::new_err)?;
         let cors = self
             .cors
             .clone()
@@ -258,12 +276,16 @@ impl Server {
             .map_err(|e| PyRuntimeError::new_err(format!("bad address: {e}")))?;
 
         let shutdown = state.clone();
-        let stop = self.stop.clone();
-        let quiet = self.quiet;
-        let slots = self.max_connections;
-        let result: Result<(), String> = py.detach(|| {
-            runtime.block_on(serve_loop(addr, state, stop, slots, quiet, handle_signals))
-        });
+        let listen = Listen {
+            addr,
+            stop: self.stop.clone(),
+            max_connections: self.max_connections,
+            quiet: self.quiet,
+            handle_signals,
+            tls,
+            http2: self.http2,
+        };
+        let result: Result<(), String> = py.detach(|| runtime.block_on(serve_loop(listen, state)));
 
         // Draining. The listener has stopped, but connection tasks are still
         // on the runtime and handlers are still on the worker loops, so wait
@@ -312,20 +334,221 @@ impl Server {
     }
 }
 
-async fn serve_loop(
+struct Listen {
     addr: SocketAddr,
-    state: Arc<State>,
     stop: Arc<Notify>,
     max_connections: usize,
     quiet: bool,
     handle_signals: bool,
-) -> Result<(), String> {
+    tls: Option<tokio_rustls::TlsAcceptor>,
+    http2: bool,
+}
+
+/// How long a connection may hold a slot with nothing to show for it: request
+/// headers not yet complete, a TLS handshake not yet finished, or, on HTTP/2,
+/// no request in flight at all.
+const IDLE: Duration = Duration::from_secs(15);
+
+/// Streams one HTTP/2 client may have open at once, and handlers it may have
+/// running at once. The second is the one that matters: a stream the client
+/// resets is closed immediately, while its handler runs on, so a client that
+/// opened and reset streams in a loop could start handlers without limit and
+/// take every worker's capacity from one connection (CVE-2023-44487).
+const MAX_STREAMS: u32 = 200;
+
+/// The connection handler, built once and shared by every connection.
+enum Protocols {
+    /// HTTP/1.1 alone, as before HTTP/2 existed here: `http2=False`.
+    Http1(http1::Builder),
+    /// Either protocol, chosen per connection by the client's first bytes.
+    Auto(auto::Builder<TokioExecutor>),
+}
+
+impl Protocols {
+    fn build(http2: bool) -> Self {
+        if !http2 {
+            let mut builder = http1::Builder::new();
+            builder
+                // hyper panics on a timeout with no timer wired in, so this
+                // line is load-bearing, not decorative.
+                .timer(TokioTimer::new())
+                // What stops a client from opening a connection and dribbling
+                // request headers forever. It also closes an idle keep-alive
+                // connection.
+                .header_read_timeout(Some(IDLE));
+            return Protocols::Http1(builder);
+        }
+        let mut builder = auto::Builder::new(TokioExecutor::new());
+        builder
+            .http1()
+            .timer(TokioTimer::new())
+            .header_read_timeout(Some(IDLE));
+        builder
+            .http2()
+            .timer(TokioTimer::new())
+            .max_concurrent_streams(MAX_STREAMS)
+            // Pings find a peer that vanished without closing, which on a
+            // quiet event stream nothing else would notice.
+            .keep_alive_interval(Some(Duration::from_secs(20)))
+            .keep_alive_timeout(Duration::from_secs(20));
+        Protocols::Auto(builder)
+    }
+}
+
+/// A connection's place under `max_connections`, shared with any WebSocket
+/// the connection is upgraded into. hyper ends the connection task when it
+/// hands the socket over, so a permit held by that task alone was released at
+/// every handshake, and sockets were never counted.
+#[derive(Clone)]
+struct ConnectionSlot(#[allow(dead_code)] Arc<tokio::sync::OwnedSemaphorePermit>);
+
+/// Only an upgrade can outlive its connection, so only an upgrade request
+/// carries the slot. Everything else pays one header lookup.
+fn lend_slot(req: &mut hyper::Request<Incoming>, slot: &ConnectionSlot) {
+    if req.headers().contains_key(UPGRADE) {
+        req.extensions_mut().insert(slot.clone());
+    }
+}
+
+/// Requests on one HTTP/2 connection: how many are in flight, and how many
+/// have started, which tells the idle check whether anything happened between
+/// two of its looks without reading a clock per request.
+#[derive(Default)]
+struct Activity {
+    in_flight: AtomicUsize,
+    started: AtomicUsize,
+    /// Handlers running, which outlives `in_flight` when a stream is reset.
+    running: ConnectionLoad,
+    /// Set by the first HTTP/1 request. hyper's header timeout already closes
+    /// an idle HTTP/1 connection, so from then on nothing is tracked.
+    http1: std::sync::atomic::AtomicBool,
+}
+
+impl Activity {
+    fn begin(self: &Arc<Self>) -> Busy {
+        self.in_flight.fetch_add(1, Ordering::Relaxed);
+        self.started.fetch_add(1, Ordering::Relaxed);
+        Busy(self.clone())
+    }
+}
+
+/// Held by a request until its response body is dropped, which is when hyper
+/// has finished sending it or the client has reset the stream.
+struct Busy(Arc<Activity>);
+
+impl Drop for Busy {
+    fn drop(&mut self) {
+        self.0.in_flight.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+async fn connection<S>(stream: S, protocols: &Protocols, state: Arc<State>, slot: ConnectionSlot)
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let io = TokioIo::new(stream);
+    let builder = match protocols {
+        Protocols::Http1(builder) => {
+            let svc = service_fn(move |mut req| {
+                lend_slot(&mut req, &slot);
+                serve_request(req, state.clone(), None)
+            });
+            // `with_upgrades` is required for 101 responses to hand the
+            // connection over instead of closing it.
+            let _ = builder.serve_connection(io, svc).with_upgrades().await;
+            return;
+        }
+        Protocols::Auto(builder) => builder,
+    };
+
+    let activity = Arc::new(Activity::default());
+    let tracked = activity.clone();
+    let svc = service_fn(move |mut req: hyper::Request<Incoming>| {
+        lend_slot(&mut req, &slot);
+        let (busy, running) = if req.version() == Version::HTTP_2 {
+            (Some(tracked.begin()), Some(tracked.running.clone()))
+        } else {
+            // Read first: a store on every request would bounce the cache
+            // line between threads for nothing.
+            if !tracked.http1.load(Ordering::Relaxed) {
+                tracked.http1.store(true, Ordering::Relaxed);
+            }
+            (None, None)
+        };
+        let state = state.clone();
+        async move {
+            let response = serve_request(req, state, running).await?;
+            let Some(busy) = busy else {
+                return Ok(response);
+            };
+            Ok::<_, Infallible>(response.map(|body| {
+                body.map_frame(move |frame| {
+                    let _held = &busy;
+                    frame
+                })
+                .boxed()
+            }))
+        }
+    });
+    // With upgrades, so an HTTP/1.1 client can still open a WebSocket.
+    let mut conn = std::pin::pin!(builder.serve_connection_with_upgrades(io, svc));
+
+    // hyper has no idle timeout for HTTP/2, and none for the bytes it reads to
+    // tell the protocols apart, so a client that connected and said nothing
+    // held its slot until the process exited. This looks every fifth of IDLE:
+    // a connection with nothing in flight and nothing started for a whole
+    // IDLE is asked to close, and dropped if it is still idle one IDLE later.
+    const LOOKS: u32 = 3;
+    let mut ticks = tokio::time::interval(IDLE / LOOKS);
+    ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    ticks.tick().await;
+    let mut seen = activity.started.load(Ordering::Relaxed);
+    let mut quiet = 0;
+    loop {
+        tokio::select! {
+            _ = conn.as_mut() => return,
+            _ = ticks.tick() => {
+                if activity.http1.load(Ordering::Relaxed) {
+                    break;
+                }
+                let started = activity.started.load(Ordering::Relaxed);
+                if started != seen || activity.in_flight.load(Ordering::Relaxed) > 0 {
+                    seen = started;
+                    quiet = 0;
+                    continue;
+                }
+                quiet += 1;
+                if quiet == LOOKS {
+                    // GOAWAY on HTTP/2, so the client opens a new connection
+                    // for its next request rather than seeing this one fail.
+                    conn.as_mut().graceful_shutdown();
+                } else if quiet == 2 * LOOKS {
+                    return;
+                }
+            }
+        }
+    }
+    let _ = conn.await;
+}
+
+async fn serve_loop(listen: Listen, state: Arc<State>) -> Result<(), String> {
+    let Listen {
+        addr,
+        stop,
+        max_connections,
+        quiet,
+        handle_signals,
+        tls,
+        http2,
+    } = listen;
     let listener = TcpListener::bind(addr)
         .await
         .map_err(|e| format!("bind {addr}: {e}"))?;
     if !quiet {
-        println!("Oxbrook listening on http://{addr}");
+        let scheme = if tls.is_some() { "https" } else { "http" };
+        println!("Oxbrook listening on {scheme}://{addr}");
     }
+    let protocols = Arc::new(Protocols::build(http2));
 
     // SIGTERM is how a container runtime, systemd or Kubernetes asks a process
     // to stop, and it gets the same graceful drain as Ctrl-C. Unhandled, its
@@ -363,24 +586,24 @@ async fn serve_loop(
                 let Ok((stream, _)) = accepted else { continue };
                 let _ = stream.set_nodelay(true);
                 let state = state.clone();
+                let protocols = protocols.clone();
+                let tls = tls.clone();
                 tokio::spawn(async move {
-                    // Released when the connection task ends.
-                    let _permit = permit;
-                    let io = TokioIo::new(stream);
-                    let svc = service_fn(move |req| serve_request(req, state.clone()));
-                    // `with_upgrades` is required for 101 responses to hand
-                    // the connection over instead of closing it.
-                    //
-                    // The header timeout is what stops a client from opening a
-                    // connection and dribbling request headers forever.
-                    let _ = http1::Builder::new()
-                        // hyper panics on a timeout with no timer wired in,
-                        // so this line is load-bearing, not decorative.
-                        .timer(TokioTimer::new())
-                        .header_read_timeout(Some(Duration::from_secs(15)))
-                        .serve_connection(io, svc)
-                        .with_upgrades()
-                        .await;
+                    // Released when the connection task ends, or when the
+                    // last socket upgraded from it closes, whichever is later.
+                    let slot = ConnectionSlot(Arc::new(permit));
+                    match tls {
+                        None => connection(stream, &protocols, state, slot).await,
+                        // Bounded like request headers: a client that connects
+                        // and never finishes the handshake holds a slot too.
+                        Some(acceptor) => {
+                            if let Ok(Ok(stream)) =
+                                tokio::time::timeout(IDLE, acceptor.accept(stream)).await
+                            {
+                                connection(stream, &protocols, state, slot).await;
+                            }
+                        }
+                    }
                 });
             }
             _ = async {
@@ -647,6 +870,7 @@ async fn upgrade_websocket(
                 websocket: None,
                 gate: true,
                 body_stream: None,
+                connection: None,
             },
         );
         if !queued {
@@ -711,6 +935,7 @@ async fn upgrade_websocket(
             websocket: Some(shared.clone()),
             gate: false,
             body_stream: None,
+            connection: None,
         },
     );
     if !queued {
@@ -718,9 +943,12 @@ async fn upgrade_websocket(
     }
 
     let upgrade = hyper::upgrade::on(&mut req);
+    let slot = req.extensions_mut().remove::<ConnectionSlot>();
     // Copied out before the move: `state` does not travel into the task.
     let max_message = state.max_message;
     tokio::spawn(async move {
+        // The socket holds its connection's place until it closes.
+        let _slot = slot;
         match upgrade.await {
             Ok(upgraded) => {
                 websocket::serve(TokioIo::new(upgraded), shared, outgoing, max_message).await;
@@ -743,9 +971,10 @@ async fn upgrade_websocket(
 async fn serve_request(
     req: hyper::Request<Incoming>,
     state: Arc<State>,
+    connection: Option<ConnectionLoad>,
 ) -> Result<Response<Out>, Infallible> {
     let Some(cors) = state.cors.clone() else {
-        return handle(req, state).await;
+        return handle(req, state, connection).await;
     };
     if Cors::is_preflight(req.method(), req.headers()) {
         return Ok(match cors.preflight(req.headers()) {
@@ -767,7 +996,7 @@ async fn serve_request(
         });
     }
     let origin = req.headers().get(hyper::header::ORIGIN).cloned();
-    let mut response = handle(req, state).await?;
+    let mut response = handle(req, state, connection).await?;
     // A socket upgrade is not subject to CORS; an authorizer checks `Origin`.
     if response.status() != StatusCode::SWITCHING_PROTOCOLS {
         cors.decorate(origin.as_ref(), response.headers_mut());
@@ -775,10 +1004,54 @@ async fn serve_request(
     Ok(response)
 }
 
+/// A place in an HTTP/2 connection's handler count, given back if the request
+/// is answered before it reaches a worker.
+struct Reservation(Option<ConnectionLoad>);
+
+impl Reservation {
+    /// None when the connection already has `MAX_STREAMS` handlers running.
+    fn take(connection: Option<ConnectionLoad>) -> Option<Self> {
+        if let Some(load) = &connection {
+            if load.fetch_add(1, Ordering::Relaxed) >= MAX_STREAMS as usize {
+                load.fetch_sub(1, Ordering::Relaxed);
+                return None;
+            }
+        }
+        Some(Self(connection))
+    }
+
+    /// The count now belongs to the request's `Responder`.
+    fn hand_over(mut self) -> Option<ConnectionLoad> {
+        self.0.take()
+    }
+}
+
+impl Drop for Reservation {
+    fn drop(&mut self) {
+        if let Some(load) = &self.0 {
+            load.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+}
+
 async fn handle(
     mut req: hyper::Request<Incoming>,
     state: Arc<State>,
+    connection: Option<ConnectionLoad>,
 ) -> Result<Response<Out>, Infallible> {
+    // HTTP/2 carries the host in the request line's `:authority`, which hyper
+    // puts in the URI and not in the headers. Copied across, so a handler
+    // reads `host` the same way whichever protocol the client chose.
+    if req.version() == Version::HTTP_2 && !req.headers().contains_key(HOST) {
+        if let Some(value) = req
+            .uri()
+            .authority()
+            .and_then(|a| hyper::header::HeaderValue::from_str(a.as_str()).ok())
+        {
+            req.headers_mut().insert(HOST, value);
+        }
+    }
+
     // HTTP requires HEAD wherever GET is allowed, so a miss on HEAD retries as
     // GET and the body is dropped from the reply below.
     let head = req.method() == Method::HEAD;
@@ -828,6 +1101,11 @@ async fn handle(
         return Ok(upgrade_websocket(req, matched, state).await);
     }
 
+    // Refused before the body is read, since reading it is work too.
+    let Some(reservation) = Reservation::take(connection) else {
+        return Ok(overloaded());
+    };
+
     let method = req.method().as_str().to_owned();
     let path = req.uri().path().to_owned();
     let query = req.uri().query().map(str::to_owned);
@@ -863,6 +1141,7 @@ async fn handle(
     };
 
     let (reply_tx, reply_rx) = oneshot::channel::<Reply>();
+    let connection = reservation.hand_over();
     let pending = Pending {
         route: matched.route,
         params: matched.params,
@@ -875,11 +1154,16 @@ async fn handle(
         websocket: None,
         gate: false,
         body_stream: stream.clone(),
+        connection: connection.clone(),
     };
 
     // No Python involvement on this thread: plain Rust data plus one byte
     // written to the worker's wake socket.
     if !enqueue(&state, pending) {
+        // The request was dropped with its copy of the count unreleased.
+        if let Some(load) = connection {
+            load.fetch_sub(1, Ordering::Relaxed);
+        }
         // Every worker is at its limit. Shed the request now rather than let it
         // wait behind work the server has already failed to keep up with.
         return Ok(overloaded());

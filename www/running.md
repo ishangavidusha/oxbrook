@@ -29,6 +29,9 @@ uses.
 | `--max-message` | `max_message` | 16 MiB | largest WebSocket message, in bytes |
 | `--request-timeout` | `request_timeout` | 30.0 | seconds to a handler's first response |
 | `--shutdown-grace` | `shutdown_grace` | 10.0 | seconds a stop waits for in-flight requests |
+| `--tls-cert` | `tls_cert` | none | PEM certificate chain; serve HTTPS |
+| `--tls-key` | `tls_key` | none | PEM private key for that certificate |
+| `--no-http2` | `http2=False` | HTTP/2 on | serve HTTP/1.1 only |
 
 The command also takes `--access-log`, to log every request, and
 `--log-level`, which sets the level of Oxbrook's own loggers.
@@ -130,15 +133,83 @@ Lower it for slow handlers, where a deep backlog only adds latency before an
 inevitable client timeout. Raise it to absorb larger bursts of fast requests.
 
 `max_connections` is a separate limit, because an idle keep-alive connection
-costs a file descriptor without ever reaching a worker. At that limit the
+costs a file descriptor without ever reaching a worker. An open WebSocket
+counts as the connection it was upgraded from, until it closes. At that limit the
 server stops accepting rather than refusing, so the wait lands in the OS
 backlog where a client's own connect timeout governs it.
 
+## HTTPS and HTTP/2
+
+```bash
+oxbrook run main:app --host 0.0.0.0 --port 443 \
+    --tls-cert /etc/certs/fullchain.pem --tls-key /etc/certs/privkey.pem
+```
+
+```python
+app.run(host="0.0.0.0", port=443,
+        tls_cert="/etc/certs/fullchain.pem", tls_key="/etc/certs/privkey.pem")
+```
+
+The certificate file holds the chain, the server's own certificate first, as
+Let's Encrypt's `fullchain.pem` does; the key is PKCS#8, PKCS#1 or SEC1 PEM.
+Both are read once, when the server starts, and checked against each other: a
+missing file, an empty one or a key that belongs to another certificate stops
+the server with a message naming the file, before it binds. TLS 1.2 and 1.3
+are served; nothing older.
+
+With TLS, the port speaks HTTPS only. A plain `http://` request to it fails,
+so redirecting HTTP to HTTPS takes a second listener or a proxy.
+
+**HTTP/2 is on by default**, alongside HTTP/1.1, and needs nothing from the
+app: routes, middleware, streaming bodies, SSE and static files behave the
+same. Over TLS a client asks for it during the handshake (ALPN), which is what
+every browser does. On a plain port the server recognises HTTP/2 from a
+connection's first bytes, but only clients configured for HTTP/2 without TLS,
+such as `curl --http2-prior-knowledge` or `httpx.Client(http1=False,
+http2=True)`, will use it; browsers never do. `http2=False`, or `--no-http2`,
+serves HTTP/1.1 alone and stops offering HTTP/2 during the handshake.
+
+The `:authority` of an HTTP/2 request is copied into the `host` header when the
+client sent none, so a handler reads the host the same way over either
+protocol.
+
+What HTTP/2 does not change:
+
+- **WebSockets use HTTP/1.1.** The server does not offer WebSockets over
+  HTTP/2, so a browser opens a separate HTTP/1.1 connection for a socket, as it
+  does for any server that does not offer them. A socket route asked over
+  HTTP/2 answers `426`.
+- **Capacity limits are the same.** One HTTP/2 connection can carry many
+  requests at once, and each one still counts against `max_concurrency`.
+
+Limits specific to connections:
+
+| limit | value | why |
+|---|---|---|
+| TLS handshake | 15 s | a client that connects and never finishes the handshake would hold a slot |
+| request headers, HTTP/1.1 | 15 s | the same for headers sent slowly; also closes an idle keep-alive connection |
+| idle HTTP/2 connection | 15–20 s | with nothing in flight, the server sends `GOAWAY`; a client that does not acknowledge it is dropped 15 s later |
+| streams per HTTP/2 connection | 200 | concurrent requests one client may have open |
+| handlers per HTTP/2 connection | 200 | including handlers whose stream the client reset; beyond it, new requests get `503` |
+
+The last row exists because a client can reset a stream the moment it opens
+it. The stream closes at once, but its handler has already started and runs
+to the end, so without a limit that counts those handlers, one connection
+could open and reset streams in a loop and take every worker's capacity
+(CVE-2023-44487, "rapid reset").
+
+Not supported: reloading a renewed certificate without a restart, client
+certificates, HTTP/3, and the `Upgrade: h2c` handshake from HTTP/1.1. A
+certificate renewed on disk takes effect at the next start; with `--reload` in
+development, `--reload-include '*.pem'` does that.
+
 ## In front of it
 
-Oxbrook speaks HTTP/1.1 with no TLS and no HTTP/2. **Put a terminating proxy in
-front of it** — nginx, Caddy, a cloud load balancer — and let that handle TLS,
-HTTP/2 and whatever else the edge needs.
+A terminating proxy in front — nginx, Caddy, a cloud load balancer — is still
+the usual arrangement in production: it renews certificates, redirects plain
+HTTP, and holds slow clients. Oxbrook's own TLS suits a service with no proxy
+at all, an internal service that must still be encrypted, and development
+against a browser feature that requires HTTPS.
 
 WebSocket upgrades are accepted from the app's own origin, which is recognised
 through `Host` or `X-Forwarded-Host`. A proxy that rewrites `Host` without

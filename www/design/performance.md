@@ -266,6 +266,25 @@ per call through the async file API, the same small file measured 22,670 req/s.
 Symlink containment checks only the path components inside the mount, rather
 than canonicalising the whole path, which walks every directory from `/`.
 
+## HTTPS and HTTP/2
+
+The hello-world route five ways, 64 requests in flight (HTTP/2: 8 connections
+of 8 streams), medians of five interleaved rounds, `bench/protocols.py`:
+
+| mode | req/s | vs HTTP/1.1 only | p99 ms |
+|---|---:|---:|---:|
+| HTTP/1.1, `http2=False` | 190,726 | 1.00x | 1.76 |
+| HTTP/1.1, HTTP/2 enabled | 190,425 | 1.00x | 1.75 |
+| HTTP/2 cleartext | 221,704 | 1.16x | 1.33 |
+| HTTPS, HTTP/1.1 | 181,676 | 0.95x | 2.00 |
+| HTTPS, HTTP/2 | 213,864 | 1.12x | 1.38 |
+
+Leaving HTTP/2 enabled costs a plain HTTP/1.1 client nothing measurable: the
+first bytes are read once per connection, and HTTP/1.1 requests are not counted
+by the idle check. TLS costs about 5% on established connections; handshakes
+are not in these numbers, since the connections are reused. HTTP/2 is faster
+here because many requests share a connection's writes.
+
 ## What has not been measured
 
 These are open, not assumed. An unmeasured claim is not a result:
@@ -281,6 +300,8 @@ These are open, not assumed. An unmeasured claim is not a result:
 - **Form parsing and streaming uploads.** Both are verified for correctness and
   for memory — a 200 MB upload to a slow reader stays within a few megabytes —
   but neither has a throughput number.
+- **TLS handshakes per second**, which is what a server with many short-lived
+  clients pays.
 - **The WebSocket ceiling.** Above 100 connections the Python load generator
   saturates before the server does; finding the server's limit needs a faster
   client.

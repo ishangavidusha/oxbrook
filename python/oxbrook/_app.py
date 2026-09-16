@@ -1,5 +1,6 @@
 import inspect
 import json
+import os
 import sys
 from typing import Any
 
@@ -512,6 +513,10 @@ class App:
         shutdown_grace: float = DEFAULT_SHUTDOWN_GRACE,
         max_connections: int = DEFAULT_MAX_CONNECTIONS,
         max_message: int = DEFAULT_MAX_MESSAGE,
+        *,
+        tls_cert: str | os.PathLike[str] | None = None,
+        tls_key: str | os.PathLike[str] | None = None,
+        http2: bool = True,
     ) -> None:
         """Serve until interrupted.
 
@@ -535,10 +540,20 @@ class App:
 
         `max_connections` caps sockets held open. At the limit the server stops
         accepting rather than refusing, so the wait lands in the OS backlog.
+
+        `tls_cert` and `tls_key` are PEM files, the certificate chain with the
+        server's certificate first and its private key. Given both, the server
+        speaks HTTPS only; they are read once, at startup.
+
+        `http2` serves HTTP/2 alongside HTTP/1.1: negotiated through ALPN over
+        TLS, and recognised by its opening bytes on a plain connection, where
+        only clients configured for it will use it. `False` serves HTTP/1.1
+        alone.
         """
         server = self.build_server(
             host, port, workers, max_concurrency, max_body, request_timeout,
             shutdown_grace, max_connections, max_message, announce=True,
+            tls_cert=tls_cert, tls_key=tls_key, http2=http2,
         )
         try:
             server.serve()
@@ -557,6 +572,10 @@ class App:
         max_connections: int = DEFAULT_MAX_CONNECTIONS,
         max_message: int = DEFAULT_MAX_MESSAGE,
         announce: bool = False,
+        *,
+        tls_cert: str | os.PathLike[str] | None = None,
+        tls_key: str | os.PathLike[str] | None = None,
+        http2: bool = True,
     ):
         """Prepare a server without starting it.
 
@@ -566,6 +585,9 @@ class App:
         """
         from ._core import Server
 
+        if (tls_cert is None) != (tls_key is None):
+            raise ValueError("tls_cert and tls_key are needed together")
+        tls = None if tls_cert is None else (os.fspath(tls_cert), os.fspath(tls_key))
         workers = workers or default_workers()
         mode = "GIL" if gil_enabled() else "free-threaded"
         if announce:
@@ -614,6 +636,8 @@ class App:
             None if self.cors is None else self.cors.as_spec(),
             self._socket_origins(),
             [mount.as_spec() for mount in self.mounts],
+            tls,
+            bool(http2),
         )
         return ServerHandle(core, lifecycle)
 

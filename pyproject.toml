@@ -21,7 +21,7 @@ oxb = "oxbrook._cli:entry"
 [project.optional-dependencies]
 redis = ["redis>=5"]
 bench = ["uvicorn", "granian", "fastapi"]
-test = ["httpx", "openapi-spec-validator", "websockets", "redis>=5", "mcp", "coverage"]
+test = ["httpx[http2]", "cryptography", "openapi-spec-validator", "websockets", "redis>=5", "mcp", "coverage"]
 docs = ["mkdocs-material>=9.5", "mkdocstrings[python]>=0.26", "ruff"]
 
 [tool.maturin]

@@ -44,5 +44,9 @@ if __name__ == "__main__":
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8000)
     p.add_argument("--workers", type=int, default=None)
+    p.add_argument("--tls-cert")
+    p.add_argument("--tls-key")
+    p.add_argument("--no-http2", action="store_true")
     a = p.parse_args()
-    app.run(host=a.host, port=a.port, workers=a.workers)
+    app.run(host=a.host, port=a.port, workers=a.workers,
+            tls_cert=a.tls_cert, tls_key=a.tls_key, http2=not a.no_http2)

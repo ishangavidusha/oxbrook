@@ -6,7 +6,7 @@ use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::queue::WorkerQueue;
+use crate::queue::{ConnectionLoad, WorkerQueue};
 
 /// Chunks a streaming response can buffer before the producer is told to slow
 /// down. Small on purpose: a deep buffer only hides a slow client until memory
@@ -68,6 +68,10 @@ pub struct Responder {
     /// Holding the worker's queue lets the in-flight count fall when the
     /// request is finished.
     queue: Arc<WorkerQueue>,
+    /// The HTTP/2 connection's count of running handlers, released with the
+    /// slot and for the same reason: a client resetting its stream does not
+    /// stop the handler, so the count must follow the handler, not the stream.
+    connection: Option<ConnectionLoad>,
     /// Guards against releasing twice, since both `finish` and `Drop` release.
     released: AtomicBool,
 }
@@ -84,6 +88,9 @@ impl Responder {
     fn release_once(&self) {
         if !self.released.swap(true, Ordering::SeqCst) {
             self.queue.release();
+            if let Some(load) = &self.connection {
+                load.fetch_sub(1, Ordering::Relaxed);
+            }
         }
     }
 }
@@ -93,6 +100,7 @@ impl Responder {
         tx: oneshot::Sender<Reply>,
         queue: Arc<WorkerQueue>,
         runtime: tokio::runtime::Handle,
+        connection: Option<ConnectionLoad>,
     ) -> Self {
         Self {
             tx: Mutex::new(Some(tx)),
@@ -100,6 +108,7 @@ impl Responder {
             body_dropped: Mutex::new(None),
             runtime,
             queue,
+            connection,
             released: AtomicBool::new(false),
         }
     }

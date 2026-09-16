@@ -66,6 +66,19 @@ TestClient(app, max_concurrency=1, request_timeout=1.0)
 Which is how the backpressure and timeout paths are tested: set the limit to
 something you can reach from one test.
 
+With `tls_cert` and `tls_key`, the client talks HTTPS and trusts that
+certificate file, so a test certificate issued for `127.0.0.1` works without
+touching the system trust store:
+
+```python
+with TestClient(app, tls_cert="tests/cert.pem", tls_key="tests/key.pem") as client:
+    assert client.base_url.startswith("https://")
+    assert client.get("/").status_code == 200
+```
+
+The client itself speaks HTTP/1.1. For HTTP/2, use `httpx.Client(http2=True)`
+against `client.base_url`, with `httpx[http2]` installed.
+
 ## Forms, uploads and CORS
 
 httpx builds form bodies itself, so a form handler is tested the way a browser

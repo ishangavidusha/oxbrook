@@ -31,8 +31,8 @@ Three things, in one process:
 **A REST framework.** A radix-tree router with typed path and query parameters
 coerced in Rust, pydantic request and response bodies, forms and file uploads,
 streaming request bodies, static files, routers, middleware, exception handlers, dependency
-injection, per-worker lifespans, CORS, sessions, and OpenAPI 3.1 generated from
-the same route metadata the router uses.
+injection, per-worker lifespans, CORS, sessions, HTTPS and HTTP/2, and OpenAPI
+3.1 generated from the same route metadata the router uses.
 
 **A stream engine.** Named topics with fan-out, backpressure policies, and
 subscribers spread across every worker loop in the process. Server-Sent Events
