@@ -11,7 +11,8 @@ src/            Rust crate, built as the oxbrook._core extension module
   server.rs     tokio accept loop, hyper 1, HEAD/405/413, upgrade handshake
   tls.rs        rustls configuration and ALPN
   router.rs     matchit radix tree per method, path and query coercion
-  queue.rs      bounded per-worker queue + socketpair wakeup
+  queue.rs      bounded per-worker queue + wake pair
+  wake.rs       both ends of that pair, made the way each platform allows
   worker.rs     one OS thread + one asyncio loop per worker, drain callback
   request.rs    the frozen Request handed to handlers
   responder.rs  reply channel, streaming bodies, client-disconnect signal
@@ -35,10 +36,13 @@ python/oxbrook/  App, routing, pydantic, OpenAPI, topics, SSE, sockets, runtime
    A loop held by a handler that computes cannot drain, so its count stays
    high and new requests go elsewhere. If that worker is at its limit it tries
    the next; if every worker is full the answer is `503`.
-4. If no wakeup is already in flight, one byte goes down a socketpair.
+4. If no wakeup is already in flight, one byte goes down the worker's wake
+   pair: a socketpair on Unix, and on Windows, which has none, a loopback TCP
+   connection to a listener that exists for exactly that one connection.
 5. The worker's asyncio loop wakes through `add_reader`. A native drain
    callback clears the flag, pops **every** queued request, and schedules each
-   handler in that one callback.
+   handler in that one callback. On Windows the loop is a selector loop,
+   because the proactor loop Python uses there by default has no `add_reader`.
 6. The handler returns. A dict is serialized to JSON in Rust; a pydantic model
    through pydantic's own serializer. The bytes travel back to the waiting
    tokio task over a oneshot channel.
@@ -165,17 +169,20 @@ callback so nothing new starts during teardown. Workers start one at a time; if
 one fails, the ones already running are stopped and joined before the error
 surfaces. At shutdown — on `SIGINT` or `SIGTERM`, both handled in the accept loop — the
 server waits for every worker thread, bounded by `shutdown_grace`, and only
-then runs the process `lifespan`'s teardown.
+then runs the process `lifespan`'s teardown. On Windows, where there is no
+`SIGTERM`, Ctrl-Break and the console closing are handled the same way.
 
 ## Testing
 
-Twenty-six standalone scripts under `tests/`, each exiting non-zero on
+Twenty-eight standalone scripts under `tests/`, each exiting non-zero on
 failure, run against a real server on a real socket.
 
 ```bash
 make verify        # free-threaded
 make verify-gil    # GIL build
 ```
+
+Where there is no `make`, `python tests/run.py` runs the same list.
 
 `tests/verify.py` drives 5,000 concurrent requests, each carrying a unique
 token, and asserts every response comes back with its own. That is the check
@@ -194,3 +201,7 @@ a running server before it was fixed.
   deployments.
 - MCP is POST/JSON only: no streaming responses, no server-to-client channel,
   no resource subscriptions.
+- On Windows a worker loop is a selector loop, so `select()` bounds it to 512
+  sockets. That limits what handlers on one loop may hold open — outbound
+  connections, mostly — not the connections the server itself accepts, which
+  belong to Rust. Windows wheels are x86-64 only.

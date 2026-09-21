@@ -15,6 +15,8 @@ ceremony.
 - **[uv](https://docs.astral.sh/uv/)**, for the environments.
 - **Docker**, for Redis. Services run in containers, never on the host.
 - **[oha](https://github.com/hatoo/oha)**, only for benchmarks.
+- **Linux, macOS or Windows.** The first two are what gets measured; Windows
+  is supported so the framework can be developed against there.
 
 ## Build
 
@@ -27,6 +29,22 @@ Rebuild after any change under `src/`; the `make` targets that need it already
 do. `cargo check` is a fast compile check, but `cargo build` fails to link,
 because this is a Python extension module rather than a binary.
 
+There is no `make` on Windows, so the environment and the build are the
+commands it would have run:
+
+```powershell
+uv venv --python 3.14t .venv
+uv pip install --python .venv/Scripts/python.exe `
+  maturin "httpx[http2]" cryptography openapi-spec-validator websockets redis mcp pydantic
+.venv/Scripts/maturin.exe develop --release
+```
+
+Changing anything that touches dispatch, signals or paths is worth checking
+for Windows before pushing, even from a Unix machine — `cargo check --target
+x86_64-pc-windows-gnu` compiles every `cfg(windows)` branch, given
+`rustup target add x86_64-pc-windows-gnu` and a mingw-w64 toolchain for ring's
+C. The CI leg is what actually runs them.
+
 ## Tests
 
 ```bash
@@ -34,7 +52,14 @@ make verify        # twenty-eight suites, free-threaded
 make verify-gil    # the same suites on the GIL build
 ```
 
-Both must pass. Each suite is a standalone script that exits non-zero on
+Both must pass. `python tests/run.py` runs the same list where there is no
+`make`, one suite at a time and in the same order; it is also what tests a
+freshly built wheel, and it holds the list that the Makefile reads.
+
+```powershell
+.venv/Scripts/python.exe tests/run.py            # every suite
+.venv/Scripts/python.exe tests/run.py files cli  # a few
+``` Each suite is a standalone script that exits non-zero on
 failure and runs against a real server on a real socket.
 
 **Start Redis first.** `tests/durable.py` prints `SKIP` and still passes when

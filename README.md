@@ -33,10 +33,12 @@ every change that breaks code is listed in the
 [changelog](https://github.com/ishangavidusha/oxbrook/blob/main/CHANGELOG.md).
 This is a personal project, not a supported product.
 
-Requires CPython 3.14, free-threaded (`python3.14t`) or standard, on Linux or
-macOS. Wheels are published for both builds on x86-64 and ARM; anywhere else
-pip builds from source, which needs a Rust toolchain. Windows is not
-supported yet; WSL2 works in the meantime.
+Requires CPython 3.14, free-threaded (`python3.14t`) or standard, on Linux,
+macOS or Windows. Wheels are published for both builds: x86-64 and ARM on
+Linux and macOS, and x86-64 on Windows from `0.2.0`. Anywhere else pip builds
+from source, which needs a Rust toolchain. Windows is supported so that the
+framework can be tried and developed against on the machine in front of you;
+what is measured, and what the performance page reports, is Linux and macOS.
 
 ## What it does
 

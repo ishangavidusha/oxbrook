@@ -8,11 +8,17 @@ pip install oxbrook
 
 - **CPython 3.14.** The free-threaded build (`python3.14t`) is the primary
   target and runs several worker loops; the standard build runs one.
-- **Linux or macOS.** Wheels are published for both interpreter builds on
-  x86-64 and ARM (manylinux 2.28 and macOS 11 or newer). Elsewhere pip builds
-  from the source distribution, which needs a Rust toolchain. Windows is not
-  supported yet: the core relies on Unix sockets and signals. Until it is,
-  WSL2 runs Oxbrook as on Linux.
+- **Linux, macOS or Windows.** Wheels are published for both interpreter
+  builds: x86-64 and ARM on Linux (manylinux 2.28) and macOS (11 or newer),
+  and x86-64 on Windows from `0.2.0`. Elsewhere pip builds from the source
+  distribution, which needs a Rust toolchain.
+
+    Windows is a development platform here rather than a deployment one: the
+    suites run on it on both interpreter builds, and everything works, but
+    nothing is measured there and no benchmark on this site comes from it. A
+    worker loop on Windows is a selector loop and so watches at most 512
+    sockets, which bounds what handlers on one loop may hold open — outbound
+    connections, mostly — rather than the connections the server accepts.
 - **Redis**, only for durable topics: `pip install oxbrook redis`.
 
 With [uv](https://docs.astral.sh/uv/), a free-threaded environment is one
@@ -48,6 +54,14 @@ cd oxbrook
 make venvs     # .venv (free-threaded 3.14t) and .venv-gil (standard 3.14)
 make build     # maturin develop --release into both
 make run       # examples/hello.py
+```
+
+On Windows, where there is no `make`, the same three steps are:
+
+```powershell
+uv venv --python 3.14t .venv
+uv pip install --python .venv/Scripts/python.exe maturin
+.venv/Scripts/maturin.exe develop --release
 ```
 
 Rebuild after any change to `src/`; the `make` targets that need it already

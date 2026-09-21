@@ -266,6 +266,11 @@ Ctrl-C (`SIGINT`) and `SIGTERM` both stop the server gracefully: it stops
 accepting, waits up to `shutdown_grace` for in-flight requests, runs the
 lifespan teardown, then exits with status 0. Streams and sockets are closed.
 
+On Windows, which has no `SIGTERM`, the same drain runs on Ctrl-C, on
+Ctrl-Break — what `oxbrook run --reload` sends its server — and when the
+console window closes, though Windows allows only a few seconds for the last
+of these before it ends the process regardless.
+
 `SIGTERM` is what `docker stop`, Kubernetes and systemd send, so a deploy drains
 requests rather than cutting them off. Set the orchestrator's own grace period —
 `terminationGracePeriodSeconds`, `docker stop --time` — longer than

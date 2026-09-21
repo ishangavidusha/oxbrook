@@ -1,8 +1,25 @@
 # Changelog
 
-Every release, newest first. While the version is `0.x`, a minor release may
-change the API and a patch release does not; changes that break existing code
-are listed under **Breaking** in the release that makes them.
+Every release, newest first, with what is merged but not yet released at the
+top. While the version is `0.x`, a minor release may change the API and a patch
+release does not; changes that break existing code are listed under
+**Breaking** in the release that makes them.
+
+## Unreleased
+
+- **Windows**, on both interpreter builds, with x86-64 wheels: `pip install`
+  and run, with no WSL2 and no container. Ctrl-C, Ctrl-Break and the console
+  closing all shut the server down gracefully, and `oxbrook run --reload`
+  stops its server with Ctrl-Break so a reload still drains and still runs
+  lifespan teardown. Windows is a development platform here: nothing on the
+  site is measured there.
+- A request body refused for being over `max_body` is read away briefly before
+  the `413` goes out, so the client reads the answer rather than losing it to
+  a connection reset.
+- Static mounts refuse names that Windows resolves to something other than a
+  file under the mount: a drive-relative segment such as `C:passwd`, a device
+  name such as `CON` or `NUL`, and names ending in a dot or a space. Refused
+  on every platform, so a mount answers the same everywhere.
 
 ## 0.1.0 — 2026-09-16
 
