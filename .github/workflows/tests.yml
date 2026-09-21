@@ -85,7 +85,13 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      # Keyed by interpreter. The two legs of this matrix run on the same
+      # runner image, and a shared cache hands one leg the other's build: on
+      # Windows that is a module linked against the interpreter the other leg
+      # used, which then cannot be imported at all.
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.python }}
 
       - uses: astral-sh/setup-uv@v7
         with:
@@ -145,7 +151,12 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      # See the Linux leg: one cache per interpreter. Sharing it gave this job
+      # a `_core.pyd` linked against `python314t.dll`, built by the other leg,
+      # and every suite failed at `import oxbrook` with a missing DLL.
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.python }}
 
       - uses: astral-sh/setup-uv@v7
         with:
