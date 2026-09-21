@@ -88,10 +88,14 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       # `sed` rather than a Python script: every runner has bash, and not all
-      # of them agree on what a Python is called.
+      # of them agree on what a Python is called. The `.bak` suffix is not
+      # optional — BSD sed, which is macOS's, reads the next argument as the
+      # suffix without it and fails on the file name.
       - name: Set the version
         shell: bash
-        run: sed -i '0,/^version = ".*"$/s//version = "${{ needs.version.outputs.cargo }}"/' Cargo.toml
+        run: |
+          sed -i.bak '0,/^version = ".*"$/s//version = "${{ needs.version.outputs.cargo }}"/' Cargo.toml
+          rm -f Cargo.toml.bak
       # The macOS and Windows wheels build against the runner's own toolchain;
       # the Linux ones build in containers, which get Rust in before-all.
       - uses: dtolnay/rust-toolchain@stable
