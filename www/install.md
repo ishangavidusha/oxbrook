@@ -10,7 +10,7 @@ pip install oxbrook
   target and runs several worker loops; the standard build runs one.
 - **Linux, macOS or Windows.** Wheels are published for both interpreter
   builds: x86-64 and ARM on Linux (manylinux 2.28) and macOS (11 or newer),
-  and x86-64 on Windows from `0.2.0`. Elsewhere pip builds from the source
+  and x86-64 on Windows. Elsewhere pip builds from the source
   distribution, which needs a Rust toolchain.
 
     Windows is a development platform here rather than a deployment one: the
@@ -40,7 +40,7 @@ Oxbrook is alpha. While the version is `0.x`:
   that breaks existing code under **Breaking** in the
   [changelog](changelog.md).
 
-Pin a minor version, `oxbrook~=0.1.0`, to take fixes without changes. `1.0`
+Pin a minor version, `oxbrook~=0.2.0`, to take fixes without changes. `1.0`
 will mean the API is committed to.
 
 ## From source

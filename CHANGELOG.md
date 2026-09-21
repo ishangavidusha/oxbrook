@@ -5,7 +5,7 @@ top. While the version is `0.x`, a minor release may change the API and a patch
 release does not; changes that break existing code are listed under
 **Breaking** in the release that makes them.
 
-## Unreleased
+## 0.2.0 — 2026-09-21
 
 - **Windows**, on both interpreter builds, with x86-64 wheels: `pip install`
   and run, with no WSL2 and no container. Ctrl-C, Ctrl-Break and the console
