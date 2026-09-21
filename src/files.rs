@@ -100,6 +100,33 @@ fn redirect(to: String) -> Response<Out> {
         .unwrap_or_else(|_| not_found())
 }
 
+/// Names Windows resolves to a device rather than to a file. `CON.txt` is the
+/// console too, so the name is judged up to its first dot.
+const DEVICES: &[&str] = &[
+    "con", "prn", "aux", "nul", "conin$", "conout$", "com1", "com2", "com3", "com4", "com5",
+    "com6", "com7", "com8", "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8",
+    "lpt9",
+];
+
+/// Segments Windows turns into something other than a file under the mount,
+/// inside the OS rather than in any path that could be inspected first: a name
+/// with a trailing dot or space is trimmed to a different file, and a device
+/// name opens a device, which can block rather than fail. A drive-relative
+/// segment like `C:evil` escapes the join outright, and is refused with the
+/// other colons below.
+///
+/// Refused on every platform, so that a mount answers the same everywhere and
+/// the tests that prove it run everywhere.
+fn windows_hazard(segment: &str) -> bool {
+    if segment.ends_with('.') || segment.ends_with(' ') {
+        return true;
+    }
+    let stem = segment.split('.').next().unwrap_or(segment);
+    DEVICES
+        .iter()
+        .any(|device| stem.eq_ignore_ascii_case(device))
+}
+
 /// The requested path as segments under the mount, or None if it must be
 /// refused. Percent-decoding happens here, before inspection, so `%2e%2e` is
 /// seen as the `..` it is and `%2f` as the separator it is.
@@ -113,7 +140,10 @@ fn segments(raw: &str, dotfiles: bool) -> Option<Vec<String>> {
         if segment.is_empty() {
             continue;
         }
-        if segment == "." || segment == ".." || segment.contains(['\\', '\0']) {
+        if segment == "." || segment == ".." || segment.contains(['\\', '\0', ':']) {
+            return None;
+        }
+        if windows_hazard(segment) {
             return None;
         }
         if segment.starts_with('.') && !dotfiles {

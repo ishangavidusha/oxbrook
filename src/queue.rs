@@ -6,12 +6,10 @@
 //! standard ones, and the milestone-1 benchmark showed that cost dominating.
 //!
 //! So a pending request is plain Rust data. It goes into a lock-free queue, and
-//! the worker's asyncio loop is woken through a socketpair that the loop
+//! the worker's asyncio loop is woken through a socket pair that the loop
 //! already watches via `loop.add_reader`. Writing one byte to a socket is a
 //! syscall, not a Python call.
 
-use std::io::Write;
-use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crossbeam_queue::SegQueue;
@@ -20,6 +18,7 @@ use tokio::sync::oneshot;
 
 use crate::responder::Reply;
 use crate::router::ParamValue;
+use crate::wake::WakeWriter;
 use crate::websocket::Shared;
 
 /// Handlers still running for one HTTP/2 connection, counting those whose
@@ -69,8 +68,8 @@ pub struct WorkerQueue {
     /// True when a wake byte is in flight and not yet consumed. Collapses a
     /// burst of requests into a single wakeup.
     notified: AtomicBool,
-    /// Write end of the socketpair. The read end lives in the `Drainer`.
-    waker: UnixStream,
+    /// Write end of the wake pair. The read end lives in the `Drainer`.
+    waker: WakeWriter,
     /// Requests handed to the worker and not yet finished. Counted alongside
     /// the queue, because bounding the queue alone is not backpressure: the
     /// drain callback empties it into asyncio tasks immediately, so a handler
@@ -85,7 +84,7 @@ pub struct WorkerQueue {
 }
 
 impl WorkerQueue {
-    pub fn new(waker: UnixStream, limit: usize) -> Self {
+    pub fn new(waker: WakeWriter, limit: usize) -> Self {
         Self {
             queue: SegQueue::new(),
             wakeups: SegQueue::new(),
@@ -183,7 +182,7 @@ impl WorkerQueue {
         // Only the thread that flips false->true writes the byte, so at most
         // one unread byte exists and the socket buffer can never fill.
         if !self.notified.swap(true, Ordering::SeqCst) {
-            let _ = (&self.waker).write(&[1u8]);
+            self.waker.wake();
         }
     }
 }

@@ -114,3 +114,51 @@ jobs:
           name: coverage-html
           path: htmlcov
           retention-days: 14
+
+  # Windows is a development platform for this project, not a deployment one,
+  # so it gets the suites without Redis: `make` is not there to drive them and
+  # a service container needs a Linux runner. `tests/run.py` is the same list
+  # the Makefile uses, so the two legs cannot run different suites.
+  windows:
+    name: windows ${{ matrix.label }}
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { label: free-threaded 3.14t, python: 3.14t }
+          - { label: GIL 3.14, python: "3.14" }
+    timeout-minutes: 30
+    env:
+      PYTHONUNBUFFERED: "1"
+      PYTHONFAULTHANDLER: "1"
+      VIRTUAL_ENV: .venv
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          cache-dependency-glob: pyproject.toml
+
+      - name: Create the environment
+        run: |
+          uv venv --python ${{ matrix.python }} .venv
+          uv pip install --python .venv/Scripts/python.exe `
+            maturin "httpx[http2]" cryptography openapi-spec-validator websockets redis mcp pydantic
+
+      - name: Confirm the interpreter is the one asked for
+        run: |
+          .venv/Scripts/python.exe -c "import sys; print(sys.version); print('gil:', getattr(sys, '_is_gil_enabled', lambda: True)())"
+
+      - name: Build the extension
+        run: .venv/Scripts/maturin.exe develop --release
+
+      # No single suite takes more than a few seconds; three minutes is a hang,
+      # and one hung suite must not burn the whole job.
+      - name: Run the suites
+        run: .venv/Scripts/python.exe tests/run.py --timeout 180

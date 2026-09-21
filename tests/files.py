@@ -55,6 +55,10 @@ def raw(port: int, target: str, extra: str = "") -> tuple[int, dict[str, str], b
     return int(lines[0].split(" ")[1]), headers, body
 
 
+#: Cleared by `make_site` when this host will not create a symlink.
+SYMLINKS = True
+
+
 def make_site() -> tuple[Path, Path]:
     base = Path(tempfile.mkdtemp(prefix="oxbrook-files-"))
     (base / "outside-secret.txt").write_text("SECRET OUTSIDE")
@@ -76,17 +80,32 @@ def make_site() -> tuple[Path, Path]:
     (site / "café menu.txt").write_text("unicode")
     (site / "big.bin").write_bytes(bytes(range(256)) * 4096)
     (site / "empty.txt").write_text("")
-    os.symlink(base / "outside-secret.txt", site / "escape.txt")
-    os.symlink(site / "app.js", site / "alias.js")
+    global SYMLINKS
+    try:
+        os.symlink(base / "outside-secret.txt", site / "escape.txt")
+        os.symlink(site / "app.js", site / "alias.js")
+    except OSError:
+        # Windows only grants symlink creation to a privileged process or one
+        # in developer mode. The cases that need a link are then skipped, and
+        # say so, rather than passing because the link was never there.
+        SYMLINKS = False
+        print("  (no symlinks on this host: the symlink cases are skipped)", flush=True)
     return base, site
 
 
 def refusals(port: int) -> None:
     for target in [
-        "/.env", "/.git/config", "/escape.txt",
+        "/.env", "/.git/config",
+        *(["/escape.txt"] if SYMLINKS else []),
         "/../outside-secret.txt", "/%2e%2e/outside-secret.txt", "/%2E%2E/outside-secret.txt",
         "/docs/..%2f..%2foutside-secret.txt", "/docs%2f..%2f..%2foutside-secret.txt",
         "/./app.js", "/..\\outside-secret.txt", "/app.js%00", "/%00",
+        # Names Windows resolves to something other than a file under the
+        # mount, refused on every platform so that a mount behaves the same
+        # everywhere: a drive-relative segment, a device, and a trailing dot
+        # that Windows would trim back to `app.js`.
+        "/C:/outside-secret.txt", "/app.js:stream", "/nul", "/NUL", "/CON.txt", "/com1",
+        "/app.js.", "/app.js%20", "/docs./index.html",
     ]:
         status, _, body = raw(port, target)
         check(status == 404, f"{target} returned {status}, expected 404")
@@ -104,7 +123,8 @@ def serving(port: int) -> None:
         ("/docs/", "text/html; charset=utf-8", b"<h1>docs</h1>"),
         ("/nested/deep/file.txt", "text/plain; charset=utf-8", b"deep"),
         ("/caf%C3%A9%20menu.txt", "text/plain; charset=utf-8", b"unicode"),
-        ("/alias.js", "text/javascript; charset=utf-8", b"console.log('hi')"),
+        *([("/alias.js", "text/javascript; charset=utf-8", b"console.log('hi')")]
+          if SYMLINKS else []),
         ("/empty.txt", "text/plain; charset=utf-8", b""),
     ]:
         status, headers, got = raw(port, target)
@@ -196,8 +216,9 @@ def cors_and_dotfiles(site: Path) -> None:
         check(client.get("/files/.well-known/security.txt").status_code == 200,
               "dotfiles=True still refused a dotfile")
         check(client.get("/files/docs/").status_code == 404, "index=None still served an index")
-        status, _, body = raw(client.port, "/files/escape.txt")
-        check(status == 404, f"dotfiles=True let a symlink escape: {status} {body[:20]!r}")
+        if SYMLINKS:
+            status, _, body = raw(client.port, "/files/escape.txt")
+            check(status == 404, f"dotfiles=True let a symlink escape: {status} {body[:20]!r}")
         # With dotfiles allowed, the dotfile rule no longer happens to catch
         # `..`, so this is where the traversal check stands on its own.
         for target in ("/files/../outside-secret.txt", "/files/%2e%2e/outside-secret.txt",

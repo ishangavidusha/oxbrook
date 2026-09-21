@@ -537,6 +537,61 @@ where
     let _ = conn.await;
 }
 
+/// How the operating system asks this process to stop, besides Ctrl-C, which
+/// `tokio::signal::ctrl_c` handles on both platforms. Either way the server
+/// gets the same graceful drain rather than dying where it stands: unhandled,
+/// the default action killed the process outright, with in-flight requests cut
+/// off and lifespan teardown never run.
+///
+/// On Unix that is SIGTERM, what a container runtime, systemd or Kubernetes
+/// sends. Windows has no SIGTERM: a supervisor stops a child with Ctrl-Break,
+/// which is what `oxb run --reload` sends, and closing the console window
+/// arrives as its own event with a few seconds to drain before the process is
+/// killed regardless.
+#[cfg(unix)]
+struct Terminate(tokio::signal::unix::Signal);
+
+#[cfg(windows)]
+struct Terminate(
+    tokio::signal::windows::CtrlBreak,
+    tokio::signal::windows::CtrlClose,
+    tokio::signal::windows::CtrlShutdown,
+);
+
+impl Terminate {
+    #[cfg(unix)]
+    fn install() -> Result<Self, String> {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .map(Self)
+            .map_err(|e| format!("installing the SIGTERM handler: {e}"))
+    }
+
+    #[cfg(windows)]
+    fn install() -> Result<Self, String> {
+        let describe =
+            |what: &str, e: std::io::Error| format!("installing the {what} handler: {e}");
+        Ok(Self(
+            tokio::signal::windows::ctrl_break().map_err(|e| describe("Ctrl-Break", e))?,
+            tokio::signal::windows::ctrl_close().map_err(|e| describe("console close", e))?,
+            tokio::signal::windows::ctrl_shutdown().map_err(|e| describe("shutdown", e))?,
+        ))
+    }
+
+    #[cfg(unix)]
+    async fn recv(&mut self) {
+        self.0.recv().await;
+    }
+
+    #[cfg(windows)]
+    async fn recv(&mut self) {
+        tokio::select! {
+            _ = self.0.recv() => {}
+            _ = self.1.recv() => {}
+            _ = self.2.recv() => {}
+        }
+    }
+}
+
 async fn serve_loop(listen: Listen, state: Arc<State>) -> Result<(), String> {
     let Listen {
         addr,
@@ -556,15 +611,8 @@ async fn serve_loop(listen: Listen, state: Arc<State>) -> Result<(), String> {
     }
     let protocols = Arc::new(Protocols::build(http2));
 
-    // SIGTERM is how a container runtime, systemd or Kubernetes asks a process
-    // to stop, and it gets the same graceful drain as Ctrl-C. Unhandled, its
-    // default action killed the process outright: in-flight requests cut off,
-    // lifespan teardown never run, exit code 143.
     let mut terminate = if handle_signals {
-        Some(
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                .map_err(|e| format!("installing the SIGTERM handler: {e}"))?,
-        )
+        Some(Terminate::install()?)
     } else {
         None
     };
@@ -621,9 +669,7 @@ async fn serve_loop(listen: Listen, state: Arc<State>) -> Result<(), String> {
             } => break,
             _ = async {
                 match terminate.as_mut() {
-                    Some(signal) => {
-                        signal.recv().await;
-                    }
+                    Some(signals) => signals.recv().await,
                     None => std::future::pending::<()>().await,
                 }
             } => break,

@@ -96,10 +96,11 @@ skip = ["*-musllinux_*"]
 build-verbosity = 1
 # Each wheel is installed into a clean environment and a handful of suites run
 # against it from a copy of tests/, away from the source tree, so the import
-# can only resolve to the wheel. The durable suite is left out: no Redis there.
+# can only resolve to the wheel. Which suites, and the order, is in the runner;
+# it runs them itself because Windows has no shell loop to write here.
 test-sources = ["tests"]
 test-requires = ["httpx[http2]", "cryptography", "websockets"]
-test-command = "bash -c 'for s in routing bodies hardening verify files cancellation protocols; do echo \"== $s\"; python tests/$s.py || exit 1; done'"
+test-command = "python tests/run.py --wheel"
 
 [tool.cibuildwheel.linux]
 before-all = "curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal"

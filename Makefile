@@ -37,11 +37,11 @@ bench-cpu: build-ft
 bench-cpu-gil: build-gil
 	.venv-gil/bin/python bench/cpu.py --python .venv-gil/bin/python
 
-# One list, used by both builds and by the coverage run. Three copies of it is
+# One list, used by both builds, by the coverage run, and by the platforms
+# with no shell loop to write it in: it lives in tests/run.py, which runs the
+# suites on Windows and against a freshly built wheel. Three copies of it is
 # how a suite ends up running on one interpreter and not the other.
-SUITES := workers routing query bodies openapi capabilities streams sse \
-          websocket hardening escaping wire failures plumbing injection \
-          durable backpressure assignment composition lifespan cors uploads origins cli files protocols cancellation verify
+SUITES := $(shell python3 tests/run.py --list)
 
 # SUITE_TIMEOUT is empty locally and set to `timeout 300` in CI, where a hung
 # suite would otherwise burn the whole job. Echo the name first: a suite that

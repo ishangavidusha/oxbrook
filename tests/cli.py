@@ -42,6 +42,22 @@ from pathlib import Path
 
 failures: list[str] = []
 BIN = Path(sys.executable).parent
+WINDOWS = sys.platform == "win32"
+#: `CreateProcess` would supply this itself, but naming it keeps a failure
+#: here from looking like a command that was never installed.
+EXE = ".exe" if WINDOWS else ""
+
+#: How a server is asked to stop, and how it must be started for that to be
+#: possible. Windows has no SIGTERM to send and no way to deliver SIGINT to
+#: another process: Ctrl-Break is the signal a supervisor sends there, and it
+#: reaches a child only when the child has its own process group — which also
+#: keeps it from reaching this test runner.
+if WINDOWS:
+    NEW_GROUP = subprocess.CREATE_NEW_PROCESS_GROUP
+    STOP_SIGNALS = [signal.CTRL_BREAK_EVENT]
+else:
+    NEW_GROUP = 0
+    STOP_SIGNALS = [signal.SIGTERM, signal.SIGINT]
 
 
 def check(cond: bool, msg: str) -> None:
@@ -56,7 +72,7 @@ def free_port() -> int:
 
 
 def oxbrook(*args: str, cwd: Path, command: str = "oxbrook", timeout: float = 60):
-    return subprocess.run([str(BIN / command), *args], cwd=cwd, capture_output=True,
+    return subprocess.run([str(BIN / (command + EXE)), *args], cwd=cwd, capture_output=True,
                           text=True, timeout=timeout)
 
 
@@ -187,12 +203,13 @@ def targets_fail_with_a_reason(directory: Path) -> None:
 
 def run_stops_gracefully(directory: Path) -> None:
     """SIGTERM used to kill the server with no drain and no teardown."""
-    for sig in (signal.SIGTERM, signal.SIGINT):
+    for sig in STOP_SIGNALS:
         port = free_port()
         server = subprocess.Popen(
-            [str(BIN / "oxb"), "run", "main:app", "--port", str(port), "--workers", "1",
+            [str(BIN / f"oxb{EXE}"), "run", "main:app", "--port", str(port), "--workers", "1",
              "--access-log"],
             cwd=directory, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+            creationflags=NEW_GROUP,
         )
         try:
             started = wait_for(lambda port=port: get(port) is not None, 20)
@@ -210,7 +227,7 @@ def run_stops_gracefully(directory: Path) -> None:
 
 
 SIGNALS_AFTER_CLIENT = '''
-import os, signal, time
+import os, signal, sys, time
 from oxbrook import App, Request
 from oxbrook.testing import TestClient
 app = App(openapi_url=None, docs_url=None, mcp_url=None)
@@ -219,20 +236,43 @@ async def root(_: Request):
     return 1
 with TestClient(app, workers=1) as client:
     client.get("/")
-os.kill(os.getpid(), signal.SIGTERM)
-time.sleep(3)
-print("survived SIGTERM")
+open("client-ran", "w").close()
+if sys.platform != "win32":
+    os.kill(os.getpid(), signal.SIGTERM)
+time.sleep(5)
+print("survived")
 '''
 
 
 def a_test_client_leaves_signals_alone(directory: Path) -> None:
+    """A server that has run must not leave the process deaf to a stop signal.
+
+    The process kills itself on Unix. On Windows nothing can send itself
+    Ctrl-Break, and `os.kill` there is `TerminateProcess`, which no handler can
+    refuse and which would prove nothing; so the signal comes from here, to a
+    child in its own process group.
+    """
     script = directory / "signals_after_client.py"
     script.write_text(SIGNALS_AFTER_CLIENT)
-    result = subprocess.run([sys.executable, str(script)], cwd=directory, capture_output=True,
-                            text=True, timeout=60)
-    check(result.returncode == -signal.SIGTERM and "survived" not in result.stdout,
-          f"after a test client ran, SIGTERM no longer ended the process: exit "
-          f"{result.returncode}, {result.stdout.strip()!r}")
+    child = subprocess.Popen([sys.executable, str(script)], cwd=directory,
+                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                             creationflags=NEW_GROUP)
+    try:
+        if WINDOWS:
+            ran = directory / "client-ran"
+            check(wait_for(lambda: ran.exists() or child.poll() is not None, 60),
+                  "the script never reported that its client had run")
+            child.send_signal(signal.CTRL_BREAK_EVENT)
+        output, _ = child.communicate(timeout=60)
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.communicate()
+    expected = "not 0" if WINDOWS else f"-{signal.SIGTERM}"
+    ended = child.returncode != 0 if WINDOWS else child.returncode == -signal.SIGTERM
+    check(ended and "survived" not in output,
+          f"after a test client ran, the stop signal no longer ended the process: exit "
+          f"{child.returncode} (expected {expected}), {output.strip()!r}")
 
 
 def reload_follows_edits(directory: Path) -> None:
@@ -241,11 +281,14 @@ def reload_follows_edits(directory: Path) -> None:
     # supervisor must stop on SIGINT anyway.
     log_path = directory / "reload.log"
     log = log_path.open("w")
+    started = (
+        {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if WINDOWS
+        else {"preexec_fn": lambda: signal.signal(signal.SIGINT, signal.SIG_IGN)}
+    )
     supervisor = subprocess.Popen(
-        [str(BIN / "oxbrook"), "run", "main:app", "--port", str(port), "--workers", "1",
+        [str(BIN / f"oxbrook{EXE}"), "run", "main:app", "--port", str(port), "--workers", "1",
          "--reload"],
-        cwd=directory, stdout=log, stderr=subprocess.STDOUT, text=True,
-        preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_IGN),
+        cwd=directory, stdout=log, stderr=subprocess.STDOUT, text=True, **started,
     )
     try:
         # Saved while the server is still starting: the edit that was lost.
@@ -267,7 +310,7 @@ def reload_follows_edits(directory: Path) -> None:
         check(wait_for(lambda: get(port) == '{"version":5}', 20),
               f"fixing the syntax error did not bring the server back; says {get(port)!r}")
 
-        supervisor.send_signal(signal.SIGINT)
+        supervisor.send_signal(STOP_SIGNALS[0])
         supervisor.wait(timeout=30)
         output = log_path.read_text()
         check(supervisor.returncode == 0, f"the supervisor exited {supervisor.returncode}")

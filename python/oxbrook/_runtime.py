@@ -8,6 +8,7 @@ parameters already coerced to Python objects.
 
 import asyncio
 import datetime
+import sys
 import uuid
 
 from ._errors import HTTPError, http_error_body
@@ -175,7 +176,20 @@ make_datetime = datetime.datetime.fromisoformat
 
 
 def make_worker_loop():
-    loop = asyncio.new_event_loop()
+    """Build the asyncio loop for one worker thread.
+
+    On Windows the loop has to be a selector loop. Rust registers the drain
+    callback with `loop.add_reader`, and the proactor loop that Python uses by
+    default there has no `add_reader` at all. Its `select()` watches sockets
+    rather than file descriptors, which is why the wake pair is a loopback
+    socket pair, and it watches at most 512 of them per loop — a ceiling on
+    what handlers on one worker may hold open, not on the server's own
+    connections, which are held by Rust.
+    """
+    if sys.platform == "win32":
+        loop = asyncio.SelectorEventLoop()
+    else:
+        loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     return loop
 

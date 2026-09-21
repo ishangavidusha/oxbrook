@@ -229,12 +229,33 @@ def forget_bytecode(paths: list[Path]) -> None:
             continue
 
 
+#: How a child server is started and stopped, which is the one part of the
+#: supervisor that is not the same on both platforms.
+#:
+#: Windows has no SIGTERM to send: terminating a process there is
+#: `TerminateProcess`, which gives it no chance to drain. Ctrl-Break does
+#: arrive as an event the server can handle, but only for a process in its own
+#: group, so the child is started in one. The console's own Ctrl-C then stops
+#: reaching the child, which is what should happen anyway — the supervisor
+#: takes it and stops the child in an orderly way.
+if sys.platform == "win32":
+    CHILD_FLAGS = subprocess.CREATE_NEW_PROCESS_GROUP
+    STOP_SIGNAL = signal.CTRL_BREAK_EVENT
+else:
+    CHILD_FLAGS = 0
+    # SIGTERM rather than SIGINT: a process started in the background inherits
+    # SIGINT as ignored, and the server drains on either.
+    STOP_SIGNAL = signal.SIGTERM
+
+
+def start_server(command: list[str], environment: dict[str, str]) -> subprocess.Popen:
+    return subprocess.Popen(command, env=environment, creationflags=CHILD_FLAGS)
+
+
 def stop(child: subprocess.Popen, grace: float) -> None:
     if child.poll() is not None:
         return
-    # SIGTERM rather than SIGINT: a process started in the background inherits
-    # SIGINT as ignored, and the server drains on either.
-    child.send_signal(signal.SIGTERM)
+    child.send_signal(STOP_SIGNAL)
     try:
         child.wait(timeout=grace + 5.0)
     except subprocess.TimeoutExpired:
@@ -259,11 +280,16 @@ def supervise(args: argparse.Namespace) -> int:
     # background process in a non-interactive shell starts with SIGINT ignored,
     # and a supervisor that ignored it never stopped. SIGTERM is what a process
     # manager sends.
-    previous = {sig: signal.signal(sig, _raise_stop) for sig in (signal.SIGINT, signal.SIGTERM)}
+    # SIGBREAK is Windows' Ctrl-Break, and the signal a supervisor of this
+    # supervisor would send; it does not exist elsewhere.
+    stops = [signal.SIGINT, signal.SIGTERM]
+    if hasattr(signal, "SIGBREAK"):
+        stops.append(signal.SIGBREAK)
+    previous = {sig: signal.signal(sig, _raise_stop) for sig in stops}
     child: subprocess.Popen | None = None
     try:
         snapshot = watched_files(directories, patterns)
-        child = subprocess.Popen(command, env=environment)
+        child = start_server(command, environment)
         # The supervisor never imports the app itself: importing it here would
         # run module-level code twice and keep the first import's state for the
         # life of the session. A target that cannot start shows up as the first
@@ -279,7 +305,7 @@ def supervise(args: argparse.Namespace) -> int:
             print(f"oxbrook: {names}{more} changed; restarting", flush=True)
             stop(child, grace)
             forget_bytecode(changed)
-            child = subprocess.Popen(command, env=environment)
+            child = start_server(command, environment)
             reported_exit = False
             # A server that dies on start — a syntax error mid-edit — is
             # reported once, and the supervisor waits for the next save.

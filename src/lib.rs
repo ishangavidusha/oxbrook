@@ -20,6 +20,7 @@ mod responder;
 mod router;
 mod server;
 mod tls;
+mod wake;
 mod websocket;
 mod worker;
 

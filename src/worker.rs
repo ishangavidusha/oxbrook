@@ -1,6 +1,3 @@
-use std::io::Read;
-use std::os::fd::AsRawFd;
-use std::os::unix::net::UnixStream;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -13,6 +10,7 @@ use crate::queue::WorkerQueue;
 use crate::request::Request;
 use crate::responder::Responder;
 use crate::router::{ParamValue, Router};
+use crate::wake::{self, WakeReader};
 use crate::websocket::WebSocket;
 
 /// Callable handed to `loop.add_reader`. asyncio invokes it on the worker's own
@@ -36,8 +34,8 @@ struct Drainer {
     create_task: Py<PyAny>,
     /// Returned to the client in a 500 when set. Per server, never global.
     debug: bool,
-    /// Read end of the wake socketpair.
-    reader: UnixStream,
+    /// Read end of the wake pair.
+    reader: WakeReader,
     /// Handed to each `Responder` so streams can watch for disconnects.
     runtime: tokio::runtime::Handle,
     /// This loop's `WorkerContext`: the app, and the state its lifespans
@@ -74,12 +72,7 @@ impl Drainer {
 #[pymethods]
 impl Drainer {
     fn __call__(&self, py: Python<'_>) -> PyResult<()> {
-        let mut buf = [0u8; 64];
-        while let Ok(n) = (&self.reader).read(&mut buf) {
-            if n < buf.len() {
-                break;
-            }
-        }
+        self.reader.drain();
 
         // Order matters: clear before popping, so a push that races with this
         // drain writes a new wake byte rather than being silently swallowed.
@@ -205,9 +198,7 @@ impl Worker {
         tokio_handle: tokio::runtime::Handle,
         lifecycle: Py<PyAny>,
     ) -> PyResult<Self> {
-        let (write_end, read_end) = UnixStream::pair()?;
-        write_end.set_nonblocking(true)?;
-        read_end.set_nonblocking(true)?;
+        let (write_end, read_end) = wake::pair()?;
 
         let queue = Arc::new(WorkerQueue::new(write_end, limit));
         let worker_queue = queue.clone();
@@ -243,7 +234,7 @@ impl Worker {
                         }
                     };
 
-                    let started = (|| -> PyResult<(i32, Py<PyAny>)> {
+                    let started = (|| -> PyResult<(i64, Py<PyAny>)> {
                         let runtime = py.import("oxbrook._runtime")?;
                         let drainer = Drainer {
                             queue: worker_queue,
@@ -261,10 +252,10 @@ impl Worker {
                             runtime: tokio_handle,
                             context: context.clone().unbind(),
                         };
-                        let fd = drainer.reader.as_raw_fd();
-                        event_loop.call_method1("add_reader", (fd, Py::new(py, drainer)?))?;
+                        let watched = drainer.reader.watchable();
+                        event_loop.call_method1("add_reader", (watched, Py::new(py, drainer)?))?;
                         let csts = event_loop.getattr("call_soon_threadsafe")?.unbind();
-                        Ok((fd, csts))
+                        Ok((watched, csts))
                     })();
 
                     let teardown = |event_loop: &Bound<'_, PyAny>| {
@@ -281,7 +272,7 @@ impl Worker {
                     };
 
                     match started {
-                        Ok((fd, csts)) => {
+                        Ok((watched, csts)) => {
                             let _ = tx.send(Ok((event_loop.clone().unbind(), csts)));
                             if let Err(e) = event_loop.call_method0("run_forever") {
                                 e.print(py);
@@ -289,7 +280,7 @@ impl Worker {
                             // Stop taking requests before tearing down what
                             // they would use. Anything still queued is never
                             // started, and its client sees the connection end.
-                            let _ = event_loop.call_method1("remove_reader", (fd,));
+                            let _ = event_loop.call_method1("remove_reader", (watched,));
                             teardown(&event_loop);
                         }
                         Err(e) => {

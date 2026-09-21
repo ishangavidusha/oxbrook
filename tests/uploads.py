@@ -26,8 +26,8 @@ client's stall. The reply timeout now stands aside while the pump is waiting on
 the client.
 """
 import asyncio
+import ctypes
 import hashlib
-import resource
 import socket
 import sys
 import time
@@ -273,12 +273,47 @@ def streams_arrive_intact(client: TestClient) -> None:
     check(client.post("/buffered").json() == [], "an empty body yielded a chunk")
 
 
+class _MemoryCounters(ctypes.Structure):
+    """`PROCESS_MEMORY_COUNTERS`, for the Windows half of `peak_rss`."""
+
+    _fields_ = [("cb", ctypes.c_uint32), ("page_faults", ctypes.c_uint32)] + [
+        (name, ctypes.c_size_t) for name in (
+            "peak_working_set", "working_set", "peak_paged_pool", "paged_pool",
+            "peak_nonpaged_pool", "nonpaged_pool", "pagefile", "peak_pagefile",
+        )
+    ]
+
+
+def peak_rss() -> int:
+    """The most memory this process has held resident, in bytes.
+
+    A high-water mark rather than the current figure on both platforms, so the
+    difference across a call is what the call cost at its worst.
+    """
+    if sys.platform == "win32":
+        counters = _MemoryCounters()
+        counters.cb = ctypes.sizeof(_MemoryCounters)
+        psapi = ctypes.WinDLL("psapi")
+        psapi.GetProcessMemoryInfo.argtypes = [
+            ctypes.c_void_p, ctypes.POINTER(_MemoryCounters), ctypes.c_uint32,
+        ]
+        # `GetCurrentProcess()` is the pseudo-handle -1, written out rather
+        # than called so that it is passed as a whole pointer.
+        if not psapi.GetProcessMemoryInfo(ctypes.c_void_p(-1), ctypes.byref(counters),
+                                          counters.cb):
+            raise ctypes.WinError()
+        return counters.peak_working_set
+    import resource
+
+    unit = 1 if sys.platform == "darwin" else 1024  # ru_maxrss is bytes on macOS, KiB elsewhere
+    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * unit
+
+
 def slow_reader_is_backpressured(client: TestClient) -> None:
     payload = 48 * MB
-    unit = 1 if sys.platform == "darwin" else 1024  # ru_maxrss is bytes on macOS, KiB elsewhere
-    before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * unit
+    before = peak_rss()
     body = client.put("/slow", content=chunks(payload)).json()
-    grew = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * unit - before
+    grew = peak_rss() - before
     check(body["bytes"] == payload, f"slow reader received {body['bytes']} of {payload}")
     check(grew < 32 * MB,
           f"a {payload // MB} MB upload to a slow reader grew the process by {grew // MB} MB; "
