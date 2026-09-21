@@ -102,6 +102,12 @@ test-sources = ["tests"]
 test-requires = ["httpx[http2]", "cryptography", "websockets"]
 test-command = "python tests/run.py --wheel"
 
+[tool.cibuildwheel.windows]
+# 64-bit only. Windows' default here is "the native architecture and 32-bit
+# x86", and a 32-bit wheel is one nobody asked for whose test dependencies have
+# no wheels of their own.
+archs = ["AMD64"]
+
 [tool.cibuildwheel.linux]
 before-all = "curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal"
 environment = { PATH = "$HOME/.cargo/bin:$PATH" }
