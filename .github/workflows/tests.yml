@@ -107,6 +107,13 @@ jobs:
       - name: Run the suites
         run: make ${{ matrix.target }}
 
+      # Not a benchmark — a shared CI machine cannot be measured, and the real
+      # harness refuses to try. This only says whether dispatch still serves
+      # under concurrency, and gives the Windows leg's number something from
+      # the same runner class to sit beside.
+      - name: Throughput sanity check
+        run: ${{ matrix.venv }}/bin/python bench/smoke.py --seconds 3
+
       - name: Upload the coverage report
         if: matrix.target == 'coverage'
         uses: actions/upload-artifact@v7
@@ -162,3 +169,8 @@ jobs:
       # and one hung suite must not burn the whole job.
       - name: Run the suites
         run: .venv/Scripts/python.exe tests/run.py --timeout 180
+
+      # See the Linux leg: a sanity check, not a measurement. Windows is a
+      # development platform here, and no documented number comes from it.
+      - name: Throughput sanity check
+        run: .venv/Scripts/python.exe bench/smoke.py --seconds 3

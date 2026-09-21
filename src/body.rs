@@ -137,6 +137,58 @@ impl BodyShared {
 ///
 /// Runs inside the connection's request future, so it stops when that future
 /// is dropped — after the response is sent, or when the connection dies — and
+/// How long to keep reading a body that has already been refused.
+///
+/// A response sent while the request body is still arriving reaches the client
+/// only if the socket has no unread data left when it closes: closing with
+/// data still in the receive queue is a reset, and Windows throws away
+/// whatever the client had already buffered when one arrives — so the 413 the
+/// server took care to send is replaced by "connection aborted" (I-089). The
+/// cure is to read the rest away first, what nginx calls a lingering close.
+///
+/// Bounded by time, not by bytes: the point is to let a client that is about
+/// to stop sending finish, not to accept a body after refusing it. A client
+/// that keeps sending past this is reset, as before.
+const LINGER: Duration = Duration::from_millis(250);
+
+/// Read and discard what is left of a body, for at most `LINGER`.
+async fn drain(mut body: Incoming) {
+    let _ = tokio::time::timeout(LINGER, async {
+        while let Some(Ok(_)) = body.frame().await {}
+    })
+    .await;
+}
+
+/// `drain`, from the pump. `reading` stays set, so the wait counts as the
+/// client's rather than as a handler that has stalled.
+async fn linger(body: Incoming, shared: &BodyShared) {
+    shared.reading.store(true, Ordering::Relaxed);
+    drain(body).await;
+    shared.reading.store(false, Ordering::Relaxed);
+}
+
+/// Collect a whole body, or say why not. Over the limit, what is left is read
+/// away before the caller answers, for the reason in `linger`.
+pub async fn collect_bounded(mut body: Incoming, limit: usize) -> Result<Vec<u8>, Failure> {
+    let mut collected: Vec<u8> = Vec::new();
+    loop {
+        match body.frame().await {
+            None => return Ok(collected),
+            Some(Err(_)) => return Err(Failure::Incomplete),
+            Some(Ok(frame)) => {
+                let Ok(data) = frame.into_data() else {
+                    continue; // Trailers.
+                };
+                if collected.len() + data.len() > limit {
+                    drain(body).await;
+                    return Err(Failure::TooLarge(limit));
+                }
+                collected.extend_from_slice(&data);
+            }
+        }
+    }
+}
+
 /// cannot outlive the request.
 pub async fn pump(
     body: Incoming,
@@ -156,8 +208,11 @@ pub async fn pump(
     // Lazy: nothing leaves the socket until the handler's first read.
     shared.demand.notified().await;
 
-    // A declared length over the limit is refused without reading a byte.
+    // A declared length over the limit is refused without reading a byte of
+    // it — but the client is sending it anyway, so it is read away before the
+    // refusal goes out rather than after.
     if declared_length.is_some_and(|length| length > max_body as u64) {
+        linger(body, &shared).await;
         shared.push(Chunk::Failed(Failure::TooLarge(max_body)));
         return;
     }
@@ -195,6 +250,7 @@ pub async fn pump(
                 };
                 total += data.len();
                 if total > max_body {
+                    linger(body, &shared).await;
                     shared.push(Chunk::Failed(Failure::TooLarge(max_body)));
                     return;
                 }

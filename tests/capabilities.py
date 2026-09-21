@@ -14,11 +14,26 @@ import sys
 import threading
 
 import httpx
-from mcp import ClientSession
-from mcp.client.streamable_http import streamable_http_client
 from oxbrook import App, Request
 from oxbrook._mcp import SUPPORTED_VERSIONS
+from oxbrook._workers import gil_enabled
 from pydantic import BaseModel, Field
+
+try:
+    from mcp import ClientSession
+    from mcp.client.streamable_http import streamable_http_client
+except ImportError as exc:
+    ClientSession = streamable_http_client = None
+    SDK_MISSING = str(exc)
+else:
+    SDK_MISSING = None
+
+#: The one environment where the SDK may be absent: `mcp` 2.x needs `pywin32`
+#: on Windows, which publishes no free-threaded wheel, so uv resolves an `mcp`
+#: too old to have the client this uses (I-090). Everywhere else a missing or
+#: unusable SDK is a failure — checking against a real client is the point of
+#: this suite.
+SDK_OPTIONAL = sys.platform == "win32" and not gil_enabled()
 
 PORT = 8811
 BASE = f"http://127.0.0.1:{PORT}"
@@ -313,12 +328,18 @@ def main() -> None:
         except Exception:
             threading.Event().wait(0.1)
 
-    try:
-        asyncio.run(drive_mcp())
-        print("mcp client (official SDK): ok")
-    except BaseException as exc:
-        flatten(exc)
+    if SDK_MISSING and SDK_OPTIONAL:
+        print(f"mcp client (official SDK): SKIP ({SDK_MISSING})")
+    elif SDK_MISSING:
+        failures.append(f"the official MCP SDK client is unusable: {SDK_MISSING}")
         print("mcp client (official SDK): ERROR")
+    else:
+        try:
+            asyncio.run(drive_mcp())
+            print("mcp client (official SDK): ok")
+        except BaseException as exc:
+            flatten(exc)
+            print("mcp client (official SDK): ERROR")
 
     protocol_drift_check()
     wire_format_checks()

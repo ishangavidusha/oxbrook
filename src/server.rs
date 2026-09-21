@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use http_body_util::combinators::BoxBody;
-use http_body_util::{BodyExt, Full, LengthLimitError, Limited, StreamBody};
+use http_body_util::{BodyExt, Full, StreamBody};
 use hyper::body::{Frame, Incoming};
 use hyper::header::{
     ALLOW, CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, HOST, RETRY_AFTER, SEC_WEBSOCKET_ACCEPT,
@@ -1184,12 +1184,9 @@ async fn handle(
         ));
         (Vec::new(), Some(shared), Some(pump))
     } else {
-        match Limited::new(req.into_body(), state.max_body)
-            .collect()
-            .await
-        {
-            Ok(collected) => (collected.to_bytes().to_vec(), None, None),
-            Err(err) if err.downcast_ref::<LengthLimitError>().is_some() => return Ok(too_large()),
+        match crate::body::collect_bounded(req.into_body(), state.max_body).await {
+            Ok(collected) => (collected, None, None),
+            Err(crate::body::Failure::TooLarge(_)) => return Ok(too_large()),
             Err(_) => return Ok(plain(StatusCode::BAD_REQUEST, "bad body")),
         }
     };
