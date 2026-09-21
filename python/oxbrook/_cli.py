@@ -180,6 +180,10 @@ def changes(
 ) -> Iterator[list[Path]]:
     """Yield the files that changed, were added or were removed, as they happen.
 
+    Yields on every poll, an empty list when nothing changed, so the caller
+    gets a turn on each tick: that is how the supervisor notices a server that
+    died on its own rather than only when the next edit arrives.
+
     Polls modification times. That needs no dependency and behaves the same on
     every platform and both interpreter builds; for a source tree with the
     virtual environment and build output pruned, a scan is a few milliseconds.
@@ -192,13 +196,15 @@ def changes(
         time.sleep(POLL_INTERVAL)
         after = watched_files(directories, patterns)
         changed = [p for p in after.keys() | before.keys() if after.get(p) != before.get(p)]
-        if changed:
-            # Editors often write a file in two steps; let the second land
-            # before restarting on the first.
-            time.sleep(0.1)
-            after = watched_files(directories, patterns)
-            before = after
-            yield sorted(changed)
+        if not changed:
+            yield []
+            continue
+        # Editors often write a file in two steps; let the second land
+        # before restarting on the first.
+        time.sleep(0.1)
+        after = watched_files(directories, patterns)
+        before = after
+        yield sorted(changed)
 
 
 class _Stop(Exception):
@@ -292,14 +298,21 @@ def supervise(args: argparse.Namespace) -> int:
         child = start_server(command, environment)
         # The supervisor never imports the app itself: importing it here would
         # run module-level code twice and keep the first import's state for the
-        # life of the session. A target that cannot start shows up as the first
-        # server exiting, reported here rather than left to look like silence.
-        time.sleep(POLL_INTERVAL * 2)
-        reported_exit = child.poll() is not None
-        if reported_exit:
-            print(f"oxbrook: the server exited with code {child.returncode}; "
-                  f"waiting for a change", file=sys.stderr, flush=True)
+        # life of the session. A target that cannot start shows up as the
+        # server exiting, reported below rather than left to look like silence.
+        reported_exit = False
         for changed in changes(directories, patterns, snapshot):
+            # A server that died on its own — a syntax error mid-edit, a port
+            # already taken — is reported once, whenever it is noticed. This
+            # used to be one look a fixed moment after the start, which on a
+            # platform where starting a process takes longer saw a server that
+            # was still alive and then never looked again.
+            if child.poll() is not None and not reported_exit:
+                print(f"oxbrook: the server exited with code {child.returncode}; "
+                      f"waiting for a change", file=sys.stderr, flush=True)
+                reported_exit = True
+            if not changed:
+                continue
             names = ", ".join(os.path.relpath(p, base) for p in changed[:3])
             more = f" and {len(changed) - 3} more" if len(changed) > 3 else ""
             print(f"oxbrook: {names}{more} changed; restarting", flush=True)
@@ -307,13 +320,6 @@ def supervise(args: argparse.Namespace) -> int:
             forget_bytecode(changed)
             child = start_server(command, environment)
             reported_exit = False
-            # A server that dies on start — a syntax error mid-edit — is
-            # reported once, and the supervisor waits for the next save.
-            time.sleep(POLL_INTERVAL)
-            if child.poll() is not None and not reported_exit:
-                print(f"oxbrook: the server exited with code {child.returncode}; "
-                      f"waiting for a change", file=sys.stderr, flush=True)
-                reported_exit = True
     except (_Stop, KeyboardInterrupt):
         pass
     finally:
