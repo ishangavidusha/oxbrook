@@ -152,7 +152,7 @@ impl BodyShared {
 const LINGER: Duration = Duration::from_millis(250);
 
 /// Read and discard what is left of a body, for at most `LINGER`.
-async fn drain(mut body: Incoming) {
+pub(crate) async fn drain(mut body: Incoming) {
     let _ = tokio::time::timeout(LINGER, async {
         while let Some(Ok(_)) = body.frame().await {}
     })

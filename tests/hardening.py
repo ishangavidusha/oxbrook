@@ -1,14 +1,23 @@
 #!/usr/bin/env python3
-"""Regression tests for three defects found on 2026-09-06.
+"""Regression tests for defects found against a running server.
 
-Each of these was demonstrated against a running server before being fixed:
+Each of these was demonstrated before being fixed:
 
 * `HEAD` returned 405 on every route, which violates HTTP.
 * A crashing handler returned its exception text to the client. The probe used
   a fake database URL with a password in it and the client received it.
 * A request body was buffered without limit. One 200MB POST took the server
   from 44MB to 836MB resident.
+* A refusal decided before the body was read — no such route, wrong method, a
+  path parameter that will not coerce, no capacity — left the body in the
+  socket and closed on top of it. That is a reset, and on Windows a reset
+  discards what the client had already buffered, so the answer was replaced by
+  `[WinError 10053] An established connection was aborted`. Linux and macOS
+  won the race often enough to hide it, but paid for it in a connection that
+  could not be reused. Asserted here through that second cost, which is
+  visible on every platform: the connection stays alive.
 """
+import socket
 import sys
 import threading
 
@@ -33,6 +42,11 @@ async def hello(_: Request):
 @app.post("/only-post")
 async def only_post(_: Request):
     return {"ok": True}
+
+
+@app.post("/items/{item_id}")
+async def item(_: Request, item_id: int):
+    return {"id": item_id}
 
 
 @app.post("/echo")
@@ -106,6 +120,34 @@ def main() -> None:
             c.head("/ws").status_code in (405, 426),
             f"HEAD on a socket route returned {c.head('/ws').status_code}",
         )
+
+        # --- a refusal before the body is read keeps the connection ---
+        for label, request, status in (
+            ("no such route", b"POST /nope HTTP/1.1", b"404"),
+            ("wrong method", b"PUT /only-post HTTP/1.1", b"405"),
+            ("bad path parameter", b"POST /items/xyz HTTP/1.1", b"422"),
+        ):
+            body = b"a" * 200_000
+            sock = socket.create_connection(("127.0.0.1", PORT), timeout=10)
+            try:
+                sock.sendall(request + b"\r\nHost: x\r\nContent-Length: "
+                             + str(len(body)).encode() + b"\r\n\r\n" + body)
+                first = sock.recv(4096)
+                check(failures, status in first.split(b"\r\n")[0],
+                      f"{label}: answered {first[:40]!r}, expected {status!r}")
+                # The refusal drained the body, so this connection is still
+                # good. Unread, hyper closes it, and this is a broken pipe or
+                # an empty read.
+                try:
+                    sock.sendall(b"GET /hello HTTP/1.1\r\nHost: x\r\n\r\n")
+                    second = sock.recv(4096)
+                except OSError as exc:
+                    second = f"<{type(exc).__name__}: {exc}>".encode()
+                check(failures, b"200" in second.split(b"\r\n")[0],
+                      f"{label}: the connection did not survive the refusal, "
+                      f"so the body was left unread: {second[:60]!r}")
+            finally:
+                sock.close()
 
         # --- error responses must not leak ---
         r = c.get("/boom")

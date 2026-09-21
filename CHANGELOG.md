@@ -13,9 +13,11 @@ release does not; changes that break existing code are listed under
   stops its server with Ctrl-Break so a reload still drains and still runs
   lifespan teardown. Windows is a development platform here: nothing on the
   site is measured there.
-- A request body refused for being over `max_body` is read away briefly before
-  the `413` goes out, so the client reads the answer rather than losing it to
-  a connection reset.
+- A refusal decided before the request body is read — no such route, wrong
+  method, a path parameter that will not coerce, a body over `max_body`, no
+  capacity — now reads the body away briefly before answering. The client gets
+  the answer rather than a connection reset, and the connection survives to
+  carry the next request.
 - Static mounts refuse names that Windows resolves to something other than a
   file under the mount: a drive-relative segment such as `C:passwd`, a device
   name such as `CON` or `NUL`, and names ending in a dot or a space. Refused

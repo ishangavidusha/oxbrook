@@ -730,6 +730,18 @@ fn clone_param(value: &crate::router::ParamValue) -> crate::router::ParamValue {
     }
 }
 
+/// Answer a request whose body was never read, after reading it away.
+///
+/// Every refusal decided before the body is collected — no such route, wrong
+/// method, a path parameter that will not coerce, no capacity — leaves the
+/// body in the socket, and closing on top of that is a reset which costs the
+/// client the answer (I-089). It also costs the connection: hyper cannot reuse
+/// one whose request was not finished. Draining first buys back both.
+async fn refuse(req: hyper::Request<Incoming>, response: Response<Out>) -> Response<Out> {
+    crate::body::drain(req.into_body()).await;
+    response
+}
+
 fn too_large() -> Response<Out> {
     Response::builder()
         .status(StatusCode::PAYLOAD_TOO_LARGE)
@@ -1130,17 +1142,22 @@ async fn handle(
 
     let matched = match found {
         Ok(matched) => matched,
-        Err(RouteError::NotFound) => return Ok(plain(StatusCode::NOT_FOUND, "not found")),
-        Err(RouteError::MethodNotAllowed(allow)) => return Ok(method_not_allowed(allow)),
+        Err(RouteError::NotFound) => {
+            return Ok(refuse(req, plain(StatusCode::NOT_FOUND, "not found")).await)
+        }
+        Err(RouteError::MethodNotAllowed(allow)) => {
+            return Ok(refuse(req, method_not_allowed(allow)).await)
+        }
         // Coercion runs here, so a bad path parameter never wakes a worker.
         Err(RouteError::BadParam(err)) => {
-            return Ok(json(StatusCode::UNPROCESSABLE_ENTITY, err.to_json()))
+            let answer = json(StatusCode::UNPROCESSABLE_ENTITY, err.to_json());
+            return Ok(refuse(req, answer).await);
         }
     };
 
     // A static file never reaches a worker, and its body, if any, is ignored.
     if let Some(mount) = state.router.spec(matched.route).mount {
-        return Ok(crate::files::serve(
+        let answer = crate::files::serve(
             state.mounts[mount].clone(),
             matched.file.as_deref(),
             req.uri().path(),
@@ -1148,7 +1165,8 @@ async fn handle(
             req.headers(),
             head,
         )
-        .await);
+        .await;
+        return Ok(refuse(req, answer).await);
     }
 
     if state.router.spec(matched.route).websocket {
@@ -1157,7 +1175,7 @@ async fn handle(
 
     // Refused before the body is read, since reading it is work too.
     let Some(reservation) = Reservation::take(connection) else {
-        return Ok(overloaded());
+        return Ok(refuse(req, overloaded()).await);
     };
 
     let method = req.method().as_str().to_owned();
