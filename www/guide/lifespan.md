@@ -14,7 +14,11 @@ async def lifespan(app):
 
 @asynccontextmanager
 async def worker_lifespan(app):
-    pool = await asyncpg.create_pool(DSN)   # once per worker loop
+    pool = await asyncpg.create_pool(         # once per worker loop, so
+        DSN,                                  # size it as a share of the
+        min_size=1,                           # whole process's budget
+        max_size=app.per_worker(40),
+    )
     try:
         yield {"db": pool}
     finally:
@@ -47,6 +51,40 @@ background tasks: they would never run. Put those in `worker_lifespan`.
 
 On the GIL build there is one worker loop, so `worker_lifespan` runs once. Code
 written for both builds needs no change.
+
+## Size per loop, budget per process
+
+`worker_lifespan` runs once per loop, so **every number written in it is
+multiplied** by however many loops the process runs — and that is decided by
+the machine, not by the code. Four loops on a laptop, eight on a large server.
+
+Connection pools are where this bites, because the multiplier is invisible and
+the limit is at the other end:
+
+```python
+pool = await asyncpg.create_pool(DSN)   # asyncpg's default: min_size=max_size=10
+```
+
+`min_size` is eager, so that line opens **ten connections per loop the moment
+the server starts** — eighty on an eight-loop host, against a PostgreSQL whose
+default `max_connections` is 100. One process fits. The second one does not
+start, and the failure arrives as `too many clients already` on a machine that
+looked fine in testing.
+
+Say what the process may use, and let `per_worker` divide it:
+
+```python
+max_size=app.per_worker(40)     # 40 for this process, whatever the machine
+```
+
+It rounds down, because exceeding a connection budget is the dangerous
+direction, and it refuses a budget smaller than the number of loops rather than
+handing back zero. `app.workers` is the count itself, if the arithmetic is not
+a simple division.
+
+The same reasoning applies to anything else opened per loop and limited
+elsewhere: a client with a connection cap, a queue consumer with a licence
+count, a file handle budget.
 
 ## Writing one
 

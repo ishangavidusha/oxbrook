@@ -7,6 +7,14 @@ release does not; changes that break existing code are listed under
 
 ## Unreleased
 
+- **`app.per_worker(total)` and `app.workers`**, for sizing anything a
+  `worker_lifespan` opens. That hook runs once per worker loop, so a pool
+  written there is multiplied by a loop count the code never chose — and
+  asyncpg's default pool, opened eagerly, is ten connections per loop, which is
+  eighty on an eight-loop host against a PostgreSQL allowing a hundred.
+  `per_worker` divides a process-wide budget across the loops, rounding down,
+  and refuses a budget too small to share. The lifespan guide now shows this.
+
 - **`blocking=True` on a route** runs a plain `def` handler on a threadpool
   instead of its worker loop. A handler that takes time without awaiting — a
   sync database driver, `requests`, `boto3`, Pillow — freezes every other

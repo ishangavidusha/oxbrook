@@ -205,9 +205,72 @@ def bad_hooks_are_refused() -> None:
         pass
 
 
+def a_per_loop_budget_is_divided_not_multiplied() -> None:
+    """Anything `worker_lifespan` opens is opened once per loop, so a number
+    written there is multiplied by a count the code never chose.
+
+    asyncpg's own default is `min_size=max_size=10`, and `min_size` is eager,
+    so the obvious pool opens ten connections per loop the moment the server
+    starts — eighty on an eight-loop host, against a PostgreSQL that allows a
+    hundred. This asserts the arithmetic that stops that.
+    """
+    opened: list[int] = []
+
+    async def pools(app):
+        # What a real worker_lifespan would pass to create_pool.
+        opened.append(app.per_worker(40))
+        yield {}
+
+    app = make_app(None, pools)
+
+    # Before a server exists the count is unknown, and guessing it would be
+    # the same bug one layer down.
+    try:
+        app.per_worker(40)
+    except RuntimeError as exc:
+        check("worker_lifespan" in str(exc),
+              f"per_worker() before serving did not say where to call it: {exc}")
+    else:
+        failures.append("per_worker() answered before the worker count was known")
+
+    with TestClient(app, workers=WORKERS) as client:
+        check(client.get("/probe").status_code == 200, "setup: the app did not serve")
+        check(app.workers == WORKERS, f"app.workers was {app.workers}, expected {WORKERS}")
+
+    check(len(opened) == WORKERS,
+          f"worker_lifespan ran {len(opened)} times for {WORKERS} loops")
+    check(all(share == 40 // WORKERS for share in opened),
+          f"each loop was given {opened}, expected {40 // WORKERS} each")
+    # The whole point: the process total stays inside the budget.
+    check(sum(opened) <= 40,
+          f"{WORKERS} loops of {opened[0]} is {sum(opened)}, over a budget of 40")
+
+    app.workers = 8
+    check(app.per_worker(40) == 5, f"40 across 8 loops gave {app.per_worker(40)}")
+    # Rounds down: over a connection budget is the dangerous direction.
+    check(app.per_worker(41) == 5, f"41 across 8 loops gave {app.per_worker(41)}")
+    for bad in (0, -1, 3.5):
+        try:
+            app.per_worker(bad)
+        except (ValueError, TypeError):
+            pass
+        else:
+            failures.append(f"per_worker({bad!r}) was accepted")
+    try:
+        # Fewer connections than loops cannot be honoured; saying so beats
+        # returning zero, which would be a pool that cannot open.
+        app.per_worker(3)
+    except ValueError as exc:
+        check("at least one" in str(exc),
+              f"a budget below the loop count was refused with: {exc}")
+    else:
+        failures.append("a budget smaller than the worker count was accepted")
+
+
 def main() -> None:
     for step in (
         resources_stay_on_their_loop,
+        a_per_loop_budget_is_divided_not_multiplied,
         startup_failure_cleans_up,
         process_startup_failure_starts_no_workers,
         bad_hooks_are_refused,

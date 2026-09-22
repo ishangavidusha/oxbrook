@@ -115,6 +115,10 @@ class App:
         self._mcp: Any = None
         #: One threadpool for every blocking route on this app. Sized at run().
         self._blocking = BlockingPool()
+        #: How many worker loops this app will run, known once a server is
+        #: built and None before. `worker_lifespan` needs it to size anything
+        #: it opens per loop — see `per_worker`.
+        self.workers: int | None = None
         self.debug = debug
         self.redis_url = redis_url
         self._backend: Any = None
@@ -414,6 +418,50 @@ class App:
         """
         return self._layer(route.target, list(route.middleware), self._handlers())
 
+    def per_worker(self, total: int) -> int:
+        """One worker loop's share of a process-wide budget.
+
+        Anything `worker_lifespan` opens is opened once per loop, so a number
+        written there is multiplied by however many loops this process runs —
+        which is decided by the machine, not by the code. A pool of ten on an
+        eight-loop host is eighty connections, and a database that allows a
+        hundred has room for one such process.
+
+        Say what the *process* may use and divide it here:
+
+            async def worker_lifespan(app):
+                pool = await asyncpg.create_pool(
+                    DSN, min_size=1, max_size=app.per_worker(40)
+                )
+                try:
+                    yield {"db": pool}
+                finally:
+                    await pool.close()
+
+        Rounds down, because going over a budget for connections is the
+        dangerous direction: forty across three loops is thirteen each, not
+        fourteen. A loop cannot have less than one, so a budget smaller than
+        the number of loops cannot be honoured and says so rather than
+        returning zero.
+        """
+        workers = self.workers
+        if workers is None:
+            raise RuntimeError(
+                "per_worker() needs to know how many worker loops there are, "
+                "which is decided when the server is built. Call it inside "
+                "worker_lifespan, not at import time"
+            )
+        if not isinstance(total, int) or total < 1:
+            raise ValueError(f"per_worker() needs a positive integer, got {total!r}")
+        if total < workers:
+            raise ValueError(
+                f"per_worker({total}) cannot be shared across {workers} worker "
+                f"loops: each one needs at least one, so the smallest workable "
+                f"budget on this machine is {workers}. Run fewer loops with "
+                f"app.run(workers=...) if the budget is the fixed part"
+            )
+        return total // workers
+
     def websocket(self, path: str, authorize: Any = None, *, blocking: bool = False):
         """Register a WebSocket endpoint.
 
@@ -679,6 +727,7 @@ class App:
             raise ValueError("tls_cert and tls_key are needed together")
         tls = None if tls_cert is None else (os.fspath(tls_cert), os.fspath(tls_key))
         workers = workers or default_workers()
+        self.workers = workers
         mode = "GIL" if gil_enabled() else "free-threaded"
         if announce:
             print(
