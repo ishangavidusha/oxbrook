@@ -52,8 +52,9 @@ logging.getLogger("oxbrook.access").setLevel(logging.WARNING)  # just the access
 
 ## What Oxbrook logs on its own
 
-- A handler exception, with its traceback, at `ERROR`
-- An exception raised by a WebSocket handler, or by a dependency's teardown
+- A handler exception, with its traceback, at `ERROR`, including one raised by
+  a dependency's teardown, which is part of the request
+- An exception raised by a WebSocket handler
 - A dropped Redis connection behind a durable topic, once per outage at
   `WARNING`, and once more when it reconnects
 

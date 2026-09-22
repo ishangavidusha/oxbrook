@@ -34,7 +34,46 @@ teardown run after the handler returns, including when the handler raised, and
 that guarantee is what a helper function called inside the handler cannot
 provide.
 
-Teardown runs in reverse order of setup.
+## Teardown sees the outcome
+
+A generator dependency is finished the way a `with` block is. If the handler
+returned, the generator resumes after its `yield`. If the handler raised, the
+same exception is raised at the `yield`. So a transaction is written the way it
+reads:
+
+```python
+async def transaction(request):
+    async with request.state.pool.acquire() as db:
+        async with db.transaction():    # commit if the handler returned,
+            yield db                    # roll back if it raised
+
+@app.post("/users")
+async def create_user(_: Request, user: NewUser, db = Depends(transaction)):
+    return await db.fetchrow("insert into users ... returning *", ...)
+```
+
+An `HTTPError` raised by the handler is an exception like any other, so it rolls
+back too. So does a request cancelled because its client left.
+
+Teardown runs before the response is sent, and whatever it raises is the
+request's outcome. A commit that fails is an error response, never the success
+the handler returned. An exception handler registered for the driver's error
+applies to it as it would to one the handler raised:
+
+```python
+@app.exception_handler(asyncpg.UniqueViolationError)
+async def duplicate(request, exc):
+    return Reply({"detail": "already exists"}, status=409)
+```
+
+A dependency can also translate an error at its `yield` by raising a different
+one, as leaving a `with` block would. One that catches the handler's exception
+and raises nothing does not turn the request into a success: there is no
+response to send in its place, so the original error stands.
+
+Several dependencies are torn down in reverse order of setup, each seeing the
+exception left by the one before it, and all of them run even if one raises.
+A dependency must yield exactly once.
 
 ## Caching
 

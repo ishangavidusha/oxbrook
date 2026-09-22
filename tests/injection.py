@@ -5,7 +5,7 @@ import json
 import logging
 import sys
 
-from oxbrook import App, Depends, Request, Sessions
+from oxbrook import App, Depends, HTTPError, Request, Sessions
 from oxbrook._logging import JsonFormatter
 from oxbrook.testing import TestClient
 
@@ -60,6 +60,133 @@ def dependencies() -> None:
             "close" in events,
             "teardown did not run when the handler raised, so a resource leaks",
         )
+
+
+def teardown_sees_the_outcome() -> None:
+    """A generator dependency is finished like a `with` block, not closed.
+
+    Each case was demonstrated against a running server first. Teardown used
+    to close the generator, which raises GeneratorExit at the yield: a
+    transaction written the obvious way rolled back on every successful
+    request, a handler's exception never reached the dependency, and a commit
+    that failed was logged while the client was told 200.
+    """
+    app = App(openapi_url=None, docs_url=None, mcp_url=None)
+    seen: list[tuple] = []
+
+    class Conflict(Exception):
+        pass
+
+    async def transaction():
+        try:
+            yield "tx"
+        except BaseException as exc:
+            seen.append(("rollback", type(exc).__name__))
+            raise
+        else:
+            seen.append(("commit",))
+
+    async def failing_commit():
+        yield "tx"
+        raise RuntimeError("could not serialize access")
+
+    async def translating():
+        try:
+            yield "tx"
+        except Conflict:
+            raise HTTPError(409, "already exists") from None
+
+    async def swallowing():
+        try:
+            yield "tx"
+        except Exception:
+            pass
+
+    async def outer():
+        try:
+            yield "outer"
+        except BaseException as exc:
+            seen.append(("outer saw", type(exc).__name__))
+            raise
+
+    async def inner(o=Depends(outer)):
+        yield "inner"
+        raise LookupError("inner teardown failed")
+
+    async def greedy():
+        yield 1
+        yield 2
+
+    @app.get("/ok")
+    async def ok(_: Request, tx=Depends(transaction)):
+        return {"ok": True}
+
+    @app.get("/refused")
+    async def refused(_: Request, tx=Depends(transaction)):
+        raise HTTPError(403, "no")
+
+    @app.get("/commit-fails")
+    async def commit_fails(_: Request, tx=Depends(failing_commit)):
+        return {"written": True}
+
+    @app.get("/translated")
+    async def translated(_: Request, tx=Depends(translating)):
+        raise Conflict()
+
+    @app.get("/swallowed")
+    async def swallowed(_: Request, tx=Depends(swallowing)):
+        raise ValueError("handler failed")
+
+    @app.get("/nested")
+    async def nested(_: Request, i=Depends(inner)):
+        return {"ok": True}
+
+    @app.get("/greedy")
+    async def greedy_route(_: Request, g=Depends(greedy)):
+        return {"ok": True}
+
+    with TestClient(app) as c:
+        check(c.get("/ok").status_code == 200, "a plain success did not answer 200")
+        check(
+            seen == [("commit",)],
+            f"a successful request was torn down as {seen}; a transaction dependency "
+            f"would roll back everything the handler wrote",
+        )
+
+        seen.clear()
+        check(c.get("/refused").status_code == 403, "the handler's own error was lost")
+        check(
+            seen == [("rollback", "HTTPError")],
+            f"teardown saw {seen}, not the handler's exception",
+        )
+
+        r = c.get("/commit-fails")
+        check(
+            r.status_code == 500,
+            f"a teardown that failed after the handler returned answered "
+            f"{r.status_code}: a failed commit must not be reported as a success",
+        )
+        check("serialize" not in r.text, "teardown exception detail reached the client")
+
+        r = c.get("/translated")
+        check(r.status_code == 409, f"a dependency's HTTPError at teardown gave {r.status_code}")
+
+        r = c.get("/swallowed")
+        check(
+            r.status_code == 500,
+            f"a dependency that swallowed the handler's error gave {r.status_code}; "
+            f"there is no response to send in its place",
+        )
+
+        seen.clear()
+        check(c.get("/nested").status_code == 500, "a failing inner teardown was not an error")
+        check(
+            seen == [("outer saw", "LookupError")],
+            f"the outer dependency saw {seen}; teardown in reverse order should hand "
+            f"it the inner one's exception",
+        )
+
+        check(c.get("/greedy").status_code == 500, "a dependency that yielded twice was accepted")
 
 
 def no_cache() -> None:
@@ -175,7 +302,14 @@ def logging_output() -> None:
 
 
 def main() -> None:
-    for step in (dependencies, no_cache, sessions_round_trip, session_signing, logging_output):
+    for step in (
+        dependencies,
+        teardown_sees_the_outcome,
+        no_cache,
+        sessions_round_trip,
+        session_signing,
+        logging_output,
+    ):
         try:
             step()
             print(f"  {step.__name__}: ok")
