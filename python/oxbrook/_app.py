@@ -110,6 +110,8 @@ class App:
         self.openapi_url = openapi_url
         self.docs_url = docs_url
         self.mcp_url = mcp_url
+        #: Set by _register_mcp, so shutdown can close live agent sessions.
+        self._mcp: Any = None
         self.debug = debug
         self.redis_url = redis_url
         self._backend: Any = None
@@ -491,11 +493,29 @@ class App:
         # Capabilities are built once, at start, so a malformed one is an error
         # at boot rather than on an agent's first call.
         server = MCP(self, self.capabilities())
+        self._mcp = server
 
+        # All three on one path, which is what Streamable HTTP means by "a
+        # single endpoint". POST carries messages, GET is the stream the server
+        # talks on, DELETE ends the session.
+        #
+        # `cancel_on_disconnect` is off for the GET: the stream ending *is* the
+        # client leaving, and cancelling the handler that owns the subscription
+        # would race the generator's own cleanup.
         @self.post(self.mcp_url)
         async def mcp_endpoint(request):
             """Model Context Protocol endpoint."""
-            return await server.handle(request.body, request)
+            return await server.post(request)
+
+        @self.get(self.mcp_url, cancel_on_disconnect=False)
+        async def mcp_stream(request):
+            """Model Context Protocol server-to-client stream."""
+            return await server.get(request)
+
+        @self.delete(self.mcp_url)
+        async def mcp_end(request):
+            """End a Model Context Protocol session."""
+            return await server.delete(request)
 
     def _register_docs(self) -> None:
         """Add the OpenAPI and docs routes, unless the user turned them off."""

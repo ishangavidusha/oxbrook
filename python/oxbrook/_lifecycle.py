@@ -148,6 +148,11 @@ class Lifecycle:
 
     async def stop_process(self) -> None:
         manager, self._process_manager = self._process_manager, None
+        # Agent sessions hold an open SSE stream each. Closed explicitly, so a
+        # shutdown ends them rather than leaving them to the collector.
+        mcp = getattr(self.app, "_mcp", None)
+        if mcp is not None:
+            mcp.sessions.close()
         try:
             if manager is not None:
                 await manager.__aexit__(None, None, None)

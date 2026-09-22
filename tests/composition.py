@@ -435,9 +435,10 @@ def authorizers_can_raise(client: TestClient) -> None:
 
 
 def call_tool_raw(client: TestClient, name: str, arguments: dict, headers=None) -> dict:
-    payload = {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
-               "params": {"name": name, "arguments": arguments}}
-    return client.post("/mcp", json=payload, headers=headers or {}).json()["result"]
+    """The raw result, including isError, with the agent's own headers on it."""
+    return client.mcp(
+        "tools/call", {"name": name, "arguments": arguments}, headers=headers
+    )
 
 
 def tool_calls_run_router_middleware(client: TestClient) -> None:

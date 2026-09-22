@@ -30,6 +30,8 @@ from typing import Any
 
 import httpx
 
+from ._mcp import PREFERRED_VERSION as MCP_VERSION
+
 
 def free_port() -> int:
     """Ask the OS for an unused port.
@@ -56,6 +58,8 @@ class TestClient:
         **server_options: Any,
     ) -> None:
         self.app = app
+        #: The agent session, opened lazily by the first `mcp()` call.
+        self._session: str | None = None
         self.host = host
         self.port = port or free_port()
         # Loaded once the server has started, so a bad certificate is reported
@@ -188,16 +192,63 @@ class TestClient:
 
         return websockets.connect(f"{self.ws_url}{path}", ssl=self._trust)
 
-    def mcp(self, method: str, params: dict | None = None, request_id: int = 1) -> Any:
+    def _mcp_session(self) -> str:
+        """The session id, opening one on first use.
+
+        The transport is stateful — every message after `initialize` carries a
+        session id — but that is transport bookkeeping, not something a test
+        should have to write. `client.call_tool(...)` stays one line.
+        """
+        if self._session is None:
+            url = self.app.mcp_url or "/mcp"
+            started = self.http.post(
+                url,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 0,
+                    "method": "initialize",
+                    "params": {
+                        "protocolVersion": MCP_VERSION,
+                        "capabilities": {},
+                        "clientInfo": {"name": "oxbrook.testing", "version": "1"},
+                    },
+                },
+            )
+            self._session = started.headers.get("mcp-session-id", "")
+        return self._session
+
+    def mcp(
+        self,
+        method: str,
+        params: dict | None = None,
+        request_id: int = 1,
+        headers: dict[str, str] | None = None,
+    ) -> Any:
         """One JSON-RPC call against the app's MCP endpoint.
 
         Returns the `result`, or raises with the JSON-RPC error message.
+        `headers` are the agent's own — what a route's middleware will see.
         """
         url = self.app.mcp_url or "/mcp"
         payload: dict[str, Any] = {"jsonrpc": "2.0", "id": request_id, "method": method}
         if params is not None:
             payload["params"] = params
-        body = self.http.post(url, json=payload).json()
+
+        def sent() -> dict[str, str]:
+            return {**(headers or {}), "mcp-session-id": self._mcp_session()}
+
+        response = self.http.post(url, json=payload, headers=sent())
+        if response.status_code == 404:
+            # The session expired or the server restarted under us. Starting a
+            # new one is what the spec tells a client to do about a 404, and a
+            # test that failed here would be reporting the transport rather
+            # than whatever it was actually checking.
+            self._session = None
+            response = self.http.post(url, json=payload, headers=sent())
+
+        if response.status_code == 202 and not response.content:
+            return None
+        body = response.json()
         if "error" in body:
             raise RuntimeError(f"MCP {method} failed: {body['error']}")
         return body.get("result")

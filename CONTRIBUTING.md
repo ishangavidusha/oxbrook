@@ -48,7 +48,7 @@ C. The CI leg is what actually runs them.
 ## Tests
 
 ```bash
-make verify        # twenty-eight suites, free-threaded
+make verify        # twenty-nine suites, free-threaded
 make verify-gil    # the same suites on the GIL build
 ```
 

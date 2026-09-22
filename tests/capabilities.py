@@ -245,10 +245,36 @@ def protocol_drift_check() -> None:
     )
 
 
+def handshake(client) -> str:
+    """Initialize, and return the session id the server issued.
+
+    Every message after `initialize` carries it: the transport is stateful now,
+    because a session is what a server-initiated message is addressed to.
+    """
+    started = client.post(
+        "/mcp",
+        json={
+            "jsonrpc": "2.0",
+            "id": 0,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-11-25",
+                "capabilities": {},
+                "clientInfo": {"name": "wire-check", "version": "1"},
+            },
+        },
+    )
+    check(started.status_code == 200, f"initialize returned {started.status_code}")
+    sid = started.headers.get("mcp-session-id")
+    check(bool(sid), "initialize issued no MCP-Session-Id")
+    return sid or ""
+
+
 def wire_format_checks() -> None:
     """The SDK exposes snake_case, but the wire format is camelCase. Assert the
     bytes on the wire, not just what the client parsed."""
     with httpx.Client(base_url=BASE, timeout=10) as c:
+        c.headers["mcp-session-id"] = handshake(c)
         raw = c.post(
             "/mcp",
             json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
