@@ -3,10 +3,11 @@
 # Everything Oxbrook talks to runs in a container, so nothing has to be
 # installed on the host. Start with `make up`.
 #
-#   redis   backing store for durable topics (milestone 4)
+#   redis     backing store for durable topics (milestone 4)
+#   postgres  the database the database suite and example run against
 #
-# Ports are deliberately non-default (6399, not 6379) so this never collides
-# with anything already running on the machine.
+# Ports are deliberately non-default (6399 and 5499, not 6379 and 5432) so this
+# never collides with anything already running on the machine.
 
 name: oxbrook-dev
 
@@ -32,3 +33,31 @@ services:
       # Durable topics are durable in Redis, not on the host. Tests should
       # start from an empty store every time.
       - /data
+
+  postgres:
+    image: postgres:18-alpine
+    container_name: oxbrook-postgres
+    environment:
+      POSTGRES_USER: oxbrook
+      POSTGRES_PASSWORD: oxbrook
+      POSTGRES_DB: oxbrook
+    # Durability off: this is a disposable test database, and fsync on every
+    # commit inside Docker's VM makes the suite measure the disk, not the
+    # framework. max_connections is left at the default 100 on purpose: it is
+    # the limit a pool sized per loop runs into, so the suite should meet it.
+    command: >
+      postgres
+      -c fsync=off
+      -c synchronous_commit=off
+      -c full_page_writes=off
+    ports:
+      - "127.0.0.1:5499:5432"
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "oxbrook", "-d", "oxbrook"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+      start_period: 3s
+    tmpfs:
+      # Same reasoning as redis: every run starts from an empty database.
+      - /var/lib/postgresql

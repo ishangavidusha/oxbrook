@@ -104,8 +104,8 @@ That gives you, without further configuration:
 Services run in containers rather than on the host.
 
 ```bash
-make up      # start redis
-make down    # stop it and remove its volume
+make up      # start redis and postgres
+make down    # stop them and remove their volumes
 make stack   # build the app image and run two nodes against one redis
 ```
 

@@ -2,7 +2,7 @@
 
 Needs a Redis:
 
-    make redis          # or: redis-server --port 6399
+    make up
     python examples/durable_queue.py
 
 Then submit work and watch it get processed:

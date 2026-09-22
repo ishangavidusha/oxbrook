@@ -42,7 +42,7 @@ up under load as intermittent "attached to a different loop" errors.
 
 | hook | runs | use it for |
 |---|---|---|
-| `lifespan` | once, before the workers start and after they stop | configuration, loaded models, thread-safe clients, one-off work such as migrations |
+| `lifespan` | once, before the workers start and after they stop | configuration, loaded models, thread-safe clients, one-off work such as [migrations](database.md#when-to-run-them) |
 | `worker_lifespan` | on every worker loop, before it takes a request and after its last | anything bound to an event loop: pools, async clients |
 
 `lifespan` runs on a loop of its own that is not running while requests are

@@ -7,6 +7,29 @@ release does not; changes that break existing code are listed under
 
 ## Unreleased
 
+- **A dependency's teardown now sees how the request ended.** A generator
+  dependency is finished the way a `with` block is: resumed after its `yield`
+  if the handler returned, and with the handler's exception raised there if it
+  did not. It used to be closed, which raises `GeneratorExit` at the `yield`
+  every time — so `async with db.transaction(): yield db` rolled back on every
+  successful request and nothing a handler wrote was kept, while the client was
+  told it succeeded. And an exception raised during teardown, such as a commit
+  that fails, was logged while the handler's `200` went out; it is now the
+  request's outcome, and exception handlers apply to it.
+
+- **One JSON encoding everywhere.** A handler's return, a `Reply`, an
+  `HTTPError` detail, SSE, WebSockets, durable topics and MCP tool results all
+  encode by pydantic's rules, which models already followed. A plain return of
+  a `datetime`, `UUID`, `Decimal`, enum, database row or list of models was a
+  `500` and now encodes; timestamps are ISO 8601, `Decimal` a string, NaN
+  `null`.
+
+- **A database guide**, with `examples/database/`: asyncpg with a pool per
+  worker loop, a transaction per request, driver errors as responses,
+  SQLAlchemy, and Alembic migrations that are safe for several replicas to run
+  at once. Every part of it is run against PostgreSQL by the test suites, and
+  `make verify` now requires PostgreSQL as it does Redis.
+
 - **`app.per_worker(total)` and `app.workers`**, for sizing anything a
   `worker_lifespan` opens. That hook runs once per worker loop, so a pool
   written there is multiplied by a loop count the code never chose — and
@@ -42,6 +65,16 @@ release does not; changes that break existing code are listed under
   posted `tools/call` to `/mcp` without calling `initialize` first receives
   `400`. `TestClient.mcp()` and `TestClient.call_tool()` handle this
   themselves and are unchanged; `TestClient.mcp()` also takes `headers=` now.
+- **Breaking:** a value with no JSON form inside a `Reply`, an `HTTPError`
+  detail or an MCP tool result is refused with a `500`, as a plain return
+  always was, rather than sent as its `str()`. The same values inside a `Reply`
+  also change form to match a plain return: a `datetime` is
+  `"2026-09-23T10:00:00Z"` rather than `"2026-09-23 10:00:00+00:00"`, an enum
+  is its value rather than `"Color.red"`, and NaN is `null` rather than the
+  invalid bare `NaN`.
+- **Breaking:** an exception raised in a dependency's teardown is now the
+  request's outcome rather than a log line, and a dependency that yields twice
+  is an error rather than a logged warning.
 
 ## 0.2.0 — 2026-09-21
 

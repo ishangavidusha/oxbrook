@@ -26,17 +26,18 @@ HERE = Path(__file__).resolve().parent
 #: pass over a running server, and a failure there is most readable once the
 #: narrower suites have had their say.
 SUITES = [
-    "workers", "routing", "query", "bodies", "blocking", "openapi", "capabilities", "agents",
-    "streams", "sse",
+    "workers", "routing", "query", "bodies", "encoding", "blocking", "openapi", "capabilities",
+    "agents", "streams", "sse",
     "websocket", "hardening", "escaping", "wire", "failures", "plumbing", "injection",
-    "durable", "backpressure", "assignment", "composition", "lifespan", "cors", "uploads",
-    "origins", "cli", "files", "protocols", "cancellation", "verify",
+    "durable", "database", "backpressure", "assignment", "composition", "lifespan", "cors",
+    "uploads", "origins", "cli", "files", "protocols", "cancellation", "verify",
 ]
 
 #: What a built wheel is checked with, in `[tool.cibuildwheel]`. A subset,
 #: because this runs once per wheel on a CI runner: the dispatch path, the
 #: request path, the protections, the static mounts, cancellation, TLS and
-#: HTTP/2, and the end-to-end pass. Redis is not there, so `durable` is out.
+#: HTTP/2, and the end-to-end pass. Redis and PostgreSQL are not there, so
+#: `durable` and `database` are out.
 WHEEL = ["routing", "bodies", "hardening", "files", "cancellation", "protocols", "verify"]
 
 
@@ -64,11 +65,13 @@ def main() -> int:
     # tested none of it (I-019). Ask first: when Redis is required, this is
     # the difference between finding out now and finding out fifteen suites
     # in, and when it is not, the warning still reaches the top of the log.
-    if "durable" in chosen:
-        probe = subprocess.run([sys.executable, str(HERE / "durable.py"), "--check"],
-                               cwd=HERE.parent)
-        if probe.returncode != 0:
-            return probe.returncode
+    # `database` is the same shape for PostgreSQL.
+    for gated in ("durable", "database"):
+        if gated in chosen:
+            probe = subprocess.run([sys.executable, str(HERE / f"{gated}.py"), "--check"],
+                                   cwd=HERE.parent)
+            if probe.returncode != 0:
+                return probe.returncode
 
     for name in chosen:
         # The name first: a suite that hangs before its own first print is

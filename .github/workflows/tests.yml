@@ -62,11 +62,24 @@ jobs:
           --health-interval 5s
           --health-timeout 3s
           --health-retries 10
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: oxbrook
+          POSTGRES_PASSWORD: oxbrook
+          POSTGRES_DB: oxbrook
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U oxbrook -d oxbrook"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
 
     timeout-minutes: 20
 
     env:
       OXBROOK_TEST_REDIS: redis://127.0.0.1:6379
+      OXBROOK_TEST_POSTGRES: postgresql://oxbrook:oxbrook@127.0.0.1:5432/oxbrook
       # Without this, prints are block-buffered and a hung suite leaves a log
       # that stops mid-way through the *previous* suite.
       PYTHONUNBUFFERED: "1"
@@ -79,6 +92,8 @@ jobs:
       # Turns tests/durable.py's SKIP into a failure. A green run that never
       # touched milestone 4 is the thing this workflow exists to prevent.
       OXBROOK_REQUIRE_REDIS: "1"
+      # The same for tests/database.py and PostgreSQL.
+      OXBROOK_REQUIRE_POSTGRES: "1"
 
     steps:
       - uses: actions/checkout@v7
@@ -102,7 +117,8 @@ jobs:
         run: |
           uv venv --python ${{ matrix.python }} ${{ matrix.venv }}
           uv pip install --python ${{ matrix.venv }}/bin/python \
-            maturin "httpx[http2]" cryptography openapi-spec-validator websockets redis mcp coverage pydantic
+            maturin "httpx[http2]" cryptography openapi-spec-validator websockets redis mcp coverage pydantic \
+            asyncpg "sqlalchemy[asyncio]" alembic
 
       - name: Confirm the interpreter is the one asked for
         run: |
@@ -129,8 +145,8 @@ jobs:
           retention-days: 14
 
   # Windows is a development platform for this project, not a deployment one,
-  # so it gets the suites without Redis: `make` is not there to drive them and
-  # a service container needs a Linux runner. `tests/run.py` is the same list
+  # so it gets the suites without Redis or PostgreSQL: `make` is not there to
+  # drive them and a service container needs a Linux runner. `tests/run.py` is the same list
   # the Makefile uses, so the two legs cannot run different suites.
   windows:
     name: windows ${{ matrix.label }}

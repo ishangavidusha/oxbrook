@@ -9,8 +9,8 @@ GIL_PY := $(shell test -x /opt/homebrew/bin/python3.14 && echo /opt/homebrew/bin
 venvs:
 	uv venv --python $(FT_PY) .venv
 	uv venv --python $(GIL_PY) .venv-gil
-	uv pip install --python .venv/bin/python maturin uvicorn granian fastapi "httpx[http2]" cryptography openapi-spec-validator websockets redis mcp coverage
-	uv pip install --python .venv-gil/bin/python maturin uvicorn granian fastapi "httpx[http2]" cryptography openapi-spec-validator websockets redis mcp coverage
+	uv pip install --python .venv/bin/python maturin uvicorn granian fastapi "httpx[http2]" cryptography openapi-spec-validator websockets redis mcp coverage asyncpg "sqlalchemy[asyncio]" alembic
+	uv pip install --python .venv-gil/bin/python maturin uvicorn granian fastapi "httpx[http2]" cryptography openapi-spec-validator websockets redis mcp coverage asyncpg "sqlalchemy[asyncio]" alembic
 	# Docs tooling only in the GIL venv: mkdocs has no reason to run twice.
 	uv pip install --python .venv-gil/bin/python mkdocs-material 'mkdocstrings[python]' ruff
 
@@ -59,12 +59,22 @@ ifeq ($(REDIS),require)
 export OXBROOK_REQUIRE_REDIS := 1
 endif
 
+# The same for tests/database.py, the only suite that runs a query: the
+# database pattern, transactions and migrations. `make verify POSTGRES=`
+# accepts that gap.
+POSTGRES ?= require
+ifeq ($(POSTGRES),require)
+export OXBROOK_REQUIRE_POSTGRES := 1
+endif
+
 verify: build-ft
 	@.venv/bin/python tests/durable.py --check
+	@.venv/bin/python tests/database.py --check
 	@for s in $(SUITES); do echo "== $$s"; $(SUITE_TIMEOUT) .venv/bin/python tests/$$s.py || exit 1; done
 
 verify-gil: build-gil
 	@.venv-gil/bin/python tests/durable.py --check
+	@.venv-gil/bin/python tests/database.py --check
 	@for s in $(SUITES); do echo "== $$s"; $(SUITE_TIMEOUT) .venv-gil/bin/python tests/$$s.py || exit 1; done
 
 # Branch coverage of the Python half. COVERAGE_CORE=sysmon matters: handlers run
@@ -76,6 +86,7 @@ COVERAGE_MIN := 85
 # project directory, and subprocess measurement (pyproject) follows them there.
 coverage: build-ft
 	@.venv/bin/python tests/durable.py --check
+	@.venv/bin/python tests/database.py --check
 	@rm -f .coverage .coverage.* 2>/dev/null || true
 	@for s in $(SUITES); do echo "== $$s"; \
 		COVERAGE_FILE=$(CURDIR)/.coverage COVERAGE_CORE=sysmon $(SUITE_TIMEOUT) \

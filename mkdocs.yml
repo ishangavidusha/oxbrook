@@ -99,6 +99,7 @@ nav:
       - guide/dependencies.md
       - guide/blocking.md
       - guide/lifespan.md
+      - guide/database.md
       - guide/sessions.md
       - guide/logging.md
       - guide/errors.md

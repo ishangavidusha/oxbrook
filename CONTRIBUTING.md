@@ -13,7 +13,8 @@ ceremony.
   target; the standard GIL build must keep working too.
 - **A Rust toolchain**, for the extension module.
 - **[uv](https://docs.astral.sh/uv/)**, for the environments.
-- **Docker**, for Redis. Services run in containers, never on the host.
+- **Docker**, for Redis and PostgreSQL. Services run in containers, never on
+  the host.
 - **[oha](https://github.com/hatoo/oha)**, only for benchmarks.
 - **Linux, macOS or Windows.** The first two are what gets measured; Windows
   is supported so the framework can be developed against there.
@@ -35,7 +36,8 @@ commands it would have run:
 ```powershell
 uv venv --python 3.14t .venv
 uv pip install --python .venv/Scripts/python.exe `
-  maturin "httpx[http2]" cryptography openapi-spec-validator websockets redis mcp pydantic
+  maturin "httpx[http2]" cryptography openapi-spec-validator websockets redis mcp pydantic `
+  asyncpg "sqlalchemy[asyncio]" alembic
 .venv/Scripts/maturin.exe develop --release
 ```
 
@@ -48,7 +50,7 @@ C. The CI leg is what actually runs them.
 ## Tests
 
 ```bash
-make verify        # thirty suites, free-threaded
+make verify        # thirty-two suites, free-threaded
 make verify-gil    # the same suites on the GIL build
 ```
 
@@ -62,21 +64,25 @@ freshly built wheel, and it holds the list that the Makefile reads.
 ``` Each suite is a standalone script that exits non-zero on
 failure and runs against a real server on a real socket.
 
-**Start Redis first**, with `make up`. `tests/durable.py` is the only suite
-covering durable topics, and it prints `SKIP` rather than failing when Redis is
-unreachable — so a green run without one has not tested them at all. `make
-verify` therefore requires a reachable Redis and checks for it before the
-suites start:
+**Start the services first**, with `make up`. Two suites need one each:
+`tests/durable.py` is the only suite covering durable topics, and needs Redis;
+`tests/database.py` is the only one that runs a query — the pool per loop,
+transactions, migrations, `examples/database/` — and needs PostgreSQL. Each
+prints `SKIP` rather than failing when its service is unreachable, so a green
+run without them has not tested any of that. `make verify` therefore requires
+both and checks for them before the suites start:
 
 ```bash
-make up                  # redis, in a container
-make verify              # refuses to start without it
-make verify REDIS=       # accept the gap instead, on a machine with no containers
+make up                            # redis and postgres, in containers
+make verify                        # refuses to start without them
+make verify REDIS= POSTGRES=       # accept the gap instead, with no containers
 ```
 
-`tests/run.py` makes the same check, and honours `OXBROOK_REQUIRE_REDIS` for
-it. `OXBROOK_TEST_REDIS` points at a Redis somewhere other than the default
-`redis://127.0.0.1:6399`.
+`tests/run.py` makes the same checks, and honours `OXBROOK_REQUIRE_REDIS` and
+`OXBROOK_REQUIRE_POSTGRES`. `OXBROOK_TEST_REDIS` and `OXBROOK_TEST_POSTGRES`
+point elsewhere than the defaults, `redis://127.0.0.1:6399` and
+`postgresql://oxbrook:oxbrook@127.0.0.1:5499/oxbrook`. The database suite
+creates a database per run and drops it afterwards.
 
 Coverage of both halves:
 
@@ -90,7 +96,7 @@ instrumented extension, runs the suites against it, and rebuilds release
 afterwards so a benchmark never measures the instrumented build.
 
 ```bash
-make up            # redis
+make up            # redis and postgres
 make stack         # two nodes against one redis, for cross-process behaviour
 ```
 
@@ -177,6 +183,10 @@ explains each in context; the short form:
    headers. A new way to invoke a handler must not bypass them.
 10. **Nothing loop-bound crosses worker loops.** Connection pools and async
    clients belong to one loop; create them in `worker_lifespan`.
+11. **A value encodes to JSON one way, wherever it goes out.** Every surface
+   that writes JSON — responses, SSE, WebSockets, topics, MCP — calls
+   `_schema.encode`. A new one must too, rather than `json.dumps`, whose
+   `default=str` turns an unknown object into its repr.
 
 ## Documentation
 
