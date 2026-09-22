@@ -72,6 +72,20 @@ registration.
 Topics show up as readable resources at `topic://<name>`. A durable one returns
 recent messages.
 
+An agent can also **follow** a topic instead of polling it. Subscribing to
+`topic://orders` means the server tells the agent when there is something new,
+over the same stream machinery that serves browsers and WebSocket clients — the
+topic is declared once and all three read it.
+
+Notifications carry no payload: the protocol says a resource changed and the
+client reads it. So the server holds what arrived between reads. That buffer is
+bounded and drops the oldest, because an agent that stops reading must not be
+able to grow a server's memory by staying subscribed. Reads are also what
+re-arm the notification, so a busy topic produces one "there is something to
+read" per quiet period rather than one per message.
+
+Durable topics are read from the stream itself and need no buffer.
+
 ## Inspecting without serving
 
 ```python
@@ -84,19 +98,45 @@ the surface an agent is allowed to reach.
 
 ## Transport
 
-The simple half of the specification: a `POST` carrying one JSON-RPC message,
-answered with JSON.
+MCP has two wires, and `/mcp` answers both. Which one a client gets depends on
+what it asks for, so neither has to be configured.
 
-Not implemented: streaming responses, the server-to-client `GET` channel, and
-resource subscriptions. The router returns `405` for those, which is what the
-spec asks for.
+**2026-07-28.** A client probes with `server/discover` and, on a real answer,
+uses this wire: every request is self-contained, carrying its protocol version
+in `_meta`, with no handshake and no session. Server-to-client messages do not
+ride a separate connection — a client sends `subscriptions/listen` and the
+response to that request *is* the stream. Nothing is resumable; a dropped
+stream is re-listened, not replayed.
+
+On this wire a followed in-memory topic delivers the notification but not the
+messages behind it, because there is no session to hold them between reads.
+Follow a durable topic where the payload matters.
+
+**2025-11-25 and earlier.** The handshake wire, and what a client falls back to
+when the probe finds nothing. `initialize` returns an `MCP-Session-Id` that
+every later message carries; a `GET` on the same path opens a stream the server
+sends on, and a `DELETE` ends the session. A missing session id is `400` and an
+unknown or expired one is `404`, which is how a client is told to start a new
+session rather than retry into one that is gone.
+
+Sessions expire after five minutes of silence and are capped per process; a
+session holding an open stream is never idle. Event ids are not attached, so no
+client attempts to resume a broken stream — resumption would need a per-stream
+replay buffer, and an unsupported feature is better than one that loses
+messages quietly.
+
+`Origin` is validated on every request, as the specification requires: a
+request from a browser page on another origin is refused with `403` unless
+[CORS](guide/cors.md) already allows that origin. Requests without an `Origin`
+header — which is every non-browser client — are unaffected.
 
 Turn the endpoint off entirely with `App(mcp_url=None)`.
 
 ## Verified against a real client
 
 `tests/capabilities.py` drives the official MCP SDK client against a running
-server.
+server, and `tests/agents.py` drives the transport underneath it on both
+wires.
 
 A constant exported by an SDK is not the same thing as a version a client will
 negotiate, and nothing short of a real handshake distinguishes the two. The same

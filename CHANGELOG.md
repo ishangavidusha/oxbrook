@@ -5,6 +5,25 @@ top. While the version is `0.x`, a minor release may change the API and a patch
 release does not; changes that break existing code are listed under
 **Breaking** in the release that makes them.
 
+## Unreleased
+
+- **The MCP endpoint speaks both of the protocol's transports.** A client that
+  probes with `server/discover` gets the 2026-07-28 wire: self-contained
+  requests, no handshake, no session, and `subscriptions/listen` answered with
+  a stream. A client that does not falls back to the handshake wire, where
+  `initialize` issues an `MCP-Session-Id`, a `GET` on `/mcp` opens a
+  server-to-client stream and a `DELETE` ends the session. Both on the one
+  endpoint; neither needs configuring.
+- **An agent can follow a topic** rather than polling it, over either wire. The
+  same declaration already serving browsers and WebSocket clients now feeds
+  agents.
+- `Origin` is validated on every request to `/mcp`, and a foreign origin is
+  refused with `403` unless CORS already allows it.
+- **Breaking:** the handshake wire now requires a session, so a client that
+  posted `tools/call` to `/mcp` without calling `initialize` first receives
+  `400`. `TestClient.mcp()` and `TestClient.call_tool()` handle this
+  themselves and are unchanged; `TestClient.mcp()` also takes `headers=` now.
+
 ## 0.2.0 — 2026-09-21
 
 - **Windows**, on both interpreter builds, with x86-64 wheels: `pip install`

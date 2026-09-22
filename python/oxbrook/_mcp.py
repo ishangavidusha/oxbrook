@@ -60,11 +60,41 @@ from ._streams import Topic
 PREFERRED_VERSION = "2025-11-25"
 SUPPORTED_VERSIONS = {"2025-11-25", "2025-06-18", "2025-03-26"}
 
+#: The 2026-07-28 wire, which is a different protocol on the same endpoint.
+#:
+#: There is no handshake and no session: a request is self-contained, carrying
+#: its protocol version and the client's identity in `_meta`. A client finds
+#: out a server speaks it by asking — `server/discover` — and falls back to the
+#: handshake on anything that is not a positive answer.
+#:
+#: Server-to-client messages do not ride a standing GET stream here. A client
+#: sends `subscriptions/listen` and the response to *that request* is the
+#: stream. Nothing is resumable: a dropped stream is re-listened, not replayed.
+MODERN_VERSIONS = ("2026-07-28",)
+
+DISCOVER = "server/discover"
+LISTEN = "subscriptions/listen"
+ACKNOWLEDGED = "notifications/subscriptions/acknowledged"
+RESOURCE_UPDATED = "notifications/resources/updated"
+
+#: Every 2026-07-28 result carries caching metadata, and a client that parses
+#: strictly refuses one without it. `ttlMs: 0` says "do not cache this": a tool
+#: list changes when the process does, and a call's result is about the moment
+#: it ran. A server that wanted to be cached would have to mean it, per result.
+RESULT_STAMP = {"ttlMs": 0, "cacheScope": "private", "resultType": "complete"}
+
+META = "_meta"
+PROTOCOL_META = "io.modelcontextprotocol/protocolVersion"
+SUBSCRIPTION_META = "io.modelcontextprotocol/subscriptionId"
+
 PARSE_ERROR = -32700
 INVALID_REQUEST = -32600
 METHOD_NOT_FOUND = -32601
 INVALID_PARAMS = -32602
 INTERNAL_ERROR = -32603
+#: 2026-07-28: "I do not speak any version you offered", and the answer names
+#: the ones this server does, so the client can retry at a mutual one.
+UNSUPPORTED_VERSION = -32022
 
 TOPIC_SCHEME = "topic://"
 
@@ -542,6 +572,130 @@ class MCP:
 
         return None if notification else _ok(request_id, result)
 
+    # ---- the 2026-07-28 wire ----------------------------------------------
+
+    def _era(self, message: dict) -> str:
+        """Which protocol this message belongs to: "modern", "handshake", or
+        "mismatch" when it names a version nothing here speaks.
+
+        `server/discover` is always modern: it is the question "are you a
+        modern server?", and only a modern server answers it.
+        """
+        if message.get("method") == DISCOVER:
+            return "modern"
+        asked = ((message.get("params") or {}).get(META) or {}).get(PROTOCOL_META)
+        if asked is None:
+            return "handshake"
+        if asked in MODERN_VERSIONS:
+            return "modern"
+        if asked in SUPPORTED_VERSIONS:
+            return "handshake"
+        return "mismatch"
+
+    def _stamp(self, result: Any) -> Any:
+        if isinstance(result, dict):
+            for key, value in RESULT_STAMP.items():
+                result.setdefault(key, value)
+        return result
+
+    def discover(self) -> dict:
+        """What a modern client probes with, and the whole of the negotiation.
+
+        Answering it at all is what tells a client to stop and use this wire
+        rather than falling back to `initialize`.
+        """
+        return {
+            "supportedVersions": list(MODERN_VERSIONS),
+            "capabilities": {
+                "tools": {"listChanged": False},
+                "resources": {"subscribe": True, "listChanged": False},
+            },
+            "instructions": self.app.description or None,
+        }
+
+    def _honored(self, asked: dict) -> dict:
+        """The subset of a listen filter this server will actually deliver.
+
+        Echoed back in the acknowledgement, because a client is entitled to
+        know what it is not going to be told about. Only resource
+        subscriptions are honoured: nothing here changes its tool or prompt
+        list while running, so promising those notifications would be
+        promising silence.
+        """
+        uris = [u for u in (asked.get("resourceSubscriptions") or []) if isinstance(u, str)]
+        return {"resourceSubscriptions": uris}
+
+    async def listen(self, message: dict) -> Any:
+        """`subscriptions/listen`: the response to this request *is* the stream.
+
+        No session, no GET, nothing to clean up afterwards — the stream's life
+        is the request's life, which is what an Oxbrook handler already is.
+        """
+        from ._sse import SSE
+
+        request_id = message.get("id")
+        if request_id is None:
+            raise CapabilityError("subscriptions/listen needs a request id")
+
+        honored = self._honored((message.get("params") or {}).get("notifications") or {})
+        # Resolved before the stream opens, so an unknown topic is an error
+        # answered with JSON rather than a stream that turns out to be empty.
+        topics = [(uri, self._topic(uri)) for uri in honored["resourceSubscriptions"]]
+        return SSE(self._listen_stream(request_id, honored, topics))
+
+    async def _listen_stream(self, request_id: Any, honored: dict, topics: list) -> Any:
+        from ._sse import Event
+
+        meta = {SUBSCRIPTION_META: request_id}
+        # Subscribed before the acknowledgement goes out, so a message emitted
+        # while that frame is in flight is buffered rather than missed.
+        subscriptions = [(uri, topic.subscribe()) for uri, topic in topics]
+        queue: asyncio.Queue = asyncio.Queue(maxsize=FEED_BUFFER)
+        pumps = [
+            asyncio.create_task(self._drain_into(queue, uri, subscription))
+            for uri, subscription in subscriptions
+        ]
+        try:
+            yield Event(
+                data={
+                    "jsonrpc": "2.0",
+                    "method": ACKNOWLEDGED,
+                    "params": {"notifications": honored, META: meta},
+                },
+                event="message",
+            )
+            while True:
+                uri = await queue.get()
+                yield Event(
+                    data={
+                        "jsonrpc": "2.0",
+                        "method": RESOURCE_UPDATED,
+                        "params": {"uri": uri, META: meta},
+                    },
+                    event="message",
+                )
+        finally:
+            for _uri, subscription in subscriptions:
+                subscription.close()
+            for pump in pumps:
+                pump.cancel()
+
+    async def _drain_into(self, queue: "asyncio.Queue", uri: str, subscription: Any) -> None:
+        """One topic's emits, as "there is something to read at `uri`".
+
+        The message itself is dropped, because the wire has nowhere to put it:
+        an updated notification carries a uri and no payload. On this wire
+        there is no session either, so no per-client buffer for the client to
+        come back and read — see I-095.
+        """
+        async for _item in subscription:
+            try:
+                queue.put_nowait(uri)
+            except asyncio.QueueFull:
+                # The client is not reading. Dropping a duplicate "something
+                # changed" costs nothing: the next one says the same thing.
+                pass
+
     # ---- transport --------------------------------------------------------
 
     def origin_allowed(self, request: Any) -> bool:
@@ -580,6 +734,41 @@ class MCP:
             content_type="application/json",
         )
 
+    async def _modern(self, message: dict, request: Any) -> Any:
+        """One self-contained request on the 2026-07-28 wire.
+
+        No session to look up and none to create. A notification is
+        acknowledged and dropped — this wire defines no client-to-server
+        notifications, so there is nothing one could be asking for.
+        """
+        method = message.get("method")
+        request_id = message.get("id")
+
+        if request_id is None:
+            return Response(b"", status=202, content_type="application/json")
+
+        try:
+            if method == DISCOVER:
+                result: Any = self.discover()
+            elif method == LISTEN:
+                # The only answer that is a stream rather than a value.
+                return await self.listen(message)
+            else:
+                reply = await self.dispatch(message, request, None)
+                if reply is not None and "result" in reply:
+                    self._stamp(reply["result"])
+                return Response(
+                    json.dumps(reply, default=str).encode(),
+                    content_type="application/json",
+                )
+        except CapabilityError as exc:
+            return self._refuse(INVALID_PARAMS, str(exc), 400)
+
+        return Response(
+            json.dumps(_ok(request_id, self._stamp(result)), default=str).encode(),
+            content_type="application/json",
+        )
+
     async def post(self, request: Any) -> Response:
         """One JSON-RPC message in, one answer out."""
         if not self.origin_allowed(request):
@@ -597,6 +786,32 @@ class MCP:
             return self._refuse(INVALID_REQUEST, "batched requests are not supported", 400)
         if not isinstance(message, dict):
             return self._refuse(INVALID_REQUEST, "expected a JSON object", 400)
+
+        era = self._era(message)
+        if era == "mismatch":
+            asked = ((message.get("params") or {}).get(META) or {}).get(PROTOCOL_META)
+            # Named, so the client can retry at a version both ends speak
+            # rather than guessing which way to step.
+            return Response(
+                json.dumps(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": message.get("id"),
+                        "error": {
+                            "code": UNSUPPORTED_VERSION,
+                            "message": f"unsupported protocol version {asked!r}",
+                            "data": {
+                                "supported": [*MODERN_VERSIONS, *sorted(SUPPORTED_VERSIONS)]
+                            },
+                        },
+                    }
+                ).encode(),
+                status=400,
+                content_type="application/json",
+            )
+
+        if era == "modern":
+            return await self._modern(message, request)
 
         sid = request.header(SESSION_HEADER)
         initializing = message.get("method") == "initialize"

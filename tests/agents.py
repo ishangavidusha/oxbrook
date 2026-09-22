@@ -277,6 +277,115 @@ def deleting_a_session_closes_its_stream(client) -> None:
     )
 
 
+# ---- the 2026-07-28 wire ---------------------------------------------------
+#
+# The same endpoint, a different protocol. A client that stamps a modern
+# version in `_meta` gets no session rules at all; one that does not still gets
+# the handshake. Both have to keep working on the one URL.
+
+MODERN = "2026-07-28"
+
+
+def modern(client, method, params=None, request_id=1, version=MODERN):
+    body = {"jsonrpc": "2.0", "id": request_id, "method": method}
+    body["params"] = {**(params or {}), "_meta": {
+        "io.modelcontextprotocol/protocolVersion": version,
+    }}
+    return client.post(MCP, json=body)
+
+
+def discover_advertises_the_modern_wire(client) -> None:
+    """Answering this at all is the whole negotiation: a client that gets a
+    real answer stops and uses this wire instead of falling back."""
+    found = client.post(MCP, json={"jsonrpc": "2.0", "id": 1, "method": "server/discover"})
+    check(found.status_code == 200, f"server/discover gave {found.status_code}")
+    result = found.json()["result"]
+    check(
+        MODERN in result["supportedVersions"],
+        f"discover advertised {result.get('supportedVersions')}",
+    )
+    check(
+        result["capabilities"]["resources"]["subscribe"] is True,
+        "discover did not advertise resource subscriptions",
+    )
+
+
+def a_modern_request_needs_no_session(client) -> None:
+    """The point of the wire. The same call is 400 without the stamp."""
+    cold = client.post(MCP, json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    check(cold.status_code == 400, f"an unstamped tools/list gave {cold.status_code}")
+
+    stamped = modern(client, "tools/list")
+    check(stamped.status_code == 200, f"a stamped tools/list gave {stamped.status_code}")
+    result = stamped.json()["result"]
+    check(any(t["name"] == "place" for t in result["tools"]), "the tool list was empty")
+    # Results carry caching metadata on this wire, and a client that parses
+    # strictly refuses one without it.
+    for field in ("ttlMs", "cacheScope", "resultType"):
+        check(field in result, f"a modern result omitted {field}")
+
+
+def an_unknown_version_is_named_back(client) -> None:
+    """-32022 carries the versions this server speaks, so the client can retry
+    at a mutual one rather than guessing which way to step."""
+    wrong = modern(client, "tools/list", version="1999-01-01")
+    check(wrong.status_code == 400, f"an unknown version gave {wrong.status_code}")
+    error = wrong.json()["error"]
+    check(error["code"] == -32022, f"an unknown version gave code {error['code']}")
+    check(
+        MODERN in error["data"]["supported"],
+        f"the refusal did not name a supported version: {error.get('data')}",
+    )
+
+
+def listen_streams_its_own_response(client) -> None:
+    """No session, no GET: the response to the listen request *is* the stream.
+
+    The first frame acknowledges and echoes what will actually be delivered.
+    """
+    body = {
+        "jsonrpc": "2.0",
+        "id": 77,
+        "method": "subscriptions/listen",
+        "params": {
+            "notifications": {"resourceSubscriptions": ["topic://orders"]},
+            "_meta": {"io.modelcontextprotocol/protocolVersion": MODERN},
+        },
+    }
+    frames: list[dict] = []
+    with httpx.Client(timeout=15) as streamer:
+        with streamer.stream("POST", MCP, json=body) as response:
+            check(response.status_code == 200, f"listen gave {response.status_code}")
+            check(
+                "text/event-stream" in response.headers.get("content-type", ""),
+                f"listen answered {response.headers.get('content-type')!r}",
+            )
+            emitter = threading.Timer(
+                0.5, lambda: [client.post(f"{BASE}/order/{n}") for n in ("x", "y")]
+            )
+            emitter.start()
+            for line in response.iter_lines():
+                if line.startswith("data: "):
+                    frames.append(json.loads(line[6:]))
+                    if len(frames) >= 3:
+                        break
+            emitter.cancel()
+
+    check(frames[0]["method"] == "notifications/subscriptions/acknowledged",
+          f"the first frame was {frames[0].get('method')!r}, not the acknowledgement")
+    check(
+        frames[0]["params"]["notifications"]["resourceSubscriptions"] == ["topic://orders"],
+        f"the acknowledgement echoed {frames[0]['params'].get('notifications')}",
+    )
+    updates = [f for f in frames[1:] if f["method"] == "notifications/resources/updated"]
+    check(len(updates) >= 2, f"two emits produced {len(updates)} updates")
+    # Every frame is stamped with the listen request's id, which is how a
+    # client tells one stream's traffic from another's.
+    for frame in frames:
+        stamped = frame["params"]["_meta"]["io.modelcontextprotocol/subscriptionId"]
+        check(stamped == 77, f"a frame carried subscription id {stamped!r}")
+
+
 def main() -> None:
     threading.Thread(target=lambda: app.run(port=PORT, workers=4), daemon=True).start()
     for _ in range(100):
@@ -313,6 +422,15 @@ def main() -> None:
 
         deleting_a_session_closes_its_stream(client)
         print("  deleting_a_session_closes_its_stream: ok")
+
+        for step in (
+            discover_advertises_the_modern_wire,
+            a_modern_request_needs_no_session,
+            an_unknown_version_is_named_back,
+            listen_streams_its_own_response,
+        ):
+            step(client)
+            print(f"  {step.__name__}: ok")
 
     if failures:
         print("\nfailures:")
