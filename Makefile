@@ -48,10 +48,23 @@ SUITES := $(shell python3 tests/run.py --list)
 # hangs before its own first print is otherwise invisible in a CI log.
 SUITE_TIMEOUT ?=
 
+# tests/durable.py is the only cover milestone 4 has, and it prints SKIP rather
+# than failing when there is no Redis. So a run on a machine that forgot
+# `make up` came back green having tested none of it (I-019). Required here by
+# default, and checked before the suites start rather than fifteen in.
+#
+# `make verify REDIS=` accepts the gap, for a machine with no containers.
+REDIS ?= require
+ifeq ($(REDIS),require)
+export OXBROOK_REQUIRE_REDIS := 1
+endif
+
 verify: build-ft
+	@.venv/bin/python tests/durable.py --check
 	@for s in $(SUITES); do echo "== $$s"; $(SUITE_TIMEOUT) .venv/bin/python tests/$$s.py || exit 1; done
 
 verify-gil: build-gil
+	@.venv-gil/bin/python tests/durable.py --check
 	@for s in $(SUITES); do echo "== $$s"; $(SUITE_TIMEOUT) .venv-gil/bin/python tests/$$s.py || exit 1; done
 
 # Branch coverage of the Python half. COVERAGE_CORE=sysmon matters: handlers run
@@ -62,6 +75,7 @@ COVERAGE_MIN := 85
 # Paths are absolute because the CLI suite's processes run from a temporary
 # project directory, and subprocess measurement (pyproject) follows them there.
 coverage: build-ft
+	@.venv/bin/python tests/durable.py --check
 	@rm -f .coverage .coverage.* 2>/dev/null || true
 	@for s in $(SUITES); do echo "== $$s"; \
 		COVERAGE_FILE=$(CURDIR)/.coverage COVERAGE_CORE=sysmon $(SUITE_TIMEOUT) \
@@ -213,8 +227,8 @@ sweep-gil: build-gil
 DOCKER := $(shell command -v docker 2>/dev/null || echo $(HOME)/.docker/bin/docker)
 COMPOSE := $(DOCKER) compose
 
-# Durable-topic tests need Redis. Without it they print SKIP and still pass, so
-# run this before trusting `make verify` to have covered milestone 4.
+# Durable-topic tests need Redis. `make verify` now refuses to run without it,
+# so this is the command it will tell you to run.
 up:
 	$(COMPOSE) up -d --wait
 

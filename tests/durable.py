@@ -1,9 +1,16 @@
 #!/usr/bin/env python3
 """Durable topics: persistence, cross-process fan-out, and at-least-once.
 
-Needs a Redis on OXBROOK_TEST_REDIS (default redis://127.0.0.1:6399). Prints
-SKIP and exits 0 if there is none, so the rest of the suite still runs; the
-gap is recorded as I-019 rather than hidden.
+Needs a Redis on OXBROOK_TEST_REDIS (default redis://127.0.0.1:6399).
+
+This is the only suite covering milestone 4, so a run that skips it has proved
+nothing about durable topics. With OXBROOK_REQUIRE_REDIS set an unreachable
+Redis is a failure rather than a SKIP; `make verify` and CI both set it.
+
+    python tests/durable.py --check    report reachability and stop
+
+`--check` is what the runners call before the suites, so a missing Redis is
+reported in the first second rather than fifteen suites in.
 """
 import asyncio
 import os
@@ -284,17 +291,25 @@ async def main_async():
 
 
 def main() -> None:
+    # --check answers "can this suite run?" and stops, for a runner that wants
+    # to know before it spends ten minutes on the other twenty-seven suites.
+    check_only = "--check" in sys.argv[1:]
+
     if not asyncio.run(reachable()):
         why = "redis package not installed" if not HAVE_REDIS else f"no redis at {URL}"
         print(f"redis: unavailable ({why})")
-        # CI sets OXBROOK_REQUIRE_REDIS. A suite that passes without testing
-        # anything is worse than one that fails, and this is the only suite
-        # covering milestone 4.
+        # A suite that passes without testing anything is worse than one that
+        # fails, and this is the only cover milestone 4 has.
         if os.environ.get("OXBROOK_REQUIRE_REDIS"):
-            print("\nRESULT: FAIL (OXBROOK_REQUIRE_REDIS is set and redis is unreachable)")
+            print("start one with `make up`, or accept the gap with `make verify REDIS=`")
+            print("\nRESULT: FAIL (redis is required and unreachable)")
             sys.exit(1)
         print("\nRESULT: SKIP")
         sys.exit(0)
+
+    if check_only:
+        print(f"redis: {URL}")
+        return
 
     print(f"redis: {URL}  prefix: {PREFIX}")
     asyncio.run(main_async())

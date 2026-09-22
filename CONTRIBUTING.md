@@ -62,9 +62,21 @@ freshly built wheel, and it holds the list that the Makefile reads.
 ``` Each suite is a standalone script that exits non-zero on
 failure and runs against a real server on a real socket.
 
-**Start Redis first.** `tests/durable.py` prints `SKIP` and still passes when
-Redis is unreachable, so a green run on a machine with no containers has not
-tested durable topics.
+**Start Redis first**, with `make up`. `tests/durable.py` is the only suite
+covering durable topics, and it prints `SKIP` rather than failing when Redis is
+unreachable — so a green run without one has not tested them at all. `make
+verify` therefore requires a reachable Redis and checks for it before the
+suites start:
+
+```bash
+make up                  # redis, in a container
+make verify              # refuses to start without it
+make verify REDIS=       # accept the gap instead, on a machine with no containers
+```
+
+`tests/run.py` makes the same check, and honours `OXBROOK_REQUIRE_REDIS` for
+it. `OXBROOK_TEST_REDIS` points at a Redis somewhere other than the default
+`redis://127.0.0.1:6399`.
 
 Coverage of both halves:
 

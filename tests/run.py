@@ -58,6 +58,17 @@ def main() -> int:
         print(" ".join(chosen))
         return 0
 
+    # `durable` is the only suite covering milestone 4 and it prints SKIP
+    # without a Redis, so a run that forgot `make up` comes back green having
+    # tested none of it (I-019). Ask first: when Redis is required, this is
+    # the difference between finding out now and finding out fifteen suites
+    # in, and when it is not, the warning still reaches the top of the log.
+    if "durable" in chosen:
+        probe = subprocess.run([sys.executable, str(HERE / "durable.py"), "--check"],
+                               cwd=HERE.parent)
+        if probe.returncode != 0:
+            return probe.returncode
+
     for name in chosen:
         # The name first: a suite that hangs before its own first print is
         # otherwise invisible in a CI log.
