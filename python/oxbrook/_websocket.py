@@ -20,7 +20,7 @@ import asyncio
 import json
 from typing import Any
 
-from ._schema import is_model_instance, to_json
+from ._schema import encode
 
 
 class WebSocketClosed(Exception):
@@ -81,12 +81,10 @@ class WebSocket:
             sent = self._core.send_text(data)
         elif isinstance(data, (bytes, bytearray, memoryview)):
             sent = self._core.send_bytes(bytes(data))
-        elif is_model_instance(data):
-            # Text, not binary: a model is JSON, and a dict sent the same way
-            # would arrive as text. Frame type should not depend on which.
-            sent = self._core.send_text(to_json(data).decode())
         else:
-            sent = self._core.send_text(json.dumps(data, separators=(",", ":")))
+            # Text, not binary, for a model and a dict alike: both are JSON,
+            # and frame type should not depend on which was sent.
+            sent = self._core.send_text(encode(data).decode())
 
         if not sent:
             raise WebSocketClosed("socket is closed or its send buffer is full")

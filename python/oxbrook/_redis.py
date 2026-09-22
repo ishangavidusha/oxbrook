@@ -25,7 +25,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
 
-from ._schema import is_model_instance, to_json
+from ._schema import encode
 
 try:
     import redis.asyncio as aioredis
@@ -59,9 +59,7 @@ CONNECT_RETRIES = 3
 def _encode(value: Any) -> bytes:
     if isinstance(value, bytes):
         return value
-    if is_model_instance(value):
-        return to_json(value)
-    return json.dumps(value, separators=(",", ":")).encode()
+    return encode(value)
 
 
 def _decode(raw: bytes | None, model: Any = None) -> Any:

@@ -11,12 +11,11 @@ The source is any async iterable, so a topic subscription is the common case
 but an async generator works just as well.
 """
 
-import json
 import re
 from dataclasses import dataclass
 from typing import Any
 
-from ._schema import is_model_instance, to_json
+from ._schema import encode
 
 #: `send_chunk` return codes, matching ChunkResult in src/responder.rs.
 SENT = 0
@@ -82,9 +81,7 @@ def _encode_data(data: Any) -> str:
         return data
     if isinstance(data, (bytes, bytearray)):
         return bytes(data).decode("utf-8", "replace")
-    if is_model_instance(data):
-        return to_json(data).decode()
-    return json.dumps(data, separators=(",", ":"))
+    return encode(data).decode()
 
 
 def format_event(item: Any) -> bytes:

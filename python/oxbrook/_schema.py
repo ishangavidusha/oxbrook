@@ -57,6 +57,55 @@ def to_json(instance: Any) -> bytes:
     return instance.__pydantic_serializer__.to_json(instance)
 
 
+# One encoding for every value, on every surface: a handler's return, a Reply,
+# an HTTPError's detail, an SSE event, a WebSocket message, a topic, an MCP
+# tool result. Each used to choose for itself, so a datetime was a 500 returned
+# plainly, `"2026-09-23 10:00:00"` inside a Reply, and ISO 8601 inside a model.
+# Pydantic's rules are the ones taken because models already follow them: a
+# value encodes the same whether or not it sits in a model.
+#
+# NaN and infinity become null. Pydantic's default writes the bare constants,
+# which no JSON parser accepts, and the Rust encoder already answers null.
+
+
+def _mapping_or_refuse(value: Any) -> Any:
+    # A database row is usually mapping-like without being a registered
+    # Mapping: asyncpg's Record has keys() and lookup by name. Anything else is
+    # refused rather than str()'d, because a repr in a response is a bug that
+    # reaches a client looking like data.
+    keys = getattr(value, "keys", None)
+    if callable(keys):
+        return {key: value[key] for key in keys()}
+    raise TypeError(
+        f"{type(value).__qualname__} cannot be encoded as JSON; return a dict, "
+        f"a list, a pydantic model, or a value converted to one of those"
+    )
+
+
+if HAVE_PYDANTIC:
+    from pydantic_core import to_json as _pydantic_to_json
+    from pydantic_core import to_jsonable_python as _pydantic_jsonable
+
+    def encode(value: Any) -> bytes:
+        """JSON bytes for any value Oxbrook sends."""
+        return _pydantic_to_json(value, inf_nan_mode="null", fallback=_mapping_or_refuse)
+
+    def jsonable(value: Any) -> Any:
+        """The same value as plain dicts, lists and scalars, encoded the same way."""
+        return _pydantic_jsonable(value, inf_nan_mode="null", fallback=_mapping_or_refuse)
+
+else:  # pragma: no cover - depends on the environment
+    import json as _json
+
+    def encode(value: Any) -> bytes:
+        return _json.dumps(
+            value, separators=(",", ":"), default=_mapping_or_refuse
+        ).encode()
+
+    def jsonable(value: Any) -> Any:
+        return _json.loads(encode(value))
+
+
 def validation_body(exc: Any) -> bytes:
     """FastAPI-shaped error payload, so existing clients and tooling can read it."""
     return b'{"detail":' + exc.json().encode() + b"}"

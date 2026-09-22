@@ -26,12 +26,11 @@ logging.
 """
 
 import http
-import json
 from typing import Any
 
 from ._middleware import Reply
 from ._response import Response
-from ._schema import RequestValidationError
+from ._schema import RequestValidationError, encode
 
 
 class HTTPError(Exception):
@@ -71,7 +70,7 @@ class HTTPError(Exception):
 
 
 def http_error_body(exc: HTTPError) -> bytes:
-    return json.dumps({"detail": exc.detail}, default=str).encode()
+    return encode({"detail": exc.detail})
 
 
 async def _default_http_error(_request: Any, exc: HTTPError) -> Response:

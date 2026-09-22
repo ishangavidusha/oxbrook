@@ -45,7 +45,7 @@ from ._capabilities import Capability, CapabilityError
 from ._logging import logger
 from ._middleware import Reply, merge
 from ._response import Response
-from ._schema import is_model_instance
+from ._schema import encode, jsonable
 from ._streams import Topic
 
 #: Protocol revisions this server has actually been exercised against, newest
@@ -305,12 +305,6 @@ def _tool_error(text: str) -> dict:
     return {"content": [{"type": "text", "text": text}], "isError": True}
 
 
-def _jsonable(value: Any) -> Any:
-    if is_model_instance(value):
-        return value.model_dump(mode="json")
-    return value
-
-
 class MCP:
     """Dispatch for one app's MCP endpoint."""
 
@@ -439,7 +433,7 @@ class MCP:
                 {
                     "uri": uri,
                     "mimeType": "application/json",
-                    "text": json.dumps(body, default=str),
+                    "text": encode(body).decode(),
                 }
             ]
 
@@ -460,7 +454,7 @@ class MCP:
             {
                 "uri": uri,
                 "mimeType": "application/json",
-                "text": json.dumps(body, default=str),
+                "text": encode(body).decode(),
             }
         ]
 
@@ -498,11 +492,11 @@ class MCP:
             return {"content": [{"type": "text", "text": body}], "isError": result.status >= 400}
 
         if status is not None and status >= 400:
-            return _tool_error(json.dumps(_jsonable(result), default=str))
+            return _tool_error(encode(result).decode())
 
-        payload = _jsonable(result)
+        payload = jsonable(result)
         content = {
-            "content": [{"type": "text", "text": json.dumps(payload, default=str)}],
+            "content": [{"type": "text", "text": encode(payload).decode()}],
             "isError": False,
         }
         if capability.route.response_model is not None:
@@ -758,14 +752,14 @@ class MCP:
                 if reply is not None and "result" in reply:
                     self._stamp(reply["result"])
                 return Response(
-                    json.dumps(reply, default=str).encode(),
+                    encode(reply),
                     content_type="application/json",
                 )
         except CapabilityError as exc:
             return self._refuse(INVALID_PARAMS, str(exc), 400)
 
         return Response(
-            json.dumps(_ok(request_id, self._stamp(result)), default=str).encode(),
+            encode(_ok(request_id, self._stamp(result))),
             content_type="application/json",
         )
 
@@ -840,7 +834,7 @@ class MCP:
             # A notification or a response gets acknowledgement and no body.
             return Response(b"", status=202, content_type="application/json", headers=headers)
         return Response(
-            json.dumps(reply, default=str).encode(),
+            encode(reply),
             content_type="application/json",
             headers=headers,
         )

@@ -15,7 +15,7 @@ from ._errors import HTTPError, http_error_body
 from ._logging import logger
 from ._middleware import Reply, merge
 from ._response import Response
-from ._schema import RequestValidationError, is_model_instance, to_json
+from ._schema import RequestValidationError, encode, is_model_instance, to_json
 from ._sse import CLOSED, FULL, SSE, SSE_HEADERS, format_event
 from ._websocket import WebSocket
 
@@ -281,16 +281,19 @@ async def _respond(handler, request, responder, params, debug):
             )
         elif status_override is not None or extra_headers is not None:
             # send_json cannot carry a status or headers, so encode here instead.
-            import json as _json
-
             responder.send(
-                status_override or 200,
-                "application/json",
-                _json.dumps(result, default=str).encode(),
-                extra_headers,
+                status_override or 200, "application/json", encode(result), extra_headers
             )
         else:
-            responder.send_json(200, result)
+            try:
+                # Encoded in Rust, without building a Python str: the fast
+                # path, for values that are already plain JSON.
+                responder.send_json(200, result)
+            except Exception:  # noqa: BLE001 - anything else takes the general encoder
+                # A datetime, a UUID, a Decimal, a database row, a list of
+                # models. The Rust encoder refuses these before sending
+                # anything, so the responder is still unused here.
+                responder.send(200, "application/json", encode(result))
     except Exception as exc:  # noqa: BLE001
         logger.exception(
             "response could not be sent",
