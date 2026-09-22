@@ -113,7 +113,7 @@ A tokio thread that schedules work by calling into the interpreter can block
 inside the event loop's self-pipe write, and on the GIL build a thread blocked
 while attached stops every other thread in the process.
 
-**Handlers are `async def`**, enforced at registration.
+**Handlers are `async def`** unless the route says `blocking=True`, enforced at registration.
 
 **Both Python builds work.** Free-threaded 3.14t is the primary target; the GIL
 build runs a single worker loop.

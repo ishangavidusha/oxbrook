@@ -13,6 +13,7 @@ a message naming the handler, rather than as a confusing 500 later.
 """
 
 import datetime as _datetime
+import functools
 import inspect
 import re
 import types
@@ -22,6 +23,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from . import _blocking
 from ._bodies import BodyStream
 from ._depends import Depends
 from ._depends import bind as bind_dependencies
@@ -96,6 +98,11 @@ class RouteInfo:
     """Runs before the handshake; may refuse the upgrade."""
     tool: bool = False
     """Exposed to agents over MCP. Opt-in, never the default."""
+    blocking: bool = False
+    """Runs on the threadpool instead of its worker loop, which is what lets
+    the handler be a plain `def`."""
+    pool: Any = None
+    """The `_blocking.Slot` a blocking route runs through, filled by the app."""
     cancel_on_disconnect: bool = True
     """Cancel the handler if its client leaves, or its request times out,
     before it answers."""
@@ -207,21 +214,41 @@ def bind_stream(fn: Callable[..., Any], name: str) -> Callable[..., Any]:
     return handler
 
 
+def _blocking_shim(fn: Callable[..., Any], slot: Any) -> Callable[..., Any]:
+    """`fn` as an awaitable that runs on the threadpool.
+
+    Wrapped before anything else, so body validation, dependency teardown,
+    middleware and the MCP tool path all see an ordinary async callable and
+    need to know nothing about this.
+    """
+
+    @functools.wraps(fn)
+    async def blocking(*args: Any, **kwargs: Any) -> Any:
+        return await slot.run(fn, *args, **kwargs)
+
+    return blocking
+
+
 def _build_target(
-    fn: Callable[..., Any], body: Any, form: Any, stream: str | None, dependencies: dict
+    fn: Callable[..., Any],
+    body: Any,
+    form: Any,
+    stream: str | None,
+    dependencies: dict,
+    slot: Any = None,
 ) -> Callable[..., Any]:
     """Layer body validation and dependency resolution around the handler.
 
     Dependencies resolve outside body validation, so a dependency that opens a
     resource still tears it down when the body turns out to be invalid.
     """
-    target = fn
+    target = fn if slot is None else _blocking_shim(fn, slot)
     if body is not None:
-        target = bind_body(fn, *body)
+        target = bind_body(target, *body)
     elif form is not None:
-        target = bind_form(fn, *form)
+        target = bind_form(target, *form)
     elif stream is not None:
-        target = bind_stream(fn, stream)
+        target = bind_stream(target, stream)
     return target if not dependencies else bind_dependencies(target, dependencies)
 
 
@@ -232,11 +259,35 @@ def build_route(
     websocket: bool = False,
     tool: bool = False,
     cancel_on_disconnect: bool = True,
+    blocking: bool = False,
 ) -> RouteInfo:
     where = f"{'WEBSOCKET' if websocket else method} {path} -> {getattr(fn, '__qualname__', fn)}"
 
-    if not inspect.iscoroutinefunction(fn):
-        raise TypeError(f"{where}: handlers must be `async def`")
+    coroutine = inspect.iscoroutinefunction(fn)
+    if blocking and websocket:
+        raise TypeError(
+            f"{where}: a WebSocket handler cannot be blocking. It holds an open "
+            f"socket for its whole life, so a thread would be held for that long "
+            f"too; do the blocking part with `blocking=True` on a route, or off "
+            f"the socket entirely"
+        )
+    if blocking and coroutine:
+        raise TypeError(
+            f"{where}: blocking=True is for a `def` handler. This one is "
+            f"`async def`, which already runs on the worker loop — if it calls "
+            f"something that blocks, move that call off the loop rather than "
+            f"the whole handler"
+        )
+    if not blocking and not coroutine:
+        # The message names the fix, because this is the error a blocking
+        # handler produces and "must be async def" sends people to rewrite it
+        # as `async def` — which runs it on the loop and makes it worse.
+        raise TypeError(
+            f"{where}: handlers must be `async def`. If this one blocks — a "
+            f"sync database driver, requests, boto3 — declare the route "
+            f"`blocking=True` and it runs on Oxbrook's threadpool instead of "
+            f"stalling a worker loop"
+        )
 
     stripped = _PLACEHOLDER.sub("", path)
     if "{" in stripped or "}" in stripped:
@@ -411,11 +462,14 @@ def build_route(
     doc = inspect.getdoc(fn) or ""
     summary, _, description = doc.partition("\n\n")
 
+    # One slot per blocking route; the app it is registered on fills it.
+    slot = _blocking.Slot() if blocking else None
+
     return RouteInfo(
         method=method,
         path=path,
         fn=fn,
-        target=_build_target(fn, body, form, stream, dependencies),
+        target=_build_target(fn, body, form, stream, dependencies, slot),
         params=params,
         body=body,
         form=None if form is None else form[:2],
@@ -426,5 +480,7 @@ def build_route(
         description=description.strip(),
         websocket=websocket,
         tool=tool,
+        blocking=blocking,
+        pool=slot,
         cancel_on_disconnect=bool(cancel_on_disconnect),
     )

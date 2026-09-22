@@ -5,6 +5,7 @@ import sys
 from typing import Any
 
 from . import _openapi
+from ._blocking import Pool as BlockingPool
 from ._cors import CORS, check_origin
 from ._errors import DEFAULT_HANDLERS
 from ._errors import guard as guard_exceptions
@@ -112,6 +113,8 @@ class App:
         self.mcp_url = mcp_url
         #: Set by _register_mcp, so shutdown can close live agent sessions.
         self._mcp: Any = None
+        #: One threadpool for every blocking route on this app. Sized at run().
+        self._blocking = BlockingPool()
         self.debug = debug
         self.redis_url = redis_url
         self._backend: Any = None
@@ -129,9 +132,29 @@ class App:
         self.state = State()
 
     def route(
-        self, method: str, path: str, tool: bool = False, *, cancel_on_disconnect: bool = True
+        self,
+        method: str,
+        path: str,
+        tool: bool = False,
+        *,
+        cancel_on_disconnect: bool = True,
+        blocking: bool = False,
     ):
         """Register a route.
+
+        `blocking=True` lets the handler be a plain `def` and runs it on a
+        threadpool instead of its worker loop. A worker loop serves many
+        requests at once by interleaving them at every `await`, so a handler
+        that takes time *without* awaiting — a sync database driver,
+        `requests`, `boto3`, Pillow — freezes every other request that loop is
+        serving. Declaring the route blocking is what keeps it off the loop,
+        and it is opt-in so that the cost is visible where the route is.
+
+        The threadpool is shared by the whole process and bounded, so blocking
+        calls queue rather than multiplying threads. A blocking handler cannot
+        be cancelled once it has started: a thread inside a blocking call
+        cannot be interrupted, so a client that leaves frees the loop but not
+        the thread.
 
         `tool=True` also exposes it to agents over MCP. Opt-in on purpose:
         every route being agent-callable by default would mean an
@@ -153,7 +176,8 @@ class App:
             # Validates the handler against its path and fails here, at import
             # time, rather than on the first request.
             self._add(build_route(fn, method, path, tool=tool,
-                                  cancel_on_disconnect=cancel_on_disconnect))
+                                  cancel_on_disconnect=cancel_on_disconnect,
+                                  blocking=blocking))
             return fn
 
         return decorator
@@ -192,19 +216,26 @@ class App:
                         "router cannot tell apart"
                     )
                 )
+        if route.pool is not None:
+            # A Router builds its routes before it knows an app, so this is the
+            # first moment a blocking route can be told where to run.
+            route.pool.pool = self._blocking
         self.routes.append(route)
 
-    def get(self, path: str, tool: bool = False, *, cancel_on_disconnect: bool = True):
+    def get(self, path: str, tool: bool = False, *, cancel_on_disconnect: bool = True,
+            blocking: bool = False):
         return self.route("GET", path, tool=tool,
-                          cancel_on_disconnect=cancel_on_disconnect)
+                          cancel_on_disconnect=cancel_on_disconnect, blocking=blocking)
 
-    def post(self, path: str, tool: bool = False, *, cancel_on_disconnect: bool = True):
+    def post(self, path: str, tool: bool = False, *, cancel_on_disconnect: bool = True,
+            blocking: bool = False):
         return self.route("POST", path, tool=tool,
-                          cancel_on_disconnect=cancel_on_disconnect)
+                          cancel_on_disconnect=cancel_on_disconnect, blocking=blocking)
 
-    def put(self, path: str, tool: bool = False, *, cancel_on_disconnect: bool = True):
+    def put(self, path: str, tool: bool = False, *, cancel_on_disconnect: bool = True,
+            blocking: bool = False):
         return self.route("PUT", path, tool=tool,
-                          cancel_on_disconnect=cancel_on_disconnect)
+                          cancel_on_disconnect=cancel_on_disconnect, blocking=blocking)
 
     def static(
         self,
@@ -260,13 +291,15 @@ class App:
                                  f"{existing.prefix}")
         self.mounts.append(mount)
 
-    def patch(self, path: str, tool: bool = False, *, cancel_on_disconnect: bool = True):
+    def patch(self, path: str, tool: bool = False, *, cancel_on_disconnect: bool = True,
+            blocking: bool = False):
         return self.route("PATCH", path, tool=tool,
-                          cancel_on_disconnect=cancel_on_disconnect)
+                          cancel_on_disconnect=cancel_on_disconnect, blocking=blocking)
 
-    def delete(self, path: str, tool: bool = False, *, cancel_on_disconnect: bool = True):
+    def delete(self, path: str, tool: bool = False, *, cancel_on_disconnect: bool = True,
+            blocking: bool = False):
         return self.route("DELETE", path, tool=tool,
-                          cancel_on_disconnect=cancel_on_disconnect)
+                          cancel_on_disconnect=cancel_on_disconnect, blocking=blocking)
 
     def include(self, router: Router, prefix: str = "") -> None:
         """Mount a router's routes, under `prefix` if given.
@@ -381,7 +414,7 @@ class App:
         """
         return self._layer(route.target, list(route.middleware), self._handlers())
 
-    def websocket(self, path: str, authorize: Any = None):
+    def websocket(self, path: str, authorize: Any = None, *, blocking: bool = False):
         """Register a WebSocket endpoint.
 
         `authorize` runs before the handshake and can refuse the upgrade,
@@ -408,7 +441,7 @@ class App:
         """
 
         def decorator(fn):
-            route = build_route(fn, "GET", path, websocket=True)
+            route = build_route(fn, "GET", path, websocket=True, blocking=blocking)
             if authorize is not None:
                 route.authorizer = make_gate(authorize)
             self._add(route)
@@ -551,6 +584,7 @@ class App:
         shutdown_grace: float = DEFAULT_SHUTDOWN_GRACE,
         max_connections: int = DEFAULT_MAX_CONNECTIONS,
         max_message: int = DEFAULT_MAX_MESSAGE,
+        blocking_threads: int | None = None,
         *,
         tls_cert: str | os.PathLike[str] | None = None,
         tls_key: str | os.PathLike[str] | None = None,
@@ -589,10 +623,17 @@ class App:
         TLS, and recognised by its opening bytes on a plain connection, where
         only clients configured for it will use it. `False` serves HTTP/1.1
         alone.
+
+        `blocking_threads` sizes the one threadpool every `blocking=True` route
+        shares. The default is `min(32, cpu + 4)` — what CPython would give a
+        single event loop, given to all of them together rather than to each.
+        Raise it for handlers that mostly wait on a network or a disk; it
+        bounds how many blocking calls run at once, and the rest queue.
         """
         server = self.build_server(
             host, port, workers, max_concurrency, max_body, request_timeout,
             shutdown_grace, max_connections, max_message, announce=True,
+            blocking_threads=blocking_threads,
             tls_cert=tls_cert, tls_key=tls_key, http2=http2,
         )
         try:
@@ -612,6 +653,7 @@ class App:
         max_connections: int = DEFAULT_MAX_CONNECTIONS,
         max_message: int = DEFAULT_MAX_MESSAGE,
         announce: bool = False,
+        blocking_threads: int | None = None,
         *,
         tls_cert: str | os.PathLike[str] | None = None,
         tls_key: str | os.PathLike[str] | None = None,
@@ -624,6 +666,14 @@ class App:
         `serve`, not here.
         """
         from ._core import Server
+
+        # Sized before anything can use it; the pool starts no thread until a
+        # blocking handler actually runs, so a server without one pays nothing.
+        if blocking_threads is not None:
+            self._blocking = BlockingPool(blocking_threads)
+            for route in self.routes:
+                if route.pool is not None:
+                    route.pool.pool = self._blocking
 
         if (tls_cert is None) != (tls_key is None):
             raise ValueError("tls_cert and tls_key are needed together")

@@ -26,7 +26,8 @@ HERE = Path(__file__).resolve().parent
 #: pass over a running server, and a failure there is most readable once the
 #: narrower suites have had their say.
 SUITES = [
-    "workers", "routing", "query", "bodies", "openapi", "capabilities", "agents", "streams", "sse",
+    "workers", "routing", "query", "bodies", "blocking", "openapi", "capabilities", "agents",
+    "streams", "sse",
     "websocket", "hardening", "escaping", "wire", "failures", "plumbing", "injection",
     "durable", "backpressure", "assignment", "composition", "lifespan", "cors", "uploads",
     "origins", "cli", "files", "protocols", "cancellation", "verify",

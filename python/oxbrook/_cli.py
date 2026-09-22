@@ -349,6 +349,10 @@ def routes(args: argparse.Namespace) -> int:
             notes.append("websocket")
         if route.tool:
             notes.append("tool")
+        if route.blocking:
+            # Worth seeing in a listing: these are the routes that hold a
+            # thread rather than a slot on a loop.
+            notes.append("blocking")
         if route.stream is not None:
             notes.append("streams body")
         if route.form is not None:

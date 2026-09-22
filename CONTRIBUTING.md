@@ -48,7 +48,7 @@ C. The CI leg is what actually runs them.
 ## Tests
 
 ```bash
-make verify        # twenty-nine suites, free-threaded
+make verify        # thirty suites, free-threaded
 make verify-gil    # the same suites on the GIL build
 ```
 
@@ -164,7 +164,7 @@ explains each in context; the short form:
    `loop.call_soon_threadsafe`, which can block on the loop's self-pipe.
 3. **Wakeups coalesce.** At most one wake byte in flight, and the flag is
    cleared *before* draining — clearing it after loses a racing push.
-4. **Handlers are `async def`**, enforced at registration.
+4. **Handlers are `async def`** unless the route says `blocking=True`, enforced at registration.
 5. **Agent exposure stays opt-in.** Only `tool=True` routes reach `/mcp`.
 6. **A resource limit is never released by garbage collection.** Free a
    concurrency slot with an explicit call, never `Drop`, never the collector.

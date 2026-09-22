@@ -97,6 +97,7 @@ nav:
       - guide/requests.md
       - guide/middleware.md
       - guide/dependencies.md
+      - guide/blocking.md
       - guide/lifespan.md
       - guide/sessions.md
       - guide/logging.md

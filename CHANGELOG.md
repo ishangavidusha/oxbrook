@@ -7,6 +7,17 @@ release does not; changes that break existing code are listed under
 
 ## Unreleased
 
+- **`blocking=True` on a route** runs a plain `def` handler on a threadpool
+  instead of its worker loop. A handler that takes time without awaiting — a
+  sync database driver, `requests`, `boto3`, Pillow — freezes every other
+  request its loop is serving; measured, eight such handlers on four loops made
+  an unrelated request wait 1829 ms, and 4 ms with the route declared blocking.
+  The pool is one per process, bounded, sized with `app.run(blocking_threads=…)`,
+  and starts no thread until a blocking handler runs. A blocking handler cannot
+  be cancelled, so a client that leaves frees the loop but not the thread.
+  A `def` handler on a route that does not declare it is still refused, and the
+  error now names the fix.
+
 - **The MCP endpoint speaks both of the protocol's transports.** A client that
   probes with `server/discover` gets the 2026-07-28 wire: self-contained
   requests, no handshake, no session, and `subscriptions/listen` answered with

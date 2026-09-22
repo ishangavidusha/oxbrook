@@ -153,6 +153,11 @@ class Lifecycle:
         mcp = getattr(self.app, "_mcp", None)
         if mcp is not None:
             mcp.sessions.close()
+        # Same rule for the blocking threadpool: a held resource is released
+        # because something released it, not because nothing points at it.
+        pool = getattr(self.app, "_blocking", None)
+        if pool is not None:
+            pool.close()
         try:
             if manager is not None:
                 await manager.__aexit__(None, None, None)

@@ -111,12 +111,17 @@ make stack   # build the app image and run two nodes against one redis
 
 ## Handler rules
 
-Handlers are `async def`. A synchronous handler is a `TypeError` at
+Handlers are `async def`, or a plain `def` on a route declared
+[`blocking=True`](guide/blocking.md). An undeclared synchronous handler is a `TypeError` at
 registration rather than a surprise at runtime, because a blocking call on a
 worker loop stalls every request that loop is carrying.
 
 ```python
 @app.get("/bad")
-def wrong(_: Request):      # TypeError: handlers must be async def
+def wrong(_: Request):                  # TypeError, and it names the fix
     return {}
+
+@app.get("/report", blocking=True)      # a `def` handler, off the loop
+def report(_: Request):
+    return slow_synchronous_query()
 ```
