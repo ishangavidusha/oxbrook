@@ -166,6 +166,21 @@ async def invalid(_request, exc):
     return Reply({"problems": len(exc.errors)}, status=400)
 
 
+class Taken(Exception):
+    pass
+
+
+@app.exception_handler(Taken)
+async def taken(_request, exc):
+    # The short way to answer with problem details: raise from the handler.
+    raise HTTPError(409, f"{exc} is taken")
+
+
+@app.get("/taken")
+async def taken_route(_: Request):
+    raise Taken("ada")
+
+
 @app.exception_handler(ZeroDivisionError)
 async def broken_handler(_request, _exc):
     raise RuntimeError(f"the exception handler itself failed: {SECRET}")
@@ -375,7 +390,7 @@ def inner_middleware_errors_reach_outer_middleware_as_replies(client: TestClient
     seen_by_app_middleware.clear()
     response = client.get("/api/users/admin/stats")
     check(response.status_code == 403, f"unkeyed admin request returned {response.status_code}")
-    check(response.json() == {"detail": "admin only"}, f"403 body was {response.text!r}")
+    check(response.json().get("detail") == "admin only", f"403 body was {response.text!r}")
     check(("/api/users/admin/stats", 403) in seen_by_app_middleware,
           f"app middleware did not see the 403 as a reply: {seen_by_app_middleware}")
     check(response.headers.get("x-app") == "1",
@@ -392,13 +407,27 @@ def exception_handlers_map_by_class(client: TestClient) -> None:
 
     response = client.get("/teapot")
     check(response.status_code == 418, f"HTTPError(418) returned {response.status_code}")
-    check(response.json() == {"detail": "I'm a Teapot"},
-          f"HTTPError default detail: {response.text}")
+    check(response.json() == {"type": "about:blank", "title": "I'm a Teapot", "status": 418},
+          f"HTTPError with no detail: {response.text}")
     check(response.headers.get("x-tea") == "earl grey", "HTTPError headers were dropped")
 
     response = client.get("/dependency")
-    check(response.status_code == 401 and response.json() == {"detail": "token required"},
+    check(response.status_code == 401 and response.json().get("detail") == "token required",
           f"HTTPError from a dependency returned {response.status_code} {response.text}")
+
+    # An exception handler that raises HTTPError. Demonstrated before the fix:
+    # the answer was right, but the app middleware around the route saw an
+    # exception instead of a reply, so it never recorded the status and its
+    # header was missing from the response.
+    seen_by_app_middleware.clear()
+    response = client.get("/taken")
+    check(response.status_code == 409 and response.json().get("detail") == "ada is taken",
+          f"an exception handler raising HTTPError gave {response.status_code} {response.text}")
+    check(("/taken", 409) in seen_by_app_middleware,
+          f"app middleware did not see the handler's HTTPError as a reply: "
+          f"{seen_by_app_middleware}")
+    check(response.headers.get("x-app") == "1",
+          "app middleware was skipped by an HTTPError raised from an exception handler")
 
     response = client.post("/items", content=b'{"n": "not a number"}')
     check(response.status_code == 400 and response.json() == {"problems": 1},
@@ -473,7 +502,7 @@ def bare_app_answers_http_error_inline() -> None:
     with TestClient(bare, workers=1) as client:
         response = client.get("/nope")
         check(response.status_code == 404, f"bare HTTPError returned {response.status_code}")
-        check(response.json() == {"detail": "nothing here"},
+        check(response.json().get("detail") == "nothing here",
               f"bare HTTPError body: {response.text}")
         check(response.headers.get("x-why") == "none", "bare HTTPError dropped its headers")
 

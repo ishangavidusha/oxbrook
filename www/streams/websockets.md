@@ -98,14 +98,16 @@ connected.
 ```python
 async def members_only(request):
     if not valid(request.header("authorization")):
-        return Response(b"nope", status=401, content_type="text/plain")
+        raise HTTPError(401, headers={"www-authenticate": "Bearer"})
 
 @app.websocket("/feed", authorize=members_only)
 async def feed(request, ws): ...
 ```
 
-Return `None` or `True` to accept. Return a `Response` or a `Reply` to refuse
-with exactly that. Return anything else falsy and the client gets `403`. The
+Return `None` or `True` to accept. Raise `HTTPError` to refuse with a
+[problem-details](../guide/errors.md#the-error-shape) response, or return a
+`Response` or a `Reply` to refuse with exactly that. Return anything else falsy
+and the client gets `403`. The
 authorizer may be sync or async, and [middleware wraps
 it](../guide/middleware.md#websocket-routes).
 

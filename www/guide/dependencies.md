@@ -63,7 +63,7 @@ applies to it as it would to one the handler raised:
 ```python
 @app.exception_handler(asyncpg.UniqueViolationError)
 async def duplicate(request, exc):
-    return Reply({"detail": "already exists"}, status=409)
+    raise HTTPError(409, "already exists")
 ```
 
 A dependency can also translate an error at its `yield` by raising a different

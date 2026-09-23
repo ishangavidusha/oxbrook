@@ -10,7 +10,7 @@ migrations, is in `examples/database/`.
 from contextlib import asynccontextmanager
 
 import asyncpg
-from oxbrook import App, Depends, Reply, Request
+from oxbrook import App, Depends, HTTPError, Reply, Request
 
 @asynccontextmanager
 async def worker_lifespan(app):
@@ -32,7 +32,7 @@ async def transaction(db = Depends(connection)):
 
 @app.exception_handler(asyncpg.UniqueViolationError)
 async def duplicate(request, exc):
-    return Reply({"detail": "already exists"}, status=409)
+    raise HTTPError(409, "already exists")
 
 @app.get("/notes")
 async def notes(_: Request, db = Depends(connection)):
@@ -115,11 +115,11 @@ in the handler or from the commit:
 ```python
 @app.exception_handler(asyncpg.UniqueViolationError)
 async def duplicate(request, exc):
-    return Reply({"detail": "already exists"}, status=409)
+    raise HTTPError(409, "already exists")
 
 @app.exception_handler(asyncpg.ForeignKeyViolationError)
 async def missing_reference(request, exc):
-    return Reply({"detail": "refers to something that does not exist"}, status=422)
+    raise HTTPError(422, "refers to something that does not exist")
 ```
 
 Anything unmapped is a `500`, with the driver's message in the log and not in

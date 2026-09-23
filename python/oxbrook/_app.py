@@ -468,11 +468,11 @@ class App:
         `authorize` runs before the handshake and can refuse the upgrade,
         which the handler cannot: by the time it runs, the 101 has been sent
         and the client believes it is connected. Return None or True to
-        accept, or a `Response`/`Reply` to refuse.
+        accept; raise `HTTPError`, or return a `Response`/`Reply`, to refuse.
 
             async def members_only(request):
                 if not valid(request.header("authorization")):
-                    return Response(b"nope", status=401, content_type="text/plain")
+                    raise HTTPError(401, headers={"www-authenticate": "Bearer"})
 
             @app.websocket("/ws", authorize=members_only)
             async def feed(request, ws): ...

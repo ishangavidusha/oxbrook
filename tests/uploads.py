@@ -187,7 +187,7 @@ def forms_bind(client: TestClient) -> None:
 
     response = client.post("/signup", data={"email": "a@b.c", "age": "old"})
     check(response.status_code == 422, f"an invalid form field returned {response.status_code}")
-    check(response.json()["detail"][0]["loc"] == ["age"], f"422 detail was {response.text}")
+    check(response.json()["errors"][0]["loc"] == ["age"], f"422 errors were {response.text}")
 
 
 def forms_refuse_what_they_cannot_read(client: TestClient) -> None:

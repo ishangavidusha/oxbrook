@@ -30,22 +30,42 @@ _REF_TEMPLATE = "#/components/schemas/{model}"
 # wildcard syntax of its own.
 _WILDCARD = re.compile(r"\{\*([A-Za-z_][A-Za-z0-9_]*)\}")
 
-_VALIDATION_ERROR_SCHEMA = {
+# RFC 9457 problem details: what every error response is.
+_PROBLEM_SCHEMA = {
     "type": "object",
-    "title": "ValidationError",
+    "title": "Problem",
     "properties": {
-        "detail": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "type": {"type": "string"},
-                    "loc": {"type": "array", "items": {"type": "string"}},
-                    "msg": {"type": "string"},
-                },
-            },
-        }
+        "type": {"type": "string", "format": "uri-reference", "default": "about:blank"},
+        "title": {"type": "string"},
+        "status": {"type": "integer"},
+        "detail": {"type": "string"},
+        "instance": {"type": "string", "format": "uri-reference"},
     },
+    "required": ["type", "title", "status"],
+}
+
+_VALIDATION_PROBLEM_SCHEMA = {
+    "title": "ValidationProblem",
+    "allOf": [
+        {"$ref": "#/components/schemas/Problem"},
+        {
+            "type": "object",
+            "properties": {
+                "errors": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "type": {"type": "string"},
+                            "loc": {"type": "array", "items": {"type": "string"}},
+                            "msg": {"type": "string"},
+                        },
+                    },
+                }
+            },
+            "required": ["errors"],
+        },
+    ],
 }
 
 
@@ -132,12 +152,13 @@ def _operation(route: RouteInfo, components: dict[str, Any]) -> dict[str, Any]:
         op["responses"]["422"] = {
             "description": "Validation Error",
             "content": {
-                "application/json": {
-                    "schema": {"$ref": _REF_TEMPLATE.format(model="HTTPValidationError")}
+                "application/problem+json": {
+                    "schema": {"$ref": _REF_TEMPLATE.format(model="ValidationProblem")}
                 }
             },
         }
-        components.setdefault("HTTPValidationError", _VALIDATION_ERROR_SCHEMA)
+        components.setdefault("Problem", _PROBLEM_SCHEMA)
+        components.setdefault("ValidationProblem", _VALIDATION_PROBLEM_SCHEMA)
 
     return op
 

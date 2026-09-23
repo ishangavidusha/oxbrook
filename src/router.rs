@@ -157,9 +157,9 @@ pub struct RouteSpec {
     pub cancellable: bool,
 }
 
-/// A parameter that was missing or would not coerce. Rendered in the shape
-/// pydantic uses for body errors, so a client sees one error format for
-/// every 422.
+/// A parameter that was missing or would not coerce. Rendered as problem
+/// details whose `errors` entries have the shape pydantic uses for body
+/// errors, so a client sees one error format for every 422.
 pub struct ParamError {
     source: &'static str,
     name: String,
@@ -170,16 +170,21 @@ pub struct ParamError {
 
 impl ParamError {
     pub fn to_json(&self) -> Vec<u8> {
-        let mut entry = serde_json::json!({
-            "type": self.error_type,
-            "loc": [self.source, self.name],
-            "msg": self.msg,
-        });
+        // Members in pydantic's order, written one by one because `json!`
+        // sorts them: the entry should read like a body error's.
+        let mut entry = Vec::with_capacity(96);
+        entry.extend_from_slice(br#"[{"type":"#);
+        let _ = serde_json::to_writer(&mut entry, self.error_type);
+        entry.extend_from_slice(br#","loc":"#);
+        let _ = serde_json::to_writer(&mut entry, &[self.source, self.name.as_str()]);
+        entry.extend_from_slice(br#","msg":"#);
+        let _ = serde_json::to_writer(&mut entry, &self.msg);
         if let Some(input) = &self.input {
-            entry["input"] = serde_json::Value::String(input.clone());
+            entry.extend_from_slice(br#","input":"#);
+            let _ = serde_json::to_writer(&mut entry, input);
         }
-        let detail = serde_json::json!({ "detail": [entry] });
-        serde_json::to_vec(&detail).unwrap_or_else(|_| br#"{"detail":[]}"#.to_vec())
+        entry.extend_from_slice(b"}]");
+        crate::problem::body(hyper::StatusCode::UNPROCESSABLE_ENTITY, None, Some(&entry))
     }
 }
 

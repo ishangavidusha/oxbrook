@@ -112,7 +112,12 @@ def document_checks(doc: dict) -> list[str]:
 
     schemas = doc["components"]["schemas"]
     check("Tag" in schemas, f"nested model not hoisted into components: {sorted(schemas)}")
-    check("HTTPValidationError" in schemas, "validation error schema missing")
+    check("ValidationProblem" in schemas and "Problem" in schemas,
+          "validation error schema missing")
+    check(
+        "application/problem+json" in post_op["responses"]["422"]["content"],
+        "the documented 422 is not problem details",
+    )
 
     plain_op = paths["/plain"]["get"]
     check("422" not in plain_op["responses"],

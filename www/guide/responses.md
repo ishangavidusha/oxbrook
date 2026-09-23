@@ -66,12 +66,15 @@ Response(b"...", headers={"x-request-id": "abc"})
 
 ## Status codes you get for free
 
+Each of these is [problem details](errors.md#the-error-shape),
+`application/problem+json`, except `204`, which has no body.
+
 - `204` when a handler returns `None`
 - `404` when nothing matches the path
 - `405`, with an `Allow` header, when the path exists for another method
 - `413` when the body is over the limit
 - `422` when a parameter or body fails validation
 - `426` on a plain `GET` to a WebSocket route
-- `500` when the handler raises, with no detail in the body
+- `500` when the handler raises, with no `detail`
 - `503`, with `Retry-After`, when every worker is at its concurrency limit
 - `504` when a handler does not respond within `request_timeout`

@@ -11,7 +11,7 @@ import datetime
 import sys
 import uuid
 
-from ._errors import HTTPError, http_error_body
+from ._errors import PROBLEM, HTTPError, http_error_body, problem
 from ._logging import logger
 from ._middleware import Reply, merge
 from ._response import Response
@@ -215,14 +215,14 @@ async def _respond(handler, request, responder, params, debug):
     try:
         result = await (handler(request) if params is None else handler(request, **params))
     except RequestValidationError as exc:
-        responder.send(422, "application/json", exc.body)
+        responder.send(422, PROBLEM, exc.body)
         return
     except HTTPError as exc:
         # The default handling, for a route with no middleware and no
         # registered handlers, which is wrapped in nothing. Anything registered
         # was already applied by the time an exception reaches here.
         responder.send(
-            exc.status, "application/json", http_error_body(exc), list(exc.headers.items()) or None
+            exc.status, PROBLEM, http_error_body(exc), list(exc.headers.items()) or None
         )
         return
     except Exception as exc:  # noqa: BLE001 - a handler crash must still answer
@@ -233,10 +233,8 @@ async def _respond(handler, request, responder, params, debug):
             exc_info=exc,
             extra={"method": request.method, "path": request.path},
         )
-        detail = (
-            f"{type(exc).__name__}: {exc}".encode() if debug else b"internal server error"
-        )
-        responder.send(500, "text/plain; charset=utf-8", detail)
+        detail = f"{type(exc).__name__}: {exc}" if debug else None
+        responder.send(500, PROBLEM, problem(500, detail))
         return
 
     # Everything below is the response, and it can fail on its own: a value
@@ -300,11 +298,9 @@ async def _respond(handler, request, responder, params, debug):
             exc_info=exc,
             extra={"method": request.method, "path": request.path},
         )
-        detail = (
-            f"{type(exc).__name__}: {exc}".encode() if debug else b"internal server error"
-        )
+        detail = f"{type(exc).__name__}: {exc}" if debug else None
         try:
-            responder.send(500, "text/plain; charset=utf-8", detail)
+            responder.send(500, PROBLEM, problem(500, detail))
         except Exception:  # noqa: BLE001
             # Already answered, or a stream that had started. Nothing to add.
             pass

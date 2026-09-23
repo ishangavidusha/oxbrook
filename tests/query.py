@@ -145,10 +145,10 @@ def main() -> None:
                 continue
             if want_status == 422:
                 body = r.json()
-                if "detail" not in body:
-                    failures.append(f"{label}: 422 body has no 'detail'")
-                elif body["detail"][0]["loc"][0] != "query":
-                    failures.append(f"{label}: 422 loc is {body['detail'][0]['loc']!r}")
+                if not body.get("errors"):
+                    failures.append(f"{label}: 422 body has no 'errors'")
+                elif body["errors"][0]["loc"][0] != "query":
+                    failures.append(f"{label}: 422 loc is {body['errors'][0]['loc']!r}")
             if want:
                 got = r.json()
                 for k, v in want.items():

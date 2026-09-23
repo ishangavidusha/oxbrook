@@ -74,7 +74,7 @@ async def transaction(db=Depends(connection)):
 async def duplicate(request, exc):
     # Raised by an INSERT, or by the commit when the constraint is deferred.
     # Either way the transaction has already been rolled back by then.
-    return Reply({"detail": "a note with that title already exists"}, status=409)
+    raise HTTPError(409, "a note with that title already exists")
 
 
 class NoteIn(BaseModel):

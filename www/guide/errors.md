@@ -13,18 +13,68 @@ async def get_user(_: Request, user_id: int):
     return user
 ```
 
-The client gets the status and `{"detail": "no such user"}`. `detail` defaults to
-the status's standard phrase, and `headers` adds response headers:
+The client gets a `404` with an [RFC 9457](https://www.rfc-editor.org/rfc/rfc9457)
+problem-details body:
+
+```http
+HTTP/1.1 404 Not Found
+Content-Type: application/problem+json
+
+{"type": "about:blank", "title": "Not Found", "status": 404, "detail": "no such user"}
+```
+
+`headers` adds response headers:
 
 ```python
 raise HTTPError(401, headers={"www-authenticate": "Bearer"})
 ```
 
-It works from a handler, a dependency, middleware or a WebSocket authorizer.
-The status must be 4xx or 5xx; return a `Reply` or `Response` for anything else.
+It works from a handler, a dependency, middleware, an exception handler or a
+WebSocket authorizer. The status must be 4xx or 5xx; return a `Reply` or
+`Response` for anything else.
 
 `detail` is sent to the client, so write it for the client. It is the one
-exception text that is returned.
+exception text that is returned, and it is a string: data meant for a program
+goes in `extensions`.
+
+## The error shape
+
+Every error Oxbrook writes is problem details, whichever side answered it:
+an `HTTPError`, a validation failure, a route that does not exist, a body over
+the limit, a server at capacity, a handler that raised. A client parses one
+format for all of them, and generic tooling that understands
+`application/problem+json` reads them without being told about this API.
+
+| member | meaning |
+|---|---|
+| `type` | a URI naming the kind of problem; `about:blank` when the status says it all |
+| `title` | a short summary; the status's name when `type` is `about:blank` |
+| `status` | the HTTP status, repeated for clients that lose the status line |
+| `detail` | this occurrence, for a person; absent when there is nothing to add |
+| `instance` | a URI for this occurrence, when there is one |
+
+Anything else is an extension member. A problem a client should branch on gets
+a `type` of its own, and its data goes in `extensions`:
+
+```python
+raise HTTPError(
+    409,
+    "a note with that title already exists",
+    type="https://api.example.com/problems/duplicate-title",
+    extensions={"existing_id": 7},
+)
+```
+
+```json
+{"type": "https://api.example.com/problems/duplicate-title", "title": "Conflict",
+ "status": 409, "detail": "a note with that title already exists", "existing_id": 7}
+```
+
+Extensions cannot reuse the five standard names, and are encoded like any
+other [response value](responses.md#how-values-become-json).
+
+The MCP endpoint is the one exception: it answers in JSON-RPC, as the protocol
+requires.
 
 ## Exception handlers
 
@@ -36,12 +86,14 @@ class NotFound(Exception):
 
 @app.exception_handler(NotFound)
 async def not_found(request, exc):
-    return Reply({"error": str(exc)}, status=404)
+    raise HTTPError(404, str(exc))
 ```
 
 A handler applies to the class and its subclasses, and the most specific
-registered class wins. What it returns goes through the normal response path, so
-return a `Reply` or `Response` to set the status: a plain dict is a `200`.
+registered class wins. Raising `HTTPError` from it is the short way to answer
+with problem details. It can also return a response instead: what it returns
+goes through the normal response path, so return a `Reply` or `Response` to set
+the status, since a plain dict is a `200`.
 
 Exceptions are mapped before middleware sees the result. Middleware — the access
 log included — sees a reply with the mapped status, never the exception. An
@@ -49,8 +101,10 @@ exception raised by middleware itself is mapped on its way out, so an
 `HTTPError(403)` from an inner router's middleware is still a reply to the
 middleware outside it.
 
-Register a handler for `HTTPError` to change the shape of every HTTP error, or
-for `RequestValidationError` to change the shape of a `422`:
+Register a handler for `HTTPError` to change the shape of every error raised
+that way, or for `RequestValidationError` to change the shape of a `422`
+produced by a body. Errors answered in Rust, before any Python runs, keep the
+problem-details shape.
 
 ```python
 from oxbrook import RequestValidationError
@@ -61,7 +115,7 @@ async def invalid(request, exc):
 ```
 
 Exception handlers must be `async def`, and each class can have one. A handler
-that raises is a `500`, logged like any other failure.
+that raises anything but `HTTPError` is a `500`, logged like any other failure.
 
 Exceptions in a WebSocket handler, or in an SSE source after the stream has
 started, are not mapped: the response has already begun, so there is no status
@@ -69,9 +123,9 @@ left to change. They are logged.
 
 ## A handler that raises
 
-With no exception handler for it, the client gets `500` with no detail. The
-traceback goes to the log. A handler registered for `Exception` replaces this
-and takes over the logging.
+With no exception handler for it, the client gets a `500` problem with no
+`detail`. The traceback goes to the log. A handler registered for `Exception`
+replaces this and takes over the logging.
 
 Exception messages routinely carry connection strings, file paths, query
 fragments and user data. Returning them to whoever triggered the exception is
@@ -80,7 +134,7 @@ how that information leaks.
 During development:
 
 ```python
-app = App(debug=True)   # include the exception text in the 500 body
+app = App(debug=True)   # the exception text becomes the 500's detail
 ```
 
 `debug` is per server, never module state. Two apps in one process do not share
@@ -89,10 +143,11 @@ it.
 ## Validation
 
 A parameter or body that fails validation is a `422` in one shape, whatever
-failed:
+failed. Each failure is an entry in `errors`, in pydantic's format:
 
 ```json
-{"detail": [{"type": "...", "loc": ["query", "limit"], "msg": "..."}]}
+{"type": "about:blank", "title": "Unprocessable Content", "status": 422,
+ "errors": [{"type": "int_parsing", "loc": ["query", "limit"], "msg": "..."}]}
 ```
 
 Path and query failures are produced in Rust, before a worker is woken. Body

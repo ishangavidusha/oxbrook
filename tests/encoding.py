@@ -119,7 +119,7 @@ async def reply(_: Request):
 
 @app.get("/error")
 async def error(_: Request):
-    raise HTTPError(409, VALUE)
+    raise HTTPError(409, "conflict", extensions={"value": VALUE})
 
 
 @app.get("/events")
@@ -170,9 +170,9 @@ def every_surface_agrees(c: TestClient) -> None:
         check(r.content == c.get("/plain").content, "a Reply and a plain return differ in bytes")
 
     r = c.get("/error")
-    check(r.status_code == 409, f"an HTTPError with a structured detail answered {r.status_code}")
+    check(r.status_code == 409, f"an HTTPError with extensions answered {r.status_code}")
     if r.status_code == 409:
-        agrees("HTTPError detail", r.json()["detail"])
+        agrees("HTTPError extensions", r.json()["value"])
 
     with c.http.stream("GET", "/events") as response:
         for line in response.iter_lines():
@@ -215,8 +215,147 @@ def unknown_objects_are_refused(c: TestClient) -> None:
         check("hunter2" not in r.text, f"{path}: an object's repr reached the client")
 
 
+def every_error_is_problem_details() -> None:
+    """One error format, RFC 9457, whichever side answered.
+
+    Before, a missing route was `text/plain` "not found", a 405 and 413 were
+    plain text too, a validation failure was `{"detail": [...]}`, an HTTPError
+    `{"detail": "..."}`, and a handler crash `text/plain` "internal server
+    error". Rust's titles also disagreed with Python's for 413 and 422: the
+    `http` crate predates RFC 9110's names.
+    """
+    import http
+    import pathlib
+    import tempfile
+
+    import httpx
+
+    class Model(BaseModel):
+        n: int
+
+    folder = pathlib.Path(tempfile.mkdtemp())
+    errors = App(openapi_url=None, docs_url=None, mcp_url=None)
+    errors.static("/files", folder)
+
+    class Taken(Exception):
+        pass
+
+    @errors.exception_handler(Taken)
+    async def taken(_request, exc):
+        raise HTTPError(409, "taken")
+
+    async def refuse(request):
+        raise HTTPError(401, "members only")
+
+    @errors.get("/num/{n}")
+    async def num(_: Request, n: int):
+        return {}
+
+    @errors.post("/body")
+    async def body(_: Request, m: Model):
+        return {}
+
+    @errors.get("/conflict")
+    async def conflict(_: Request):
+        raise HTTPError(
+            409, "a duplicate", type="https://example.com/problems/dup",
+            extensions={"existing": 7},
+        )
+
+    @errors.get("/bare")
+    async def bare(_: Request):
+        raise HTTPError(403)
+
+    @errors.get("/crash")
+    async def crash(_: Request):
+        raise RuntimeError("password=hunter2")
+
+    @errors.get("/mapped")
+    async def mapped(_: Request):
+        raise Taken()
+
+    @errors.get("/slow")
+    async def slow(_: Request):
+        await asyncio.sleep(5)
+
+    @errors.websocket("/ws")
+    async def ws(_: Request, sock):
+        pass
+
+    @errors.websocket("/members", authorize=refuse)
+    async def members(_: Request, sock):
+        pass
+
+    upgrade = {
+        "connection": "upgrade", "upgrade": "websocket", "sec-websocket-version": "13",
+        "sec-websocket-key": "dGhlIHNhbXBsZSBub25jZQ==",
+    }
+    with TestClient(errors, max_body=100, request_timeout=0.5) as c:
+        cases = [
+            ("no such route", c.get("/nowhere"), 404),
+            ("wrong method", c.delete("/bare"), 405),
+            ("parameter", c.get("/num/x"), 422),
+            ("body", c.post("/body", json={"n": "x"}), 422),
+            ("too large", c.post("/body", content=b"x" * 500), 413),
+            ("HTTPError", c.get("/conflict"), 409),
+            ("bare HTTPError", c.get("/bare"), 403),
+            ("crash", c.get("/crash"), 500),
+            ("exception handler", c.get("/mapped"), 409),
+            ("timeout", c.get("/slow"), 504),
+            ("not an upgrade", c.get("/ws"), 426),
+            ("authorizer", httpx.get(c.base_url + "/members", headers=upgrade), 401),
+            ("static file", c.get("/files/missing.txt"), 404),
+        ]
+        for label, r, status in cases:
+            if r.status_code != status:
+                failures.append(f"{label}: answered {r.status_code}, expected {status}")
+                continue
+            kind = r.headers.get("content-type", "")
+            if kind != "application/problem+json":
+                failures.append(f"{label}: content type was {kind!r}")
+                continue
+            got = r.json()
+            want_title = http.HTTPStatus(status).phrase
+            if got.get("status") != status:
+                failures.append(f"{label}: status member was {got.get('status')!r}")
+            if label == "HTTPError":
+                continue
+            if got.get("type") != "about:blank" or got.get("title") != want_title:
+                failures.append(
+                    f"{label}: type/title were {got.get('type')!r}/{got.get('title')!r}, "
+                    f"expected about:blank/{want_title!r}"
+                )
+
+        got = c.get("/conflict").json()
+        check(
+            got == {
+                "type": "https://example.com/problems/dup", "title": "Conflict", "status": 409,
+                "detail": "a duplicate", "existing": 7,
+            },
+            f"an HTTPError with a type and extensions gave {got}",
+        )
+        check(list(got)[:3] == ["type", "title", "status"], f"member order was {list(got)}")
+        check("hunter2" not in c.get("/crash").text, "a crash's exception text reached the client")
+        check(
+            c.get("/num/x").json()["errors"][0]["loc"] == ["path", "n"],
+            "a parameter failure lost its location",
+        )
+
+    for build, fix in (
+        (lambda: HTTPError(409, {"id": 7}), "extensions"),
+        (lambda: HTTPError(409, "x", extensions={"status": 200}), "standard members"),
+    ):
+        try:
+            build()
+            failures.append(f"an HTTPError that should be refused was accepted ({fix})")
+        except (TypeError, ValueError) as exc:
+            check(fix in str(exc), f"the refusal did not name the fix: {exc}")
+
+
 def main() -> None:
     logging.getLogger("oxbrook").setLevel(logging.CRITICAL)
+    every_error_is_problem_details()
+    print("  every_error_is_problem_details: ok")
     with TestClient(app) as c:
         for step in (
             every_surface_agrees,

@@ -109,10 +109,10 @@ def main() -> None:
                 failures.append(f"{label}: got {r.status_code}, expected {want_status}")
                 continue
             if want_status == 422:
-                if r.headers.get("content-type", "").split(";")[0] != "application/json":
-                    failures.append(f"{label}: 422 was not JSON")
-                elif "detail" not in r.json():
-                    failures.append(f"{label}: 422 body has no 'detail'")
+                if r.headers.get("content-type", "").split(";")[0] != "application/problem+json":
+                    failures.append(f"{label}: 422 was not problem details")
+                elif not r.json().get("errors"):
+                    failures.append(f"{label}: 422 body has no 'errors'")
             if want_body:
                 got = r.json()
                 for k, v in want_body.items():

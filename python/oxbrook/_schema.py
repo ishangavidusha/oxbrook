@@ -40,7 +40,7 @@ class RequestValidationError(Exception):
         """The individual failures, for an exception handler that reshapes them."""
         import json
 
-        return json.loads(self.body)["detail"]
+        return json.loads(self.body)["errors"]
 
 
 def is_model(annotation: Any) -> bool:
@@ -107,5 +107,16 @@ else:  # pragma: no cover - depends on the environment
 
 
 def validation_body(exc: Any) -> bytes:
-    """FastAPI-shaped error payload, so existing clients and tooling can read it."""
-    return b'{"detail":' + exc.json().encode() + b"}"
+    """Problem details for a 422, with pydantic's errors as the `errors` member.
+
+    Written by hand rather than through the encoder because `exc.json()` is
+    already JSON, straight from pydantic's core. The prefix is the one Rust
+    writes for a parameter that will not coerce, so a client reads one shape
+    for every 422 whichever side refused it.
+    """
+    return _VALIDATION_PREFIX + exc.json().encode() + b"}"
+
+
+_VALIDATION_PREFIX = (
+    b'{"type":"about:blank","title":"Unprocessable Content","status":422,"errors":'
+)

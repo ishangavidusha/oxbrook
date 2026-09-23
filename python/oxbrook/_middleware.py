@@ -110,7 +110,9 @@ def make_gate(authorize: Any) -> Any:
         if isinstance(verdict, Response):
             return verdict
         # A falsy verdict with no detail still has to mean "no".
-        return Response(b"forbidden", status=403, content_type="text/plain")
+        from ._errors import PROBLEM, problem
+
+        return Response(problem(403), status=403, content_type=PROBLEM)
 
     gate.__name__ = getattr(authorize, "__name__", "authorize")
     return gate

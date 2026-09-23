@@ -24,16 +24,20 @@ sends the fields of `UserOut`.
 
 ## Validation failures
 
-A body that fails validation returns `422` carrying pydantic's own errors, in
-the same `{"detail": [...]}` shape as a path or query parameter failure. A
-client parses one format for every `422`, wherever it came from.
+A body that fails validation returns `422` carrying pydantic's own errors, as
+the `errors` member of a [problem-details](errors.md#the-error-shape) body, the
+same shape as a path or query parameter failure. A client parses one format for
+every `422`, wherever it came from.
 
 ```json
 {
-  "detail": [
+  "type": "about:blank",
+  "title": "Unprocessable Content",
+  "status": 422,
+  "errors": [
     {
       "type": "int_parsing",
-      "loc": ["body", "age"],
+      "loc": ["age"],
       "msg": "Input should be a valid integer, ..."
     }
   ]

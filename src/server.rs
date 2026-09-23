@@ -9,8 +9,8 @@ use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Full, StreamBody};
 use hyper::body::{Frame, Incoming};
 use hyper::header::{
-    ALLOW, CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, HOST, RETRY_AFTER, SEC_WEBSOCKET_ACCEPT,
-    SEC_WEBSOCKET_KEY, SEC_WEBSOCKET_VERSION, UPGRADE,
+    HeaderValue, ALLOW, CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, HOST, RETRY_AFTER,
+    SEC_WEBSOCKET_ACCEPT, SEC_WEBSOCKET_KEY, SEC_WEBSOCKET_VERSION, UPGRADE,
 };
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
@@ -687,29 +687,18 @@ pub(crate) fn full(bytes: Bytes) -> Out {
     Full::new(bytes).boxed()
 }
 
+/// An error answered here, as problem details with `detail` saying why.
 fn plain(status: StatusCode, msg: &'static str) -> Response<Out> {
-    Response::builder()
-        .status(status)
-        .header(CONTENT_TYPE, "text/plain")
-        .body(full(Bytes::from_static(msg.as_bytes())))
-        .unwrap()
-}
-
-fn json(status: StatusCode, body: Vec<u8>) -> Response<Out> {
-    Response::builder()
-        .status(status)
-        .header(CONTENT_TYPE, "application/json")
-        .body(full(Bytes::from(body)))
-        .unwrap()
+    crate::problem::response(status, Some(msg))
 }
 
 fn overloaded() -> Response<Out> {
-    Response::builder()
-        .status(StatusCode::SERVICE_UNAVAILABLE)
-        .header(CONTENT_TYPE, "text/plain")
-        .header(RETRY_AFTER, "1")
-        .body(full(Bytes::from_static(b"server overloaded")))
-        .unwrap()
+    let mut response =
+        crate::problem::response(StatusCode::SERVICE_UNAVAILABLE, Some("server overloaded"));
+    response
+        .headers_mut()
+        .insert(RETRY_AFTER, HeaderValue::from_static("1"));
+    response
 }
 
 /// Path parameters are consumed by whichever Pending takes them, so the gate
@@ -743,20 +732,15 @@ async fn refuse(req: hyper::Request<Incoming>, response: Response<Out>) -> Respo
 }
 
 fn too_large() -> Response<Out> {
-    Response::builder()
-        .status(StatusCode::PAYLOAD_TOO_LARGE)
-        .header(CONTENT_TYPE, "text/plain")
-        .body(full(Bytes::from_static(b"request body too large")))
-        .unwrap()
+    crate::problem::response(StatusCode::PAYLOAD_TOO_LARGE, None)
 }
 
 fn method_not_allowed(allow: String) -> Response<Out> {
-    Response::builder()
-        .status(StatusCode::METHOD_NOT_ALLOWED)
-        .header(CONTENT_TYPE, "text/plain")
-        .header(ALLOW, allow)
-        .body(full(Bytes::from_static(b"method not allowed")))
-        .unwrap()
+    let mut response = crate::problem::response(StatusCode::METHOD_NOT_ALLOWED, None);
+    if let Ok(value) = HeaderValue::from_str(&allow) {
+        response.headers_mut().insert(ALLOW, value);
+    }
+    response
 }
 
 /// Wait for a streaming route's reply while pumping its body.
@@ -897,14 +881,14 @@ async fn upgrade_websocket(
 
     let (Some(key), true, true) = (key, upgrading, version_ok) else {
         // A plain GET to a socket route is a client mistake worth naming.
-        return Response::builder()
-            .status(StatusCode::UPGRADE_REQUIRED)
-            .header(CONTENT_TYPE, "text/plain")
-            .header(SEC_WEBSOCKET_VERSION, "13")
-            .body(full(Bytes::from_static(
-                b"this endpoint speaks websocket; send an Upgrade request",
-            )))
-            .unwrap();
+        let mut response = plain(
+            StatusCode::UPGRADE_REQUIRED,
+            "this endpoint speaks websocket; send an Upgrade request",
+        );
+        response
+            .headers_mut()
+            .insert(SEC_WEBSOCKET_VERSION, HeaderValue::from_static("13"));
+        return response;
     };
 
     // Before anything application-level runs: a page on another site must not
@@ -1143,14 +1127,14 @@ async fn handle(
     let matched = match found {
         Ok(matched) => matched,
         Err(RouteError::NotFound) => {
-            return Ok(refuse(req, plain(StatusCode::NOT_FOUND, "not found")).await)
+            return Ok(refuse(req, crate::problem::response(StatusCode::NOT_FOUND, None)).await)
         }
         Err(RouteError::MethodNotAllowed(allow)) => {
             return Ok(refuse(req, method_not_allowed(allow)).await)
         }
         // Coercion runs here, so a bad path parameter never wakes a worker.
         Err(RouteError::BadParam(err)) => {
-            let answer = json(StatusCode::UNPROCESSABLE_ENTITY, err.to_json());
+            let answer = crate::problem::with_body(StatusCode::UNPROCESSABLE_ENTITY, err.to_json());
             return Ok(refuse(req, answer).await);
         }
     };

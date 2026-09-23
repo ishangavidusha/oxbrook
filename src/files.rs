@@ -85,11 +85,7 @@ impl Mount {
 }
 
 fn not_found() -> Response<Out> {
-    Response::builder()
-        .status(StatusCode::NOT_FOUND)
-        .header(CONTENT_TYPE, "text/plain")
-        .body(full(Bytes::from_static(b"not found")))
-        .unwrap()
+    crate::problem::response(StatusCode::NOT_FOUND, None)
 }
 
 fn redirect(to: String) -> Response<Out> {

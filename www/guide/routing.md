@@ -80,7 +80,7 @@ succeed is answered without waking a Python worker at all.
 
 ```
 GET    /users/42    ->  200  {"user_id": 42}
-GET    /users/abc   ->  422  {"detail": [{"type": "path_param_parsing", ...}]}
+GET    /users/abc   ->  422  {"type": "about:blank", ..., "errors": [...]}
 DELETE /users/42    ->  405  Allow: GET
 HEAD   /users/42    ->  200  headers only, Content-Length as GET would send
 ```
