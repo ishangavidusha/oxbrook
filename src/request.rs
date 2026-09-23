@@ -1,5 +1,6 @@
 use hyper::header::{HeaderMap, HeaderName, HeaderValue};
 use pyo3::prelude::*;
+use pyo3::sync::PyOnceLock;
 use pyo3::types::{PyBytes, PyDict, PyList, PyTuple};
 
 use crate::form::{self, FormError, Part};
@@ -22,6 +23,10 @@ pub struct Request {
     pub context: Option<Py<PyAny>>,
     /// The incremental body, for a route that declared a `BodyStream`.
     pub stream: Option<std::sync::Arc<crate::body::BodyShared>>,
+    /// `request.locals`, made on first use. Most requests never touch it, so
+    /// it costs nothing until one does; a once-lock rather than a Mutex
+    /// because it is written exactly once and read many times after.
+    pub locals: PyOnceLock<Py<PyDict>>,
 }
 
 #[pymethods]
@@ -32,14 +37,19 @@ impl Request {
     /// but the handler it calls still expects a request. The test client uses
     /// it too.
     #[new]
-    #[pyo3(signature = (method = "GET".to_string(), path = "/".to_string(), query = None, body = None, headers = None, context = None))]
+    // Each argument is a keyword on the Python side, which is the interface
+    // that matters; bundling them into a struct would only move the list.
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (method = "GET".to_string(), path = "/".to_string(), query = None, body = None, headers = None, context = None, locals = None))]
     fn py_new(
+        py: Python<'_>,
         method: String,
         path: String,
         query: Option<String>,
         body: Option<Vec<u8>>,
         headers: Option<Vec<(String, String)>>,
         context: Option<Py<PyAny>>,
+        locals: Option<Py<PyDict>>,
     ) -> Self {
         let mut map = HeaderMap::new();
         for (name, value) in headers.unwrap_or_default() {
@@ -50,6 +60,13 @@ impl Request {
                 map.append(name, value);
             }
         }
+        // A tool call shares the `/mcp` request's dict: app middleware ran
+        // once, around that request, and what it left there is for the tool
+        // as much as for anything else.
+        let cell = PyOnceLock::new();
+        if let Some(shared) = locals {
+            let _ = cell.set(py, shared);
+        }
         Self {
             method,
             path,
@@ -58,6 +75,7 @@ impl Request {
             headers: map,
             context,
             stream: None,
+            locals: cell,
         }
     }
 
@@ -77,6 +95,21 @@ impl Request {
             .as_ref()
             .map(|context| context.bind(py).getattr("state"))
             .transpose()
+    }
+
+    /// Scratch space for this request alone: a plain dict, empty until
+    /// something writes to it, gone when the request is.
+    ///
+    /// Where middleware leaves something for a handler or a dependency to
+    /// read, such as the caller it authenticated. `state` is the wrong place
+    /// for that: it is shared by every request on a worker loop, and
+    /// read-only for that reason.
+    #[getter]
+    fn locals<'py>(&self, py: Python<'py>) -> Bound<'py, PyDict> {
+        self.locals
+            .get_or_init(py, || PyDict::new(py).unbind())
+            .bind(py)
+            .clone()
     }
 
     /// The worker context itself, so a request synthesized from this one —

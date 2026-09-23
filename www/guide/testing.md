@@ -28,6 +28,12 @@ the whole Rust half — which is most of the behaviour worth testing.
 The cost is a real socket and a real thread per client. Reuse one across a
 suite rather than opening one per assertion.
 
+To send requests from several threads at once, give each thread its own
+`httpx.Client(base_url=client.base_url)` rather than sharing `client`. On the
+free-threaded build, httpx's connection pool can race when one client is used
+from many threads, and a test would report the client's failure as the
+server's.
+
 ## Streams and sockets
 
 ```python

@@ -29,13 +29,14 @@ import logging
 import os
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 import httpx
-from oxbrook import App, Depends, HTTPError, Reply, Request
+from oxbrook import App, Depends, HTTPError, Request
 from oxbrook.testing import TestClient
 
 try:
@@ -137,10 +138,27 @@ def load_example(name: str):
 
 
 def burst(client: TestClient, path: str, count: int = 200) -> dict[int, int]:
+    # A client per thread, not the TestClient's shared one: httpcore 1.0.9
+    # checks a pooled connection's expiry and then reads it, and on the
+    # free-threaded build another thread can clear it in between. That race is
+    # the client library's, and it must not read as a server failure.
+    local = threading.local()
+
+    def one(_):
+        if not hasattr(local, "http"):
+            local.http = httpx.Client(base_url=client.base_url)
+            opened.append(local.http)
+        return local.http.get(path).status_code
+
+    opened: list[httpx.Client] = []
     codes: dict[int, int] = {}
-    with concurrent.futures.ThreadPoolExecutor(32) as pool:
-        for code in pool.map(lambda _: client.get(path).status_code, range(count)):
-            codes[code] = codes.get(code, 0) + 1
+    try:
+        with concurrent.futures.ThreadPoolExecutor(32) as pool:
+            for code in pool.map(one, range(count)):
+                codes[code] = codes.get(code, 0) + 1
+    finally:
+        for http in opened:
+            http.close()
     return codes
 
 
@@ -277,7 +295,7 @@ def transactional_app(name: str, entered: list) -> App:
 
     @app.exception_handler(asyncpg.UniqueViolationError)
     async def duplicate(request, exc):
-        return Reply({"detail": "already exists"}, status=409)
+        raise HTTPError(409, "already exists")
 
     @app.post("/kept/{k}")
     async def write(_: Request, k: str, db=Depends(transaction)):

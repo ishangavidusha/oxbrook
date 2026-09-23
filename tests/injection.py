@@ -189,6 +189,72 @@ def teardown_sees_the_outcome() -> None:
         check(c.get("/greedy").status_code == 500, "a dependency that yielded twice was accepted")
 
 
+def locals_are_per_request() -> None:
+    """`request.locals`: middleware hands a handler something, per request.
+
+    There was nowhere to put it: `request.state` is shared by every request on
+    a worker loop and read-only for that reason, so a middleware that
+    authenticated a caller could only make a dependency derive it again.
+    """
+    import concurrent.futures
+
+    app = App(openapi_url=None, docs_url=None, mcp_url="/mcp")
+
+    @app.middleware
+    async def who(request, call_next):
+        caller = request.header("x-caller")
+        if caller is not None:
+            request.locals["caller"] = caller
+        return await call_next(request)
+
+    def caller(request):
+        return request.locals.get("caller")
+
+    @app.get("/me")
+    async def me(request: Request, name=Depends(caller)):
+        same = request.locals is request.locals
+        return {"caller": name, "keys": sorted(request.locals), "same": same}
+
+    @app.get("/tool", tool=True)
+    async def tool(request: Request):
+        """Report the caller the middleware saw on this tool call."""
+        return {"caller": request.locals.get("caller")}
+
+    with TestClient(app, workers=4) as c:
+        body = c.get("/me", headers={"x-caller": "ada"}).json()
+        check(body["caller"] == "ada", f"a dependency did not see what middleware left: {body}")
+        check(body["same"], "request.locals was a new dict on each access")
+
+        body = c.get("/me").json()
+        check(
+            body == {"caller": None, "keys": [], "same": True},
+            f"a request with nothing written saw {body}: locals leaked between requests",
+        )
+
+        # Concurrent requests on shared worker loops, each with its own caller.
+        # A client per thread: httpcore 1.0.9 checks a connection's expiry
+        # and reads it in two steps, and on the free-threaded build another
+        # thread can clear it in between (a TypeError comparing float and
+        # None). That race is the client's, not the server's.
+        import httpx
+
+        def one(i):
+            with httpx.Client(base_url=c.base_url) as own:
+                return i, own.get("/me", headers={"x-caller": f"c{i}"}).json()["caller"]
+
+        with concurrent.futures.ThreadPoolExecutor(32) as pool:
+            crossed = [(i, got) for i, got in pool.map(one, range(200)) if got != f"c{i}"]
+        check(not crossed, f"requests saw one another's locals: {crossed[:5]}")
+
+        # A tool call is a request of its own, with the agent's headers, run
+        # through the same middleware.
+        result = c.mcp(
+            "tools/call", {"name": "tool", "arguments": {}}, headers={"x-caller": "agent"}
+        )
+        text = "".join(part.get("text", "") for part in result["content"])
+        check(json.loads(text) == {"caller": "agent"}, f"a tool call's locals gave {text}")
+
+
 def no_cache() -> None:
     app = App(openapi_url=None, docs_url=None, mcp_url=None)
     calls = []
@@ -305,6 +371,7 @@ def main() -> None:
     for step in (
         dependencies,
         teardown_sees_the_outcome,
+        locals_are_per_request,
         no_cache,
         sessions_round_trip,
         session_signing,

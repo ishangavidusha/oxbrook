@@ -7,6 +7,17 @@ release does not; changes that break existing code are listed under
 
 ## Unreleased
 
+- **Every error is RFC 9457 problem details**, `application/problem+json`,
+  whichever side answered it: an `HTTPError`, a validation failure, a missing
+  route, a wrong method, a body over the limit, a server at capacity, a timeout,
+  a handler that raised. A client parses one format for all of them. `HTTPError`
+  takes `type=`, `title=`, `instance=` and `extensions=`; an exception handler
+  can answer by raising one.
+- **`request.locals`**, a dict for one request alone, where middleware leaves
+  something for a handler or a dependency — the caller it authenticated, a
+  request id. `request.state` is shared by every request on a worker loop, so
+  it could never hold that. A tool call shares the `/mcp` request's.
+
 - **A dependency's teardown now sees how the request ended.** A generator
   dependency is finished the way a `with` block is: resumed after its `yield`
   if the handler returned, and with the handler's exception raised there if it
@@ -72,6 +83,15 @@ release does not; changes that break existing code are listed under
   `"2026-09-23T10:00:00Z"` rather than `"2026-09-23 10:00:00+00:00"`, an enum
   is its value rather than `"Color.red"`, and NaN is `null` rather than the
   invalid bare `NaN`.
+- **Breaking:** error bodies change shape. `{"detail": "..."}` is now
+  `{"type": "about:blank", "title": "...", "status": ..., "detail": "..."}`
+  with content type `application/problem+json`; a `422`'s list moves from
+  `detail` to `errors`, and `RequestValidationError.errors` reads it from
+  there. Errors that were `text/plain` — `404`, `405`, `413`, `426`, `500`,
+  `503`, `504` — are problem details too. `HTTPError`'s `detail` must now be a
+  string, with data in `extensions=`; with no `detail` given the body has
+  none, where it used to repeat the status phrase. OpenAPI documents the
+  `422` as `ValidationProblem`.
 - **Breaking:** an exception raised in a dependency's teardown is now the
   request's outcome rather than a log line, and a dependency that yields twice
   is an error rather than a logged warning.

@@ -194,6 +194,7 @@ class Capability:
             json.dumps(body).encode() if body else b"",
             None if parent is None else list(parent.headers.items()),
             None if parent is None else parent._context,
+            None if parent is None else parent.locals,
         )
         target = self.target if self.target is not None else self.route.target
         return await target(request, **params)

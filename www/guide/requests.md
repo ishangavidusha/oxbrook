@@ -38,10 +38,29 @@ keeps a malformed request from becoming a `500`.
 
 `Request` is a frozen class. Nothing on the Python side can mutate it, which is
 why it needs no locking even when several worker loops are running in the same
-process on a free-threaded build. Pass values between middleware and handlers
-through a `ContextVar` or a dependency, not by attaching attributes to the
-request. `request.state` is read-only for the same reason: every request on a
-worker loop shares it.
+process on a free-threaded build. `request.state` is read-only for a related
+reason: every request on a worker loop shares it.
+
+## Passing values along: `request.locals`
+
+`request.locals` is a plain dict belonging to this request alone, empty until
+something writes to it. It is where middleware leaves something for a handler
+or a dependency to read:
+
+```python
+@app.middleware
+async def request_id(request, call_next):
+    request.locals["request_id"] = request.header("x-request-id") or new_id()
+    return await call_next(request)
+
+@app.get("/orders")
+async def orders(request: Request):
+    log.info("listing", extra={"request_id": request.locals["request_id"]})
+```
+
+It costs nothing on a request that never touches it. An MCP tool call shares
+the dict of the `/mcp` request that carried it, since the app's middleware ran
+once, around that request.
 
 ## Repeated headers
 

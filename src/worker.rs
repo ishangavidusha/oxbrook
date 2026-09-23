@@ -140,6 +140,7 @@ impl Drainer {
                     headers: item.headers,
                     context: Some(self.context.clone_ref(py)),
                     stream: item.body_stream,
+                    locals: pyo3::sync::PyOnceLock::new(),
                 },
             )?;
             let responder = Py::new(
