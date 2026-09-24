@@ -194,7 +194,10 @@ async def _resolve(
 def bind(handler: Any, dependencies: dict[str, Depends]) -> Any:
     """Wrap a handler so its dependencies are resolved per request."""
 
-    async def wrapped(request, **params):
+    async def wrapped(request, *socket, **params):
+        # `socket` is the WebSocket, for a socket handler, which is called
+        # with it after the request. Passed through untouched.
+        #
         # An exit stack is exactly the semantics wanted: teardown in reverse
         # order, each one seeing whatever exception is propagating by then,
         # every one run even if an earlier one raised, and the last exception
@@ -203,7 +206,7 @@ def bind(handler: Any, dependencies: dict[str, Depends]) -> Any:
             cache: dict[Any, Any] = {}
             for name, marker in dependencies.items():
                 params[name] = await _resolve(marker, request, cache, stack)
-            return await handler(request, **params)
+            return await handler(request, *socket, **params)
 
     wrapped.__name__ = getattr(handler, "__name__", "handler")
     wrapped.__qualname__ = getattr(handler, "__qualname__", "handler")
