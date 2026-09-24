@@ -7,9 +7,9 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Full, StreamBody};
-use hyper::body::{Frame, Incoming};
+use hyper::body::{Body as HttpBody, Frame, Incoming};
 use hyper::header::{
-    HeaderValue, ALLOW, CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, HOST, RETRY_AFTER,
+    HeaderValue, ALLOW, CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, EXPECT, HOST, RETRY_AFTER,
     SEC_WEBSOCKET_ACCEPT, SEC_WEBSOCKET_KEY, SEC_WEBSOCKET_VERSION, UPGRADE,
 };
 use hyper::server::conn::http1;
@@ -84,8 +84,8 @@ pub struct Server {
     http2: bool,
 }
 
-/// (method, path, handler, params, is_websocket, authorizer, streams_body,
-/// cancel_on_disconnect)
+/// (method, path, handler, params, is_websocket, authorizer, body mode,
+/// cancel_on_disconnect). The body mode is "collect", "stream" or "defer".
 type Route = (
     String,
     String,
@@ -93,7 +93,7 @@ type Route = (
     Vec<SpecTuple>,
     bool,
     Option<Py<PyAny>>,
-    bool,
+    String,
     bool,
 );
 
@@ -186,19 +186,17 @@ impl Server {
         let specs: Vec<RouteTuple> = self
             .routes
             .iter()
-            .map(
-                |(method, path, _, params, websocket, gate, streaming, cancel)| {
-                    (
-                        method.clone(),
-                        path.clone(),
-                        params.clone(),
-                        *websocket,
-                        gate.is_some(),
-                        *streaming,
-                        *cancel,
-                    )
-                },
-            )
+            .map(|(method, path, _, params, websocket, gate, body, cancel)| {
+                (
+                    method.clone(),
+                    path.clone(),
+                    params.clone(),
+                    *websocket,
+                    gate.is_some(),
+                    body.clone(),
+                    *cancel,
+                )
+            })
             .collect();
         let mounts = self
             .mounts
@@ -755,7 +753,7 @@ fn method_not_allowed(allow: String) -> Response<Out> {
 /// means that timeout passed.
 async fn wait_while_streaming<F>(
     mut reply: oneshot::Receiver<Reply>,
-    mut pump: std::pin::Pin<Box<F>>,
+    pump: &mut std::pin::Pin<Box<F>>,
     shared: &BodyShared,
     limit: Option<Duration>,
 ) -> Option<Result<Reply, oneshot::error::RecvError>>
@@ -853,6 +851,10 @@ fn enqueue(state: &State, pending: Pending) -> Option<usize> {
     None
 }
 
+/// The reply header a socket's gate names its hand-off key in. Mirrored in
+/// `oxbrook._auth`; it never reaches a client, since the 101 is built here.
+const HANDOFF: &str = "x-oxbrook-handoff";
+
 /// Complete a WebSocket handshake and hand the socket to a handler.
 ///
 /// The 101 goes out from here rather than from the handler, because hyper only
@@ -902,6 +904,7 @@ async fn upgrade_websocket(
 
     // Ask the application before switching protocols. Once the 101 is sent it
     // is too late to refuse, which is why this cannot be left to the handler.
+    let mut handoff = None;
     if state.router.spec(matched.route).gated {
         let (verdict_tx, verdict_rx) = oneshot::channel::<Reply>();
         let queued = enqueue(
@@ -918,6 +921,8 @@ async fn upgrade_websocket(
                 websocket: None,
                 gate: true,
                 body_stream: None,
+                deferred: false,
+                handoff: None,
                 connection: None,
                 cancel: None,
             },
@@ -936,8 +941,17 @@ async fn upgrade_websocket(
 
         match verdict {
             // 101 from the authorizer means "go ahead"; the real handshake
-            // response is built below.
-            Ok(reply) if reply.status == 101 => {}
+            // response is built below. The gate and the handler are two
+            // requests, so who authentication found travels from one to the
+            // other under a key the gate chose. Taken from the gate's reply,
+            // never from the client's headers, so no client can name one.
+            Ok(reply) if reply.status == 101 => {
+                handoff = reply
+                    .headers
+                    .iter()
+                    .find(|(name, _)| name.eq_ignore_ascii_case(HANDOFF))
+                    .map(|(_, value)| value.clone());
+            }
             Ok(reply) => {
                 let body = match reply.body {
                     Body::Full(bytes) => Bytes::from(bytes),
@@ -984,6 +998,8 @@ async fn upgrade_websocket(
             websocket: Some(shared.clone()),
             gate: false,
             body_stream: None,
+            deferred: false,
+            handoff,
             connection: None,
             cancel: None,
         },
@@ -1169,9 +1185,25 @@ async fn handle(
     // handler that never reads a header never pays to convert one.
     let headers = std::mem::take(req.headers_mut());
 
-    // A streaming route is handed to its worker before the body is read; any
-    // other waits here until the body is complete and within the limit.
-    let (body, stream, pump) = if state.router.spec(matched.route).streaming {
+    // A route with authentication defers its body, so a caller who is refused
+    // never makes the server read what they sent. Only when there is a body:
+    // with none, the collected path is the same answer for one wakeup less.
+    let spec = state.router.spec(matched.route);
+    let deferred = spec.deferred && !HttpBody::is_end_stream(req.body());
+    // Whether an early answer should read away what the client is sending,
+    // for the reason in `body::drain`. Not over HTTP/2, which ends one stream
+    // without touching the connection, and not for a client waiting on
+    // `100 Continue`: it has sent nothing, and reading would ask it to.
+    let lingers = req.version() < Version::HTTP_2
+        && !headers
+            .get(EXPECT)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.eq_ignore_ascii_case("100-continue"));
+
+    // A streaming or deferring route is handed to its worker before the body
+    // is read; any other waits here until the body is complete and within the
+    // limit.
+    let (body, stream, pump) = if spec.streaming || deferred {
         let declared = headers
             .get(CONTENT_LENGTH)
             .and_then(|v| v.to_str().ok())
@@ -1212,6 +1244,8 @@ async fn handle(
         websocket: None,
         gate: false,
         body_stream: stream.clone(),
+        deferred,
+        handoff: None,
         connection: connection.clone(),
         cancel: cancel.clone(),
     };
@@ -1235,8 +1269,17 @@ async fn handle(
     // Waiting only for the *first* reply, so a long-lived SSE stream is not
     // affected: its headers go out as soon as the handler starts streaming.
     let replied = match (pump, stream) {
-        (Some(pump), Some(shared)) => {
-            wait_while_streaming(reply_rx, pump, &shared, state.request_timeout).await
+        (Some(mut pump), Some(shared)) => {
+            let replied =
+                wait_while_streaming(reply_rx, &mut pump, &shared, state.request_timeout).await;
+            // Answered without reading the whole body — refused before it,
+            // most often. The rest is read away before the answer goes out,
+            // as `refuse` does for a request refused before routing.
+            if lingers && !shared.is_finished() {
+                shared.discard();
+                let _ = tokio::time::timeout(crate::body::LINGER, pump).await;
+            }
+            replied
         }
         _ => match state.request_timeout {
             Some(limit) => tokio::time::timeout(limit, reply_rx).await.ok(),

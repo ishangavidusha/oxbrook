@@ -4,13 +4,13 @@ FT_PY  := 3.14.7+freethreaded
 # recorded before benchmarks ever left it. Anywhere else, uv fetches its own.
 GIL_PY := $(shell test -x /opt/homebrew/bin/python3.14 && echo /opt/homebrew/bin/python3.14 || echo 3.14)
 
-.PHONY: image-bench bench-imbalance bench-streams bench-protocols bench-container machine bench-collect venvs build build-ft build-gil docs docs-serve coverage coverage-rust lint run bench bench-gil bench-cpu bench-cpu-gil sweep sweep-gil bench-all verify verify-gil up down logs image stack stack-down clean
+.PHONY: image-bench bench-auth bench-imbalance bench-streams bench-protocols bench-container machine bench-collect venvs build build-ft build-gil docs docs-serve coverage coverage-rust lint run bench bench-gil bench-cpu bench-cpu-gil sweep sweep-gil bench-all verify verify-gil up down logs image stack stack-down clean
 
 venvs:
 	uv venv --python $(FT_PY) .venv
 	uv venv --python $(GIL_PY) .venv-gil
-	uv pip install --python .venv/bin/python maturin uvicorn granian fastapi "httpx[http2]" cryptography openapi-spec-validator websockets redis mcp coverage asyncpg "sqlalchemy[asyncio]" alembic
-	uv pip install --python .venv-gil/bin/python maturin uvicorn granian fastapi "httpx[http2]" cryptography openapi-spec-validator websockets redis mcp coverage asyncpg "sqlalchemy[asyncio]" alembic
+	uv pip install --python .venv/bin/python maturin uvicorn granian fastapi "httpx[http2]" cryptography openapi-spec-validator websockets redis mcp coverage asyncpg "sqlalchemy[asyncio]" alembic "pyjwt[crypto]"
+	uv pip install --python .venv-gil/bin/python maturin uvicorn granian fastapi "httpx[http2]" cryptography openapi-spec-validator websockets redis mcp coverage asyncpg "sqlalchemy[asyncio]" alembic "pyjwt[crypto]"
 	# Docs tooling only in the GIL venv: mkdocs has no reason to run twice.
 	uv pip install --python .venv-gil/bin/python mkdocs-material 'mkdocstrings[python]' ruff
 
@@ -214,6 +214,9 @@ bench-imbalance: build-ft
 
 bench-streams: build-ft
 	.venv/bin/python bench/streams.py --python .venv/bin/python
+
+bench-auth: build-ft
+	.venv/bin/python bench/auth.py --python .venv/bin/python
 
 bench-protocols: build-ft
 	.venv/bin/python bench/protocols.py --python .venv/bin/python

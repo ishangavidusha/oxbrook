@@ -23,7 +23,7 @@ Routes with no middleware registered are untouched and pay nothing.
 
 from typing import Any
 
-from ._response import Response
+from ._response import Response, header_pairs
 
 
 class Reply:
@@ -138,4 +138,4 @@ def merge(reply: Reply) -> tuple[Any, int | None, list[tuple[str, str]] | None]:
         )
         return value, None, None
 
-    return value, status, list(headers.items()) or None
+    return value, status, header_pairs(headers)

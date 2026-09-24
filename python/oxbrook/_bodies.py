@@ -92,3 +92,32 @@ class BodyStream:
 
     def __repr__(self) -> str:
         return f"<BodyStream {'streaming' if self._reader is not None else 'buffered'}>"
+
+
+async def read_body(request: Any) -> bytes:
+    """`request.read()`: the whole body, reading it first if it is still due.
+
+    A deferred body is collected in Rust and the worker woken once, when it
+    has all arrived, rather than once per chunk as iterating would.
+    """
+    reader = request._reader()
+    if reader is None:
+        return request.body
+    loop = asyncio.get_running_loop()
+    while True:
+        state, value = reader.take()
+        if state == _END:
+            request._fill(value)
+            return value
+        if state == _FAILED:
+            status, detail = value
+            raise HTTPError(status, detail)
+
+        ready = loop.create_future()
+
+        def wake(future: asyncio.Future = ready) -> None:
+            if not future.done():
+                future.set_result(None)
+
+        reader.collect(wake)
+        await ready

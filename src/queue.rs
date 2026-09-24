@@ -46,6 +46,11 @@ pub struct Pending {
     pub gate: bool,
     /// Set for a route that streams its body; `body` is then empty.
     pub body_stream: Option<std::sync::Arc<crate::body::BodyShared>>,
+    /// The body is in `body_stream` because the route defers it, not because
+    /// the handler asked for a stream: the handler reads it whole, later.
+    pub deferred: bool,
+    /// For a socket, the key its gate left the authenticated caller under.
+    pub handoff: Option<String>,
     /// Set for a request on an HTTP/2 connection.
     pub connection: Option<ConnectionLoad>,
     /// Set for a route that is cancelled when its client leaves.

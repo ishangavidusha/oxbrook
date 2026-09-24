@@ -69,6 +69,12 @@ pub struct BodyShared {
     /// pump's own idle timeout owns that wait and answers 408; the reply
     /// timeout must not race it and answer 504 for the client's stall.
     reading: AtomicBool,
+    /// The handler wants the body whole: the pump ignores the high water
+    /// (`max_body` still bounds it) and wakes the handler once, at the end,
+    /// rather than once per chunk.
+    whole: AtomicBool,
+    /// The request was answered: read what is left and throw it away.
+    discard: AtomicBool,
 }
 
 impl BodyShared {
@@ -83,7 +89,24 @@ impl BodyShared {
             progress: AtomicU64::new(0),
             origin: Instant::now(),
             reading: AtomicBool::new(false),
+            whole: AtomicBool::new(false),
+            discard: AtomicBool::new(false),
         })
+    }
+
+    /// Whether the whole body has arrived, or failed to.
+    pub fn is_finished(&self) -> bool {
+        self.finished.load(Ordering::SeqCst)
+    }
+
+    /// Stop delivering the body and read away what is left of it.
+    pub fn discard(&self) {
+        self.discard.store(true, Ordering::SeqCst);
+        self.demand.notify_one();
+    }
+
+    fn discarding(&self) -> bool {
+        self.discard.load(Ordering::SeqCst)
     }
 
     pub fn bind_queue(&self, queue: Arc<WorkerQueue>) {
@@ -115,6 +138,10 @@ impl BodyShared {
             chunks.push_back(chunk);
         }
         self.touch();
+        // Collecting whole, only the end is worth waking the handler for.
+        if self.whole.load(Ordering::SeqCst) && !self.finished.load(Ordering::SeqCst) {
+            return;
+        }
         // Called from the connection's future. Moving the callback into the
         // worker queue touches no interpreter state.
         let waiter = self.waiter.lock().ok().and_then(|mut w| w.take());
@@ -149,7 +176,7 @@ impl BodyShared {
 /// Bounded by time, not by bytes: the point is to let a client that is about
 /// to stop sending finish, not to accept a body after refusing it. A client
 /// that keeps sending past this is reset, as before.
-const LINGER: Duration = Duration::from_millis(250);
+pub(crate) const LINGER: Duration = Duration::from_millis(250);
 
 /// Read and discard what is left of a body, for at most `LINGER`.
 pub(crate) async fn drain(mut body: Incoming) {
@@ -207,6 +234,10 @@ pub async fn pump(
 
     // Lazy: nothing leaves the socket until the handler's first read.
     shared.demand.notified().await;
+    if shared.discarding() {
+        linger(body, &shared).await;
+        return;
+    }
 
     // A declared length over the limit is refused without reading a byte of
     // it — but the client is sending it anyway, so it is read away before the
@@ -220,8 +251,15 @@ pub async fn pump(
     let mut body = body;
     let mut total = 0usize;
     loop {
-        while shared.buffered.load(Ordering::Relaxed) > HIGH_WATER {
+        while shared.buffered.load(Ordering::Relaxed) > HIGH_WATER
+            && !shared.whole.load(Ordering::SeqCst)
+            && !shared.discarding()
+        {
             shared.demand.notified().await;
+        }
+        if shared.discarding() {
+            linger(body, &shared).await;
+            return;
         }
         let next = body.frame();
         shared.reading.store(true, Ordering::Relaxed);
@@ -271,6 +309,15 @@ pub struct BodyReader {
 impl BodyReader {
     pub fn new(shared: Arc<BodyShared>) -> Self {
         Self { shared }
+    }
+}
+
+/// The status and detail a handler sees for a body that did not arrive.
+fn describe(failure: Failure) -> (u16, String) {
+    match failure {
+        Failure::TooLarge(limit) => (413, format!("request body larger than {limit} bytes")),
+        Failure::Idle => (408, "request body stalled".to_owned()),
+        Failure::Incomplete => (400, "request body ended early".to_owned()),
     }
 }
 
@@ -325,16 +372,65 @@ impl BodyReader {
                 if let Ok(mut chunks) = self.shared.chunks.lock() {
                     chunks.push_front(Chunk::Failed(failure));
                 }
-                let (status, detail) = match failure {
-                    Failure::TooLarge(limit) => {
-                        (413u16, format!("request body larger than {limit} bytes"))
-                    }
-                    Failure::Idle => (408u16, "request body stalled".to_owned()),
-                    Failure::Incomplete => (400u16, "request body ended early".to_owned()),
-                };
+                let (status, detail) = describe(failure);
                 (FAILED, (status, detail).into_pyobject(py)?.into_any())
             }
         })
+    }
+
+    /// Read the rest of the body without waking the handler per chunk, and
+    /// call `callback` on the worker loop once it has all arrived or failed.
+    /// `take` then has it.
+    fn collect(&self, callback: Py<PyAny>) {
+        self.shared.whole.store(true, Ordering::SeqCst);
+        if let Ok(mut waiter) = self.shared.waiter.lock() {
+            *waiter = Some(callback);
+        }
+        // Asks for the first read, or releases a pump held at the high water.
+        self.shared.demand.notify_one();
+        // Finished between the caller's `take` and installing the waiter:
+        // without this re-check that wakeup would be lost.
+        if self.shared.is_finished() {
+            let waiter = self.shared.waiter.lock().ok().and_then(|mut w| w.take());
+            if let (Some(callback), Some(queue)) = (waiter, self.shared.queue.get()) {
+                queue.push_wakeup(callback);
+            }
+        }
+    }
+
+    /// Everything buffered, once the body has ended: `(END, bytes)`,
+    /// `(FAILED, (status, detail))`, or `(PENDING, None)` while it is still
+    /// arriving, in which case nothing is taken.
+    fn take<'py>(&self, py: Python<'py>) -> PyResult<(u8, Bound<'py, PyAny>)> {
+        if !self.shared.is_finished() {
+            return Ok((PENDING, py.None().into_bound(py)));
+        }
+        let Ok(mut chunks) = self.shared.chunks.lock() else {
+            return Ok((PENDING, py.None().into_bound(py)));
+        };
+        let mut whole: Vec<u8> = Vec::new();
+        while let Some(chunk) = chunks.pop_front() {
+            match chunk {
+                Chunk::Data(bytes) => {
+                    self.shared
+                        .buffered
+                        .fetch_sub(bytes.len(), Ordering::Relaxed);
+                    whole.extend_from_slice(&bytes);
+                }
+                Chunk::End => {
+                    chunks.push_front(Chunk::End);
+                    return Ok((END, PyBytes::new(py, &whole).into_any()));
+                }
+                Chunk::Failed(failure) => {
+                    chunks.push_front(Chunk::Failed(failure));
+                    let (status, detail) = describe(failure);
+                    return Ok((FAILED, (status, detail).into_pyobject(py)?.into_any()));
+                }
+            }
+        }
+        // Finished with no marker left cannot happen: the marker is pushed
+        // last and never removed. Answered as the end, with what was there.
+        Ok((END, PyBytes::new(py, &whole).into_any()))
     }
 
     /// Call `callback` on the worker loop when there is something to poll.

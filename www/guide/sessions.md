@@ -39,6 +39,9 @@ Signing is HMAC-SHA256, compared in constant time. A tampered or expired cookie
 is treated as no session at all rather than as an error, because a client with
 a stale cookie should get a fresh session, not a `400`.
 
+To make a session a way of logging in — a route that needs a signed-in user —
+use [`SessionAuth`](auth.md#sessions).
+
 ## Options
 
 ```python

@@ -101,6 +101,7 @@ nav:
       - guide/lifespan.md
       - guide/database.md
       - guide/sessions.md
+      - guide/auth.md
       - guide/logging.md
       - guide/errors.md
       - guide/cors.md
@@ -122,6 +123,7 @@ nav:
   - Reference:
       - reference/app.md
       - reference/http.md
+      - reference/auth.md
       - reference/streams.md
       - reference/durable.md
       - reference/agents.md

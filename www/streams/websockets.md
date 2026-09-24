@@ -87,9 +87,15 @@ app = App(websocket_origins=["*"])
 
 The origin check is not authentication. It stops other websites from using a
 visitor's cookies; it does nothing against a client that is not a browser,
-which can send any `Origin` it likes. Authenticate in the authorizer.
+which can send any `Origin` it likes. Declare
+[`auth=`](../guide/auth.md#websockets) for that.
 
 ## Refusing a connection
+
+[`auth=`](../guide/auth.md#websockets) is the usual way: it is checked before the
+handshake, and the handler receives the principal through
+`Depends(principal)`. `authorize` is the lower-level hook, for a rule of your
+own, and runs after `auth=`.
 
 `authorize` runs **before** the handshake, which the handler cannot do: by the
 time a handler runs, the `101` has been sent and the client believes it is

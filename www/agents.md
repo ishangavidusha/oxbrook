@@ -48,8 +48,12 @@ time, not a silent overwrite at call time.
 ## Middleware, errors and auth
 
 A tool call arrives as a `POST` to `/mcp`, so the app's middleware runs around
-it the way it runs around any request: an app-wide auth check covers agents
-too.
+it the way it runs around any request.
+
+A tool is guarded by its route's [`auth=`](guide/auth.md#agents), checked with
+the headers the agent sent. An admin tool called without the scope comes back
+to the agent as an error with status `403`, exactly as the route would answer
+over HTTP. `/mcp` itself follows the app's declaration.
 
 The route's own [router](guide/routers.md) middleware runs around the tool call
 as well, with the headers the agent sent. An admin router that refuses a request

@@ -31,6 +31,8 @@ different route here, as it is everywhere else.
 from dataclasses import dataclass
 from typing import Any
 
+from . import _auth
+from ._auth import UNSET
 from ._middleware import make_gate
 from ._routing import RouteInfo, build_route, route_shape
 
@@ -54,13 +56,18 @@ class _Declared:
     authorize: Any
     cancel_on_disconnect: bool = True
     blocking: bool = False
+    auth: Any = UNSET
 
 
 class Router:
-    """A group of routes with a shared prefix and middleware."""
+    """A group of routes with a shared prefix, middleware and `auth=`."""
 
-    def __init__(self, prefix: str = "") -> None:
+    def __init__(self, prefix: str = "", *, auth: Any = UNSET) -> None:
+        """`auth` applies to every route on the router and on routers it
+        includes, unless one declares its own; a route's `auth=None` makes it
+        public even here. See `oxbrook.auth`."""
         self.prefix = check_prefix(prefix)
+        self.auth = _auth.check(auth, f"Router({prefix!r})")
         self._declared: list[_Declared] = []
         self._middleware: list[Any] = []
         self._children: list[tuple[Router, str]] = []
@@ -108,48 +115,60 @@ class Router:
         *,
         cancel_on_disconnect: bool = True,
         blocking: bool = False,
+        auth: Any = UNSET,
     ):
         """Register a route. See `App.route`."""
         method = method.upper()
+        auth = _auth.check(auth, f"{method} {self.prefix}{path}")
 
         def decorator(fn):
             self._declare(
-                _Declared(method, path, fn, tool, False, None, cancel_on_disconnect, blocking)
+                _Declared(method, path, fn, tool, False, None, cancel_on_disconnect, blocking,
+                          auth)
             )
             return fn
 
         return decorator
 
     def get(self, path: str, tool: bool = False, *, cancel_on_disconnect: bool = True,
-            blocking: bool = False):
+            blocking: bool = False, auth: Any = UNSET):
         return self.route("GET", path, tool=tool,
-                          cancel_on_disconnect=cancel_on_disconnect, blocking=blocking)
+                          cancel_on_disconnect=cancel_on_disconnect, blocking=blocking,
+                          auth=auth)
 
     def post(self, path: str, tool: bool = False, *, cancel_on_disconnect: bool = True,
-            blocking: bool = False):
+            blocking: bool = False, auth: Any = UNSET):
         return self.route("POST", path, tool=tool,
-                          cancel_on_disconnect=cancel_on_disconnect, blocking=blocking)
+                          cancel_on_disconnect=cancel_on_disconnect, blocking=blocking,
+                          auth=auth)
 
     def put(self, path: str, tool: bool = False, *, cancel_on_disconnect: bool = True,
-            blocking: bool = False):
+            blocking: bool = False, auth: Any = UNSET):
         return self.route("PUT", path, tool=tool,
-                          cancel_on_disconnect=cancel_on_disconnect, blocking=blocking)
+                          cancel_on_disconnect=cancel_on_disconnect, blocking=blocking,
+                          auth=auth)
 
     def patch(self, path: str, tool: bool = False, *, cancel_on_disconnect: bool = True,
-            blocking: bool = False):
+            blocking: bool = False, auth: Any = UNSET):
         return self.route("PATCH", path, tool=tool,
-                          cancel_on_disconnect=cancel_on_disconnect, blocking=blocking)
+                          cancel_on_disconnect=cancel_on_disconnect, blocking=blocking,
+                          auth=auth)
 
     def delete(self, path: str, tool: bool = False, *, cancel_on_disconnect: bool = True,
-            blocking: bool = False):
+            blocking: bool = False, auth: Any = UNSET):
         return self.route("DELETE", path, tool=tool,
-                          cancel_on_disconnect=cancel_on_disconnect, blocking=blocking)
+                          cancel_on_disconnect=cancel_on_disconnect, blocking=blocking,
+                          auth=auth)
 
-    def websocket(self, path: str, authorize: Any = None, *, blocking: bool = False):
+    def websocket(self, path: str, authorize: Any = None, *, blocking: bool = False,
+                  auth: Any = UNSET):
         """Register a WebSocket endpoint. See `App.websocket`."""
+        auth = _auth.check(auth, f"WEBSOCKET {self.prefix}{path}")
 
         def decorator(fn):
-            self._declare(_Declared("GET", path, fn, False, True, authorize, True, blocking))
+            self._declare(
+                _Declared("GET", path, fn, False, True, authorize, True, blocking, auth)
+            )
             return fn
 
         return decorator
@@ -173,12 +192,16 @@ class Router:
 
     # ---- flattening ---------------------------------------------------------
 
-    def _flatten(self, outer: str, middleware: list[Any], seen: tuple = ()) -> list[RouteInfo]:
+    def _flatten(
+        self, outer: str, middleware: list[Any], seen: tuple = (), auth: Any = UNSET
+    ) -> list[RouteInfo]:
         if self in seen:
             raise ValueError(f"{self!r} includes itself through another router")
         self._included = True
         base = outer + self.prefix
         chain = middleware + self._middleware
+        # Nearest wins: this router's declaration over the one it inherited.
+        auth = self.auth if self.auth is not UNSET else auth
 
         routes: list[RouteInfo] = []
         for declared in self._declared:
@@ -194,7 +217,8 @@ class Router:
             if declared.authorize is not None:
                 route.authorizer = make_gate(declared.authorize)
             route.middleware = list(chain)
+            route.auth = declared.auth if declared.auth is not UNSET else auth
             routes.append(route)
         for child, child_prefix in self._children:
-            routes.extend(child._flatten(base + child_prefix, chain, (*seen, self)))
+            routes.extend(child._flatten(base + child_prefix, chain, (*seen, self), auth))
         return routes

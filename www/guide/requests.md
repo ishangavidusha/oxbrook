@@ -58,9 +58,19 @@ async def orders(request: Request):
     log.info("listing", extra={"request_id": request.locals["request_id"]})
 ```
 
-It costs nothing on a request that never touches it. An MCP tool call shares
-the dict of the `/mcp` request that carried it, since the app's middleware ran
-once, around that request.
+It costs nothing on a request that never touches it. An MCP tool call starts
+with a copy of the `/mcp` request's dict, since the app's middleware ran once,
+around that request; what the tool writes stays with the tool.
+[Authentication](auth.md#who-is-calling) keeps the caller here, under
+`"principal"`.
+
+## Reading the body later: `request.read()`
+
+On a route with [`auth=`](auth.md#the-body-waits), the body is read after the
+caller is authenticated, so middleware outside that check finds it unread and
+`request.body` raises there. `await request.read()` returns the whole body,
+reading it first if it has not arrived yet; anywhere `request.body` works, it
+returns the same bytes.
 
 ## Repeated headers
 

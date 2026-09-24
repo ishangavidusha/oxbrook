@@ -334,6 +334,8 @@ def supervise(args: argparse.Namespace) -> int:
 # routes and openapi
 # ---------------------------------------------------------------------------
 def routes(args: argparse.Namespace) -> int:
+    from ._auth import describe as describe_auth
+
     app = load_app(args.target, args.app_dir, args.factory)
     declared = list(app.routes)
     # The built-in routes are added when a server is built; add them here too,
@@ -359,6 +361,11 @@ def routes(args: argparse.Namespace) -> int:
             notes.append("form")
         if route.middleware:
             notes.append(f"{len(route.middleware)} router middleware")
+        # Every route's answer to "who may call this", so a route left public
+        # in an app that is not stands out.
+        auth = describe_auth(route.auth, app.auth)
+        if auth:
+            notes.append(auth if auth == "public" else f"auth {auth}")
         if route in builtin:
             notes.append("built in")
         fn = route.fn

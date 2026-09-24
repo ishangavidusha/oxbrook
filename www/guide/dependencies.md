@@ -98,6 +98,20 @@ async def admin(_: Request, user = Depends(current_user), perms = Depends(permis
 A dependency can declare dependencies of its own, to any depth, and they
 resolve the same way.
 
+## WebSocket handlers
+
+A WebSocket handler takes dependencies after the request and the socket:
+
+```python
+@app.websocket("/feed", auth=web)
+async def feed(_: Request, ws, who=Depends(principal)):
+    ...
+```
+
+Teardown runs when the handler returns, which for a socket is when the
+connection ends: a dependency holding a pooled connection holds it for that
+long.
+
 ## What dependencies are not
 
 Dependencies are not parameters. An argument defaulted to `Depends` is left out

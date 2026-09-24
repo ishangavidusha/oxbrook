@@ -20,6 +20,7 @@ pip install oxbrook
     sockets, which bounds what handlers on one loop may hold open — outbound
     connections, mostly — rather than the connections the server accepts.
 - **Redis**, only for durable topics: `pip install oxbrook redis`.
+- **PyJWT**, only for [`JWT`](guide/auth.md#jwt): `pip install 'oxbrook[auth]'`.
 
 With [uv](https://docs.astral.sh/uv/), a free-threaded environment is one
 command:

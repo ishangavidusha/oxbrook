@@ -27,6 +27,32 @@ pub struct Request {
     /// it costs nothing until one does; a once-lock rather than a Mutex
     /// because it is written exactly once and read many times after.
     pub locals: PyOnceLock<Py<PyDict>>,
+    /// The body is in `stream` because the route deferred it until after
+    /// authentication, and `body` is empty until `filled` is set.
+    pub deferred: bool,
+    /// The whole body, once read from `stream`. Written once, like `locals`.
+    pub filled: std::sync::OnceLock<Vec<u8>>,
+    /// For a socket, the key its gate left the authenticated caller under.
+    pub handoff: Option<String>,
+}
+
+impl Request {
+    /// The body, wherever it is. A deferred body that has not been read yet
+    /// is an error rather than empty bytes: code that parsed `b""` would fail
+    /// somewhere far from the reason.
+    fn bytes(&self) -> PyResult<&[u8]> {
+        if let Some(filled) = self.filled.get() {
+            return Ok(filled);
+        }
+        if self.deferred {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "the request body has not been read yet: this route authenticates \
+                 the caller before reading it. Read it in the handler, or \
+                 `await request.read()` to read it now",
+            ));
+        }
+        Ok(&self.body)
+    }
 }
 
 #[pymethods]
@@ -50,7 +76,7 @@ impl Request {
         headers: Option<Vec<(String, String)>>,
         context: Option<Py<PyAny>>,
         locals: Option<Py<PyDict>>,
-    ) -> Self {
+    ) -> PyResult<Self> {
         let mut map = HeaderMap::new();
         for (name, value) in headers.unwrap_or_default() {
             if let (Ok(name), Ok(value)) = (
@@ -60,14 +86,16 @@ impl Request {
                 map.append(name, value);
             }
         }
-        // A tool call shares the `/mcp` request's dict: app middleware ran
-        // once, around that request, and what it left there is for the tool
-        // as much as for anything else.
+        // A tool call starts with a copy of the `/mcp` request's dict: app
+        // middleware ran once, around that request, and what it left there is
+        // for the tool as much as for anything else. A copy, because the tool
+        // is a request of its own: who its route's authentication found is
+        // the tool's answer, and must not overwrite the `/mcp` request's.
         let cell = PyOnceLock::new();
-        if let Some(shared) = locals {
-            let _ = cell.set(py, shared);
+        if let Some(inherited) = locals {
+            let _ = cell.set(py, inherited.bind(py).copy()?.unbind());
         }
-        Self {
+        Ok(Self {
             method,
             path,
             query,
@@ -76,7 +104,10 @@ impl Request {
             context,
             stream: None,
             locals: cell,
-        }
+            deferred: false,
+            filled: std::sync::OnceLock::new(),
+            handoff: None,
+        })
     }
 
     /// The app serving this request.
@@ -140,9 +171,56 @@ impl Request {
 
     /// The raw request body. A pydantic-annotated argument is the usual way
     /// to read a body; this is for handlers that parse it themselves.
+    ///
+    /// On a route with `auth=`, the body is read after the caller is
+    /// authenticated, so middleware outside that check, and the check itself,
+    /// find it unread: this raises there, and `await request.read()` reads it.
     #[getter]
-    fn body<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
-        PyBytes::new(py, &self.body)
+    fn body<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
+        Ok(PyBytes::new(py, self.bytes()?))
+    }
+
+    /// The whole body, reading it first if it has not arrived yet.
+    ///
+    /// Returns an awaitable: `body = await request.read()`. Anywhere
+    /// `request.body` would do, this does too; it is needed only where the
+    /// body may not have been read, such as in an authentication scheme that
+    /// checks a signature over it. Bounded by `max_body`, like any body.
+    fn read<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+        let py = slf.py();
+        py.import("oxbrook._bodies")?
+            .getattr("read_body")?
+            .call1((slf,))
+    }
+
+    /// The reader for a body still to be read, or None.
+    fn _reader(&self, py: Python<'_>) -> PyResult<Option<Py<crate::body::BodyReader>>> {
+        match (&self.stream, self.filled.get()) {
+            (Some(shared), None) => Ok(Some(Py::new(
+                py,
+                crate::body::BodyReader::new(shared.clone()),
+            )?)),
+            _ => Ok(None),
+        }
+    }
+
+    /// Keep the body read by `read`. Once only.
+    fn _fill(&self, body: Vec<u8>) -> PyResult<()> {
+        self.filled.set(body).map_err(|_| {
+            pyo3::exceptions::PyRuntimeError::new_err("the request body was already read")
+        })
+    }
+
+    /// True while a body deferred for authentication has not been read.
+    #[getter]
+    fn _unread(&self) -> bool {
+        self.deferred && self.filled.get().is_none()
+    }
+
+    /// The key a socket's gate left the authenticated caller under.
+    #[getter]
+    fn _handoff(&self) -> Option<&str> {
+        self.handoff.as_deref()
     }
 
     /// One header by name, case-insensitively. None if absent.
@@ -211,7 +289,7 @@ impl Request {
             .get(hyper::header::CONTENT_TYPE)
             .and_then(|v| v.to_str().ok())
             .map(str::to_owned);
-        let body = &self.body;
+        let body = self.bytes()?;
         // Pure Rust over bytes already owned here, so other threads may run.
         let parsed = py.detach(|| form::parse(content_type.as_deref(), body, max_parts));
 
@@ -283,11 +361,8 @@ impl Request {
     /// asked for. On any other route the body was already collected, and this
     /// yields it as a single chunk, so code reading a stream works on both.
     fn stream<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let reader = match &self.stream {
-            Some(shared) => Some(Py::new(py, crate::body::BodyReader::new(shared.clone()))?),
-            None => None,
-        };
-        let buffered = PyBytes::new(py, &self.body);
+        let reader = self._reader(py)?;
+        let buffered = PyBytes::new(py, self.filled.get().unwrap_or(&self.body));
         py.import("oxbrook._bodies")?
             .getattr("BodyStream")?
             .call1((reader, buffered))

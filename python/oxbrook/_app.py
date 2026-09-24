@@ -4,7 +4,8 @@ import os
 import sys
 from typing import Any
 
-from . import _openapi
+from . import _auth, _openapi
+from ._auth import UNSET
 from ._blocking import Pool as BlockingPool
 from ._cors import CORS, check_origin
 from ._errors import DEFAULT_HANDLERS
@@ -61,6 +62,7 @@ class App:
         worker_lifespan: Any = None,
         cors: CORS | None = None,
         websocket_origins: Any = None,
+        auth: Any = None,
     ) -> None:
         """`openapi_url` and `docs_url` can each be set to None to disable them.
 
@@ -94,6 +96,12 @@ class App:
         listed one; anything else is refused with `403` before an authorizer or
         handler runs. Left unset, the list is the CORS origins, excluding `*`.
         `["*"]` turns the check off.
+
+        `auth` protects every route that does not declare its own, including
+        WebSockets and MCP tool calls; a route that should stay public says
+        `auth=None`. See `oxbrook.auth`. The OpenAPI document and the docs page
+        stay public; turn them off with `openapi_url=None` and `docs_url=None`
+        if the API's shape is not for everyone.
         """
         self.routes: list[RouteInfo] = []
         self.mounts: list[StaticMount] = []
@@ -134,6 +142,10 @@ class App:
         self.worker_lifespan = check_hook(worker_lifespan, "worker_lifespan")
         #: What `lifespan` yielded, while a server is running. Empty otherwise.
         self.state = State()
+        #: The declaration every route without its own gets; None for none.
+        self.auth = _auth.check(auth, "App(auth=...)") or None
+        #: Whether the server built from this app speaks TLS; `Basic` asks.
+        self._serving_tls = False
 
     def route(
         self,
@@ -143,8 +155,12 @@ class App:
         *,
         cancel_on_disconnect: bool = True,
         blocking: bool = False,
+        auth: Any = UNSET,
     ):
         """Register a route.
+
+        `auth` declares who may call it, overriding its routers' and the app's;
+        `auth=None` makes it public. See `oxbrook.auth`.
 
         `blocking=True` lets the handler be a plain `def` and runs it on a
         threadpool instead of its worker loop. A worker loop serves many
@@ -175,13 +191,16 @@ class App:
         this no longer applies.
         """
         method = method.upper()
+        auth = _auth.check(auth, f"{method} {path}")
 
         def decorator(fn):
             # Validates the handler against its path and fails here, at import
             # time, rather than on the first request.
-            self._add(build_route(fn, method, path, tool=tool,
-                                  cancel_on_disconnect=cancel_on_disconnect,
-                                  blocking=blocking))
+            route = build_route(fn, method, path, tool=tool,
+                                cancel_on_disconnect=cancel_on_disconnect,
+                                blocking=blocking)
+            route.auth = auth
+            self._add(route)
             return fn
 
         return decorator
@@ -224,22 +243,27 @@ class App:
             # A Router builds its routes before it knows an app, so this is the
             # first moment a blocking route can be told where to run.
             route.pool.pool = self._blocking
+        # Likewise the app's own declaration: the last one out, applied here.
+        route.auth = _auth.resolve(route.auth, self.auth)
         self.routes.append(route)
 
     def get(self, path: str, tool: bool = False, *, cancel_on_disconnect: bool = True,
-            blocking: bool = False):
+            blocking: bool = False, auth: Any = UNSET):
         return self.route("GET", path, tool=tool,
-                          cancel_on_disconnect=cancel_on_disconnect, blocking=blocking)
+                          cancel_on_disconnect=cancel_on_disconnect, blocking=blocking,
+                          auth=auth)
 
     def post(self, path: str, tool: bool = False, *, cancel_on_disconnect: bool = True,
-            blocking: bool = False):
+            blocking: bool = False, auth: Any = UNSET):
         return self.route("POST", path, tool=tool,
-                          cancel_on_disconnect=cancel_on_disconnect, blocking=blocking)
+                          cancel_on_disconnect=cancel_on_disconnect, blocking=blocking,
+                          auth=auth)
 
     def put(self, path: str, tool: bool = False, *, cancel_on_disconnect: bool = True,
-            blocking: bool = False):
+            blocking: bool = False, auth: Any = UNSET):
         return self.route("PUT", path, tool=tool,
-                          cancel_on_disconnect=cancel_on_disconnect, blocking=blocking)
+                          cancel_on_disconnect=cancel_on_disconnect, blocking=blocking,
+                          auth=auth)
 
     def static(
         self,
@@ -296,14 +320,16 @@ class App:
         self.mounts.append(mount)
 
     def patch(self, path: str, tool: bool = False, *, cancel_on_disconnect: bool = True,
-            blocking: bool = False):
+            blocking: bool = False, auth: Any = UNSET):
         return self.route("PATCH", path, tool=tool,
-                          cancel_on_disconnect=cancel_on_disconnect, blocking=blocking)
+                          cancel_on_disconnect=cancel_on_disconnect, blocking=blocking,
+                          auth=auth)
 
     def delete(self, path: str, tool: bool = False, *, cancel_on_disconnect: bool = True,
-            blocking: bool = False):
+            blocking: bool = False, auth: Any = UNSET):
         return self.route("DELETE", path, tool=tool,
-                          cancel_on_disconnect=cancel_on_disconnect, blocking=blocking)
+                          cancel_on_disconnect=cancel_on_disconnect, blocking=blocking,
+                          auth=auth)
 
     def include(self, router: Router, prefix: str = "") -> None:
         """Mount a router's routes, under `prefix` if given.
@@ -395,28 +421,47 @@ class App:
 
         return wrap_middleware(target, chain, around)
 
-    def _compose(self, target: Any, extra_middleware: list[Any]) -> Any:
-        """What actually runs for a route served over HTTP.
+    def _compose(self, target: Any, route: RouteInfo, socket: bool = False) -> Any:
+        """What actually runs for a route served over HTTP, or for a socket's
+        upgrade when `socket` is set.
 
-        A route with no middleware and no registered exception handlers is left
-        exactly as it was, so the common path pays nothing; the runtime applies
-        the two built-in defaults itself.
+        The order is the app's middleware, then authentication, then the
+        routers' middleware, then the handler. Authentication inside the app's
+        middleware so the access log records a refusal; outside the routers'
+        so none of theirs runs for a caller who was refused.
+
+        A route with no middleware, no auth and no registered exception
+        handlers is left exactly as it was, so the common path pays nothing;
+        the runtime applies the two built-in defaults itself.
         """
-        chain = self._middleware + extra_middleware
-        if not chain and not self._exception_handlers:
-            return target
-        return self._layer(target, chain, self._handlers())
+        inner = list(route.middleware)
+        chain = self._middleware + inner
+        if route.auth is None:
+            if not chain and not self._exception_handlers:
+                return target
+            return self._layer(target, chain, self._handlers())
+        gate = _auth.Gate(route.auth)
+        if socket:
+            link = gate.socket_middleware()
+        elif not chain and not self._exception_handlers:
+            return gate.wrap(target)
+        else:
+            link = gate.middleware()
+        return self._layer(target, [*self._middleware, link, *inner], self._handlers())
 
     def _tool_target(self, route: RouteInfo) -> Any:
         """What runs when a route is called as an MCP tool.
 
-        The route's router middleware and the exception handlers, but not the
-        app's middleware: that already ran, around the `/mcp` request that
-        carried the call, and running it again would log and authorise twice.
-        Router middleware is the part that must not be skipped — it is where an
-        admin router's auth check lives.
+        The route's own authentication, its router middleware and the
+        exception handlers, but not the app's middleware: that already ran,
+        around the `/mcp` request that carried the call, and running it again
+        would log twice. Authentication is the route's, with the agent's
+        headers, so a tool is refused whatever `/mcp` itself accepts; router
+        middleware must not be skipped either, since a router may guard with
+        it.
         """
-        return self._layer(route.target, list(route.middleware), self._handlers())
+        link = _auth.forget if route.auth is None else _auth.Gate(route.auth).middleware()
+        return self._layer(route.target, [link, *route.middleware], self._handlers())
 
     def per_worker(self, total: int) -> int:
         """One worker loop's share of a process-wide budget.
@@ -462,10 +507,18 @@ class App:
             )
         return total // workers
 
-    def websocket(self, path: str, authorize: Any = None, *, blocking: bool = False):
+    def websocket(self, path: str, authorize: Any = None, *, blocking: bool = False,
+                  auth: Any = UNSET):
         """Register a WebSocket endpoint.
 
-        `authorize` runs before the handshake and can refuse the upgrade,
+        `auth` is checked before the handshake, as for any route, so a caller
+        who is refused gets a real `401` or `403` rather than a socket that
+        opens and closes. Browsers cannot set headers on a WebSocket, so for a
+        page the credential is a cookie — `SessionAuth`. The check runs when
+        the socket opens: a connection can outlive the credential that opened
+        it.
+
+        `authorize` runs after `auth`, before the handshake, and can refuse the upgrade,
         which the handler cannot: by the time it runs, the 101 has been sent
         and the client believes it is connected. Return None or True to
         accept; raise `HTTPError`, or return a `Response`/`Reply`, to refuse.
@@ -488,10 +541,13 @@ class App:
                     await ws.send(message)
         """
 
+        auth = _auth.check(auth, f"WEBSOCKET {path}")
+
         def decorator(fn):
             route = build_route(fn, "GET", path, websocket=True, blocking=blocking)
             if authorize is not None:
                 route.authorizer = make_gate(authorize)
+            route.auth = auth
             self._add(route)
             return fn
 
@@ -560,7 +616,8 @@ class App:
         endpoint the server would not accept. Callable without running the
         server, which makes it usable for client generation in CI.
         """
-        return _openapi.build(self.routes, self.title, self.version, self.description)
+        return _openapi.build(self.routes, self.title, self.version, self.description,
+                              default_auth=self.auth)
 
     def _register_mcp(self) -> None:
         """Add the agent endpoint, unless it was turned off."""
@@ -606,7 +663,7 @@ class App:
             # Serialized once at startup, not per request.
             document = json.dumps(self.openapi()).encode()
 
-            @self.get(self.openapi_url)
+            @self.get(self.openapi_url, auth=None)
             async def openapi_json(_request):
                 """OpenAPI schema."""
                 return Response(document, content_type="application/json")
@@ -616,7 +673,7 @@ class App:
                 title=self.title, openapi_url=self.openapi_url
             ).encode()
 
-            @self.get(self.docs_url)
+            @self.get(self.docs_url, auth=None)
             async def docs(_request):
                 """API documentation."""
                 return Response(page, content_type="text/html; charset=utf-8")
@@ -726,6 +783,7 @@ class App:
         if (tls_cert is None) != (tls_key is None):
             raise ValueError("tls_cert and tls_key are needed together")
         tls = None if tls_cert is None else (os.fspath(tls_cert), os.fspath(tls_key))
+        self._serving_tls = tls is not None
         workers = workers or default_workers()
         self.workers = workers
         mode = "GIL" if gil_enabled() else "free-threaded"
@@ -740,24 +798,7 @@ class App:
         # so registering /mcp afterwards keeps it out of the OpenAPI paths.
         self._register_docs()
         self._register_mcp()
-        specs = [
-            (
-                r.method,
-                r.path,
-                # Sockets are left alone: their handshake is already done, so
-                # there is nothing for middleware or a mapped status to act on.
-                r.target if r.websocket else self._compose(r.target, r.middleware),
-                [p.as_spec() for p in r.params],
-                r.websocket,
-                # The authorizer gets both, so an app-wide auth rule and an
-                # `HTTPError(401)` cover sockets even though neither can wrap
-                # the socket handler itself.
-                None if r.authorizer is None else self._compose(r.authorizer, r.middleware),
-                r.stream is not None,
-                r.cancel_on_disconnect and not r.websocket,
-            )
-            for r in self.routes
-        ]
+        specs = [self._spec(r) for r in self.routes]
         lifecycle = Lifecycle(self)
         core = Server(
             host,
@@ -780,6 +821,31 @@ class App:
             bool(http2),
         )
         return ServerHandle(core, lifecycle)
+
+    def _spec(self, r: RouteInfo) -> tuple:
+        """The tuple the Rust server takes for one route."""
+        if r.websocket:
+            # The handler is left alone: its handshake is already done, so
+            # there is nothing for middleware or a mapped status to act on. The
+            # gate before the handshake gets both instead, and authentication,
+            # so an app-wide rule and an `HTTPError(401)` cover sockets too.
+            handler = r.target if r.auth is None else _auth.receive(r.target)
+            authorizer = r.authorizer
+            if authorizer is None and r.auth is not None:
+                authorizer = make_gate(_auth.accept)
+            gate = None if authorizer is None else self._compose(authorizer, r, socket=True)
+            return (r.method, r.path, handler, [p.as_spec() for p in r.params], True, gate,
+                    "collect", False)
+        if r.stream is not None:
+            body = "stream"
+        elif r.auth is not None:
+            # Read after authentication, so a refused caller never makes the
+            # server take in what they sent.
+            body = "defer"
+        else:
+            body = "collect"
+        return (r.method, r.path, self._compose(r.target, r), [p.as_spec() for p in r.params],
+                False, None, body, r.cancel_on_disconnect)
 
     def _socket_origins(self) -> tuple[bool, list[str]]:
         """(any origin, allowed origins) for the upgrade check.

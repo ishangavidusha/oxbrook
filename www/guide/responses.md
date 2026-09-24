@@ -60,7 +60,11 @@ Custom headers go alongside:
 
 ```python
 Response(b"...", headers={"x-request-id": "abc"})
+Response(b"...", headers={"www-authenticate": ["Bearer", 'Basic realm="api"']})
 ```
+
+A list sends the header once per item, which is how a response carries two
+challenges or two cookies.
 
 `body` may be `bytes` or `str`; a `str` is encoded as UTF-8.
 

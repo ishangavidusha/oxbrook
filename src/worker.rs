@@ -141,6 +141,9 @@ impl Drainer {
                     context: Some(self.context.clone_ref(py)),
                     stream: item.body_stream,
                     locals: pyo3::sync::PyOnceLock::new(),
+                    deferred: item.deferred,
+                    filled: std::sync::OnceLock::new(),
+                    handoff: item.handoff,
                 },
             )?;
             let responder = Py::new(

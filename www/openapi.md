@@ -12,7 +12,13 @@ Two routes are added for you:
 - `GET /openapi.json` — the document
 - `GET /docs` — a documentation page rendered from it
 
-Pass `openapi_url=None` or `docs_url=None` to turn either off.
+Pass `openapi_url=None` or `docs_url=None` to turn either off. Both stay public
+in an app declared [`App(auth=...)`](guide/auth.md#declaring-it).
+
+Each route's [`auth=`](guide/auth.md#openapi) is described too: the schemes under
+`securitySchemes`, and what each operation accepts under `security`, so a
+generated client can authenticate and the docs page's **Authorize** button
+works.
 
 ## Without a server
 

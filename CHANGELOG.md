@@ -7,6 +7,36 @@ release does not; changes that break existing code are listed under
 
 ## Unreleased
 
+- **Authentication**, in `oxbrook.auth`. `auth=` on the app, a router, a route
+  or a WebSocket declares who may call it, and the nearest declaration wins:
+  `App(auth=...)` protects every route that does not say `auth=None`. Shipped
+  schemes are `APIKey`, `Bearer`, `JWT`, `Basic` and `SessionAuth`; anything
+  else is a class with one `async authenticate(request)` method. `a | b`
+  accepts either, `.requires("scope")` adds a requirement, `optional(...)`
+  lets anonymous callers through, and the handler gets the caller with
+  `Depends(principal)`.
+- The framework enforces the rules an app would otherwise get wrong by hand: a
+  credential that is present and wrong is refused rather than falling through
+  to the next scheme or to anonymous access; missing or wrong is `401` with a
+  `WWW-Authenticate` challenge per scheme, known but not allowed is `403`; an
+  API key reaches the app as its digest; a JWT's algorithm family, audience,
+  issuer and expiry are always checked, and a refusal says "invalid" or
+  "expired" and nothing finer; tokens in the query string are not looked for;
+  Basic is refused over plain HTTP; no credential reaches a log line.
+- **Authentication runs before the request body is read.** A refused upload is
+  answered before it arrives, and the connection survives the refusal.
+  Middleware outside the check finds the body unread: `request.body` raises
+  there, and `await request.read()` reads it.
+- One declaration covers every surface: a WebSocket's `auth=` is checked
+  before the handshake, a tool call is checked against its route's
+  declaration with the agent's headers, and the OpenAPI document lists
+  `securitySchemes` and each operation's `security`.
+- A response header can repeat: a list as a header's value sends it once per
+  item.
+- `Depends` works on WebSocket handlers. It raised `TypeError` on every
+  connection.
+- `TestClient.websocket()` takes `headers=`.
+
 - **Every error is RFC 9457 problem details**, `application/problem+json`,
   whichever side answered it: an `HTTPError`, a validation failure, a missing
   route, a wrong method, a body over the limit, a server at capacity, a timeout,
@@ -16,7 +46,8 @@ release does not; changes that break existing code are listed under
 - **`request.locals`**, a dict for one request alone, where middleware leaves
   something for a handler or a dependency — the caller it authenticated, a
   request id. `request.state` is shared by every request on a worker loop, so
-  it could never hold that. A tool call shares the `/mcp` request's.
+  it could never hold that. A tool call starts with a copy of the `/mcp`
+  request's.
 
 - **A dependency's teardown now sees how the request ended.** A generator
   dependency is finished the way a `with` block is: resumed after its `yield`

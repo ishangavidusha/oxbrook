@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from . import _blocking
+from ._auth import UNSET as _UNSET
 from ._bodies import BodyStream
 from ._depends import Depends
 from ._depends import bind as bind_dependencies
@@ -109,6 +110,9 @@ class RouteInfo:
     middleware: list[Any] = field(default_factory=list)
     """Middleware from the routers this route was included through, outermost
     first. Runs inside the app's own middleware."""
+    auth: Any = _UNSET
+    """Who may call it: the nearest `auth=` of the route, its routers and the
+    app, None for public. Unresolved (`_auth.UNSET`) until the app adds it."""
 
 
 #: Every `{name}` and `{*name}`, whatever it is called. Two routes conflict in

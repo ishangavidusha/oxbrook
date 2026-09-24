@@ -50,7 +50,7 @@ C. The CI leg is what actually runs them.
 ## Tests
 
 ```bash
-make verify        # thirty-two suites, free-threaded
+make verify        # thirty-three suites, free-threaded
 make verify-gil    # the same suites on the GIL build
 ```
 
@@ -179,8 +179,10 @@ explains each in context; the short form:
 8. **Never return exception detail to a client.** Tracebacks go to the log.
    An agent calling a tool over MCP is a client.
 9. **A route is guarded the same way however it is reached.** A tool call runs
-   its routers' middleware and the exception handlers, with the caller's
-   headers. A new way to invoke a handler must not bypass them.
+   its route's `auth=` declaration, its routers' middleware and the exception
+   handlers, with the caller's headers; a WebSocket's declaration is checked
+   before the handshake. A new way to invoke a handler must build the route's
+   `Gate` and must not bypass the rest.
 10. **Nothing loop-bound crosses worker loops.** Connection pools and async
    clients belong to one loop; create them in `worker_lifespan`.
 11. **A value encodes to JSON one way, wherever it goes out.** Every surface

@@ -151,6 +151,10 @@ pub struct RouteSpec {
     pub gated: bool,
     /// Takes its body as a `BodyStream` rather than collected up front.
     pub streaming: bool,
+    /// Handed to its worker before a body is read, which the handler reads
+    /// when it is ready to: after authentication, so a caller who is refused
+    /// never makes the server take in what they sent.
+    pub deferred: bool,
     /// A static mount, answered in Rust from `State::mounts[i]`.
     pub mount: Option<usize>,
     /// The handler is cancelled if its client leaves before it answers.
@@ -207,9 +211,9 @@ pub struct Matched {
 /// (name, type, source, presence, repeated) from the Python side.
 pub type SpecTuple = (String, String, String, String, bool);
 
-/// (method, path, params, is_websocket, has_authorizer, streams_body)
-/// (method, path, params, websocket, gated, streaming, cancellable)
-pub type RouteTuple = (String, String, Vec<SpecTuple>, bool, bool, bool, bool);
+/// (method, path, params, websocket, gated, body, cancellable), where `body`
+/// is "collect", "stream" or "defer".
+pub type RouteTuple = (String, String, Vec<SpecTuple>, bool, bool, String, bool);
 
 pub struct Router {
     by_method: HashMap<String, Matcher<usize>>,
@@ -226,15 +230,22 @@ impl Router {
         let mut by_method: HashMap<String, Matcher<usize>> = HashMap::new();
         let mut specs = Vec::with_capacity(routes.len());
 
-        for (index, (method, path, params, websocket, gated, streaming, cancellable)) in
+        for (index, (method, path, params, websocket, gated, body, cancellable)) in
             routes.iter().enumerate()
         {
+            let (streaming, deferred) = match body.as_str() {
+                "collect" => (false, false),
+                "stream" => (true, false),
+                "defer" => (false, true),
+                other => return Err(format!("unknown body mode {other:?} for {path:?}")),
+            };
             let mut spec = RouteSpec {
                 params: Vec::new(),
                 has_query: false,
                 websocket: *websocket,
                 gated: *gated,
-                streaming: *streaming,
+                streaming,
+                deferred,
                 cancellable: *cancellable,
                 mount: None,
             };
@@ -272,6 +283,7 @@ impl Router {
                     websocket: false,
                     gated: false,
                     streaming: false,
+                    deferred: false,
                     cancellable: false,
                     mount: Some(mount),
                 });

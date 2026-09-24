@@ -100,6 +100,50 @@ def _parameter(param, components: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _problem(description: str, components: dict[str, Any]) -> dict[str, Any]:
+    components.setdefault("Problem", _PROBLEM_SCHEMA)
+    return {
+        "description": description,
+        "content": {
+            "application/problem+json": {"schema": {"$ref": _REF_TEMPLATE.format(model="Problem")}}
+        },
+    }
+
+
+def _secure(
+    op: dict[str, Any],
+    route: RouteInfo,
+    default_auth: Any,
+    schemes: dict[str, Any],
+    components: dict[str, Any],
+) -> None:
+    """An operation's `security`, its 401 and 403, and the schemes it names."""
+    from . import _auth
+
+    if route.auth is None:
+        # Public on purpose, in an app that is not: say so, or a reader of
+        # the document would take the route to need the app's credentials.
+        if default_auth is not None:
+            op["security"] = []
+        return
+    listed, used = _auth.security(route.auth)
+    for name, (scheme, entry) in used.items():
+        known = schemes.get(name)
+        if known is not None and known[0] is not scheme and known[1] != entry:
+            raise ValueError(
+                f"two different schemes are both named {name!r} in the OpenAPI "
+                f"document; give one a distinct name= "
+            )
+        schemes.setdefault(name, (scheme, entry))
+    if listed:
+        op["security"] = listed
+    op["responses"]["401"] = _problem("Unauthenticated", components)
+    if any(scopes for alternative in listed for scopes in alternative.values()) or any(
+        requirements for _, options in _auth.plan(route.auth)[0] for requirements in options
+    ):
+        op["responses"]["403"] = _problem("Forbidden", components)
+
+
 def _operation(route: RouteInfo, components: dict[str, Any]) -> dict[str, Any]:
     op: dict[str, Any] = {
         "operationId": getattr(route.fn, "__name__", "handler"),
@@ -168,9 +212,11 @@ def build(
     title: str,
     version: str,
     description: str = "",
+    default_auth: Any = None,
 ) -> dict[str, Any]:
     components: dict[str, Any] = {}
     paths: dict[str, Any] = {}
+    schemes: dict[str, Any] = {}
 
     for route in routes:
         # OpenAPI 3.1 has no vocabulary for WebSocket endpoints, so they are
@@ -178,7 +224,9 @@ def build(
         if route.websocket:
             continue
         entry = paths.setdefault(_openapi_path(route.path), {})
-        entry[route.method.lower()] = _operation(route, components)
+        operation = _operation(route, components)
+        _secure(operation, route, default_auth, schemes, components)
+        entry[route.method.lower()] = operation
 
     document: dict[str, Any] = {
         "openapi": "3.1.0",
@@ -187,8 +235,14 @@ def build(
     }
     if description:
         document["info"]["description"] = description
+    if components or schemes:
+        document["components"] = {}
     if components:
-        document["components"] = {"schemas": components}
+        document["components"]["schemas"] = components
+    if schemes:
+        document["components"]["securitySchemes"] = {
+            name: entry for name, (_, entry) in schemes.items()
+        }
     return document
 
 

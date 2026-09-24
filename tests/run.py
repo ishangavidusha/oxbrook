@@ -30,7 +30,7 @@ SUITES = [
     "agents", "streams", "sse",
     "websocket", "hardening", "escaping", "wire", "failures", "plumbing", "injection",
     "durable", "database", "backpressure", "assignment", "composition", "lifespan", "cors",
-    "uploads", "origins", "cli", "files", "protocols", "cancellation", "verify",
+    "uploads", "origins", "auth", "cli", "files", "protocols", "cancellation", "verify",
 ]
 
 #: What a built wheel is checked with, in `[tool.cibuildwheel]`. A subset,

@@ -181,18 +181,22 @@ class TestClient:
         with self.http.stream(method, path, **kwargs) as response:
             yield response
 
-    def websocket(self, path: str):
+    def websocket(self, path: str, headers: dict[str, str] | None = None):
         """An open WebSocket, as an async context manager.
 
             async with client.websocket("/ws") as ws:
                 await ws.send("hi")
                 assert await ws.recv() == "hi"
+
+        `headers` go on the handshake, which is where a socket's credential is.
         """
         import websockets
 
-        return websockets.connect(f"{self.ws_url}{path}", ssl=self._trust)
+        return websockets.connect(
+            f"{self.ws_url}{path}", ssl=self._trust, additional_headers=headers
+        )
 
-    def _mcp_session(self) -> str:
+    def _mcp_session(self, headers: dict[str, str] | None = None) -> str:
         """The session id, opening one on first use.
 
         The transport is stateful — every message after `initialize` carries a
@@ -213,6 +217,7 @@ class TestClient:
                         "clientInfo": {"name": "oxbrook.testing", "version": "1"},
                     },
                 },
+                headers=headers,
             )
             self._session = started.headers.get("mcp-session-id", "")
         return self._session
@@ -235,7 +240,7 @@ class TestClient:
             payload["params"] = params
 
         def sent() -> dict[str, str]:
-            return {**(headers or {}), "mcp-session-id": self._mcp_session()}
+            return {**(headers or {}), "mcp-session-id": self._mcp_session(headers)}
 
         response = self.http.post(url, json=payload, headers=sent())
         if response.status_code == 404:

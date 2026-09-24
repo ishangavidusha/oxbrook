@@ -14,7 +14,7 @@ import uuid
 from ._errors import PROBLEM, HTTPError, http_error_body, problem
 from ._logging import logger
 from ._middleware import Reply, merge
-from ._response import Response
+from ._response import Response, header_pairs
 from ._schema import RequestValidationError, encode, is_model_instance, to_json
 from ._sse import CLOSED, FULL, SSE, SSE_HEADERS, format_event
 from ._websocket import WebSocket
@@ -221,9 +221,7 @@ async def _respond(handler, request, responder, params, debug):
         # The default handling, for a route with no middleware and no
         # registered handlers, which is wrapped in nothing. Anything registered
         # was already applied by the time an exception reaches here.
-        responder.send(
-            exc.status, PROBLEM, http_error_body(exc), list(exc.headers.items()) or None
-        )
+        responder.send(exc.status, PROBLEM, http_error_body(exc), header_pairs(exc.headers))
         return
     except Exception as exc:  # noqa: BLE001 - a handler crash must still answer
         # The detail goes to the server's log. The client gets a status and

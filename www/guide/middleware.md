@@ -69,6 +69,21 @@ before the upgrade, by the same rule that guards the REST routes. A socket
 route with no authorizer at all is not wrapped by anything. See
 [WebSocket](../streams/websockets.md#refusing-a-connection).
 
+A socket declared with [`auth=`](auth.md#websockets) is wrapped whether or not it
+has an authorizer, since its check has to run before the handshake too.
+
+## Middleware and authentication
+
+On a route with [`auth=`](auth.md), the app's middleware runs outside the
+check and the routers' inside it. An access log or an audit trail registered
+on the app sees every refusal and, afterwards, [who was
+calling](auth.md#who-is-calling); a router's middleware never runs for a
+caller who was refused. App middleware finds the request body unread, since
+the body waits for the check: see [`request.read()`](requests.md#reading-the-body-later-requestread).
+For an authentication rule of your own, write a [scheme](auth.md#writing-a-scheme)
+rather than middleware: it is then enforced on WebSockets and tool calls, and
+documented in OpenAPI, as well.
+
 ## Router middleware
 
 A [router](routers.md) can register middleware that runs only for its own
