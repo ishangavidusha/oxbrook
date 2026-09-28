@@ -209,6 +209,12 @@ Run it after changing a public docstring or a page. Write pages impersonally
 and address the reader as "you": state what the framework does and why, not the
 history of arriving at it.
 
+A change to public behaviour carries its documentation in the same commit: the
+guide page, the docstrings the reference is built from, and an entry under
+**Unreleased** in `CHANGELOG.md`. The site is published from release tags, so
+it always describes the version on PyPI; documentation merged to `main` goes
+live with the next release, and `make docs-serve` shows it before then.
+
 ## Commit messages
 
 One short line, imperative, summarising what changed. The diff holds the
