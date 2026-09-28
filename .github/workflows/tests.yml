@@ -94,7 +94,7 @@ jobs:
       OXBROOK_REQUIRE_REDIS: "1"
       # The same for tests/database.py and PostgreSQL.
       OXBROOK_REQUIRE_POSTGRES: "1"
-      # And for tests/oidc.py's Keycloak half.
+      # And for the Keycloak halves of tests/oidc.py and tests/login.py.
       OXBROOK_REQUIRE_KEYCLOAK: "1"
 
     steps:

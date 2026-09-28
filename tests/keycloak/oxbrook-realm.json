@@ -81,6 +81,42 @@
       "name": "notes:write",
       "protocol": "openid-connect",
       "attributes": {"include.in.token.scope": "true", "display.on.consent.screen": "false"}
+    },
+    {
+      "name": "email",
+      "protocol": "openid-connect",
+      "attributes": {"include.in.token.scope": "true", "display.on.consent.screen": "false"},
+      "protocolMappers": [
+        {
+          "name": "email",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "config": {"user.attribute": "email", "claim.name": "email", "jsonType.label": "String",
+                     "id.token.claim": "true", "access.token.claim": "false", "userinfo.token.claim": "true"}
+        },
+        {
+          "name": "email verified",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-property-mapper",
+          "config": {"user.attribute": "emailVerified", "claim.name": "email_verified",
+                     "jsonType.label": "boolean", "id.token.claim": "true",
+                     "access.token.claim": "false", "userinfo.token.claim": "true"}
+        }
+      ]
+    },
+    {
+      "name": "profile",
+      "protocol": "openid-connect",
+      "attributes": {"include.in.token.scope": "true", "display.on.consent.screen": "false"},
+      "protocolMappers": [
+        {
+          "name": "full name",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-full-name-mapper",
+          "config": {"id.token.claim": "true", "access.token.claim": "false",
+                     "userinfo.token.claim": "true"}
+        }
+      ]
     }
   ],
   "clients": [
@@ -120,6 +156,18 @@
       "directAccessGrantsEnabled": true,
       "defaultClientScopes": ["basic", "roles"],
       "optionalClientScopes": ["notes:read", "notes:write"]
+    },
+    {
+      "clientId": "notes-login",
+      "enabled": true,
+      "publicClient": false,
+      "secret": "notes-login-secret",
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "redirectUris": ["http://127.0.0.1:*"],
+      "attributes": {"pkce.code.challenge.method": "S256"},
+      "defaultClientScopes": ["basic", "roles"],
+      "optionalClientScopes": ["email", "profile"]
     }
   ],
   "users": [

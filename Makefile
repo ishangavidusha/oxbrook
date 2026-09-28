@@ -67,9 +67,10 @@ ifeq ($(POSTGRES),require)
 export OXBROOK_REQUIRE_POSTGRES := 1
 endif
 
-# And for tests/oidc.py's second half, which runs against a real Keycloak: real
-# tokens, and a key rotated through its admin API. `make verify KEYCLOAK=`
-# accepts that gap; the first half runs regardless.
+# And for the second halves of tests/oidc.py and tests/login.py, which run
+# against a real Keycloak: real tokens, a key rotated through its admin API, and
+# a person logging in through its login form. `make verify KEYCLOAK=` accepts
+# that gap; the first halves run regardless.
 KEYCLOAK ?= require
 ifeq ($(KEYCLOAK),require)
 export OXBROOK_REQUIRE_KEYCLOAK := 1

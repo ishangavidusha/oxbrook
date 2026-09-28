@@ -66,6 +66,12 @@ Sessions(
 
 The cookie is always `HttpOnly`, so page scripts cannot read it.
 
+`same_site="Strict"` keeps the cookie off every request that starts on another
+site, including a person following a link to yours, who then arrives logged
+out. It also breaks [logging in through a provider](auth.md#logging-people-in),
+whose redirect back is exactly such a request, so `OAuthLogin` refuses a
+`Strict` session.
+
 `secure=True` is the default, which means the cookie is not sent over plain
 HTTP. Turn it off for local development over `http://localhost`, and turn it
 back on for anything else.

@@ -470,7 +470,145 @@ Only a session is checked this way. An API key or a bearer token is sent by
 code that chose to send it, not attached by the browser, so a request carrying
 one needs no origin. A route that writes the session without `SessionAuth`
 guarding it, such as `/login`, is not checked; `csrf=False` turns the check
-off for an app that does its own.
+off for an app that does its own. The login flow below checks its own
+callback, through `state`.
+
+## Logging people in
+
+`OAuthLogin` puts a "Log in with Google" button in front of an app: it sends
+the person to their identity provider, takes them back, and leaves a session
+that `SessionAuth` then reads.
+
+```python
+import os
+from oxbrook import App, Depends, Request, Sessions
+from oxbrook.auth import Login, OAuthLogin, Principal, SessionAuth, principal
+
+sessions = Sessions(secret=os.environ["SECRET_KEY"])
+
+async def find_or_create(request: Request, who: Login) -> str:
+    row = await request.state.pool.fetchrow(
+        "insert into users (provider, subject, email, name) values ($1, $2, $3, $4)"
+        " on conflict (provider, subject) do update set name = excluded.name"
+        " returning id",
+        who.provider, who.subject, who.email, who.name,
+    )
+    return str(row["id"])                      # kept in the session as user_id
+
+google = OAuthLogin.google(
+    client_id=os.environ["GOOGLE_CLIENT_ID"],
+    client_secret=os.environ["GOOGLE_CLIENT_SECRET"],
+    sessions=sessions,
+    on_login=find_or_create,
+    redirect_uri="https://notes.example.com/auth/callback",
+)
+
+app = App(auth=SessionAuth(sessions, key="user_id", load=load_user))
+app.middleware(sessions.middleware)
+app.include(google.routes(prefix="/auth"))    # /auth/login, /auth/callback, /auth/logout
+```
+
+A link to `/auth/login?next=/notes` starts it:
+
+1. `/auth/login` keeps a new `state`, a PKCE verifier and a `nonce` in the
+   session, and redirects to the provider with them.
+2. The person logs in there, and the provider redirects back to
+   `/auth/callback` with a one-time code.
+3. The callback checks `state` against the session, exchanges the code for
+   tokens with the client secret and the verifier, checks the ID token as
+   [`OIDC`](#openid-connect-providers) checks any token, and checks its
+   `nonce`.
+4. `on_login` decides who that is. Its return value goes into a fresh session
+   under `key`, and the browser is redirected to `next`.
+
+The three routes are public whatever the app's default, since nobody is
+logged in yet. Two providers need two prefixes, `/auth/google` and
+`/auth/github`, each with its own callback registered.
+
+| Provider | Set up with | Notes |
+|---|---|---|
+| Google | `OAuthLogin.google(...)` | `claims["hd"]` is the Workspace domain |
+| Microsoft | `OAuthLogin.microsoft(..., tenant="common")` | `organizations`, `consumers`, or a tenant id to narrow it |
+| GitHub | `OAuthLogin.github(...)` | no ID token: the user comes from GitHub's API |
+| Keycloak | `OAuthLogin.keycloak(url, realm, ...)` | |
+| Any OpenID Connect provider | `OAuthLogin(issuer, ...)` | Auth0, Okta, Cognito and the rest |
+
+### Who logged in
+
+`on_login(request, login)` gets a `Login`: `provider`, `subject`, `email`,
+`email_verified`, `name`, the verified `claims`, and the provider's `tokens`.
+It returns what the session should hold, usually the app's own user id, or
+None to refuse the person with `403`. It gets the request so that it can reach
+a pool from `request.state`. With no `on_login`, the session holds
+`"<provider>:<subject>"`.
+
+**Key accounts on `(provider, subject)`**, never on the email address. The
+subject is the provider's stable id for the person; an address can be changed,
+reused, or not verified at all. `email_verified` is True only when the provider
+said so: Google and Keycloak do, GitHub's address is its primary verified one,
+and Microsoft's is never verified, so an app that links accounts by address
+must not trust it there.
+
+`tokens` holds the provider's access token, and a refresh token if one was
+asked for (`params={"access_type": "offline"}` for Google). It is handed over
+once and kept nowhere, so an app that calls the provider's API later stores it
+itself — not in the session cookie, which the browser can read.
+
+### What the flow checks
+
+- **`state`** must match a login this browser started, within ten minutes, and
+  is good once. This is what stops another site from finishing a login in your
+  visitor's browser with the attacker's own account.
+- **PKCE** (`S256`) ties the code to that login: a code intercepted on its way
+  back is refused by the provider when anyone else exchanges it.
+- **The ID token** must verify against the provider's keys, name this app's
+  client id as its audience, be unexpired, and carry this login's `nonce`.
+- **`iss` on the callback** must name the provider when it is present, and must
+  be present when the provider says it sends one, so a callback from one
+  provider cannot be passed to another's.
+- **`next`** is followed only when it is a path on this site; anything else,
+  `//other.example` included, goes to `after_login`.
+- **The session starts fresh**: whatever was in it before the login, planted or
+  not, is gone, along with its CSRF token.
+
+### The redirect URI
+
+A provider sends the person back only to a URI registered with it, compared
+exactly. `OAuthLogin` works it out from the request's `Host` unless
+`redirect_uri=` gives it, and behind a proxy that changes the host or the
+scheme it has to be given. The session cookie must be `SameSite=Lax` (the
+default) or `None`: the callback arrives as a navigation from the provider's
+site, and a `Strict` cookie is not sent with it, so `OAuthLogin` refuses one.
+
+### When a login fails
+
+A callback that is not part of a login this browser started is `400`, a person
+who cancelled or whom `on_login` refused is `403`, and a provider that cannot be
+reached is `502` or `503`. All of them are `LoginFailed`, and the reason is
+logged to `oxbrook.auth`. A browser app usually wants a page rather than
+problem details:
+
+```python
+from oxbrook.auth import LoginFailed
+
+@app.exception_handler(LoginFailed)
+async def login_failed(_: Request, exc: LoginFailed):
+    return Response(render("login-failed.html", reason=exc.detail),
+                    status=exc.status, content_type="text/html")
+```
+
+### Logging out
+
+`POST /auth/logout` empties the session and redirects to `after_logout`. It
+is refused across sites the way any session-authenticated `POST` is, so a
+form on your own pages works and another site's cannot log your visitors out:
+
+```html
+<form method="post" action="/auth/logout"><button>Log out</button></form>
+```
+
+It ends the session with this app, not the person's session with the
+provider.
 
 ## Writing a scheme
 

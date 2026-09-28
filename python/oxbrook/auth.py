@@ -1472,6 +1472,9 @@ class Tickets(Scheme):
         return entry[1]
 
 
+# Last: the login flow is built from the schemes above.
+from ._login import Login, LoginFailed, OAuthLogin  # noqa: E402
+
 __all__ = [
     "JWT",
     "OIDC",
@@ -1480,6 +1483,9 @@ __all__ = [
     "Basic",
     "Bearer",
     "Forbidden",
+    "Login",
+    "LoginFailed",
+    "OAuthLogin",
     "Principal",
     "Requirement",
     "Scheme",

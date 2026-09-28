@@ -50,7 +50,7 @@ C. The CI leg is what actually runs them.
 ## Tests
 
 ```bash
-make verify        # thirty-four suites, free-threaded
+make verify        # thirty-five suites, free-threaded
 make verify-gil    # the same suites on the GIL build
 ```
 
@@ -64,15 +64,15 @@ freshly built wheel, and it holds the list that the Makefile reads.
 ``` Each suite is a standalone script that exits non-zero on
 failure and runs against a real server on a real socket.
 
-**Start the services first**, with `make up`. Three suites need one each:
+**Start the services first**, with `make up`. Four suites need one:
 `tests/durable.py` is the only suite covering durable topics, and needs Redis;
 `tests/database.py` is the only one that runs a query — the pool per loop,
 transactions, migrations, `examples/database/` — and needs PostgreSQL; the
-second half of `tests/oidc.py` checks real tokens and a key rotation against
-Keycloak. Each prints `SKIP` rather than failing when its service is
-unreachable, so a green run without them has not tested any of that. `make
-verify` therefore requires all three and checks for them before the suites
-start:
+second halves of `tests/oidc.py` and `tests/login.py` check real tokens, a key
+rotation, and a person logging in through the login form, against Keycloak.
+Each prints `SKIP` rather than failing when its service is unreachable, so a
+green run without them has not tested any of that. `make verify` therefore
+requires all three services and checks for them before the suites start:
 
 ```bash
 make up                                  # redis, postgres and keycloak, in containers

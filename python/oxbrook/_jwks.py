@@ -96,6 +96,40 @@ def _get_json(url: str, timeout: float) -> Any:
     return json.loads(body)
 
 
+def call_json(
+    url: str,
+    *,
+    form: dict[str, str] | None = None,
+    headers: dict[str, str] | None = None,
+    timeout: float,
+) -> tuple[int, Any]:
+    """GET, or POST a form, and read a JSON answer: `(status, document)`.
+
+    For the login flow's token exchange and profile lookups. Blocking, so it
+    runs on a thread. An error status is returned rather than raised, because
+    a token endpoint says why it refused in the body of its `400`; the
+    document is None when the body is not JSON.
+    """
+    data = urllib.parse.urlencode(form).encode() if form is not None else None
+    request = urllib.request.Request(
+        url, data=data,
+        headers={"accept": "application/json", "user-agent": "oxbrook", **(headers or {})},
+    )
+    try:
+        response = _opener.open(request, timeout=timeout)
+    except urllib.error.HTTPError as exc:
+        response = exc
+    with response:
+        status = response.status if response.status is not None else response.code
+        body = response.read(MAX_BYTES + 1)
+    if len(body) > MAX_BYTES:
+        raise ValueError(f"{url}: more than {MAX_BYTES} bytes")
+    try:
+        return status, json.loads(body)
+    except ValueError:
+        return status, None
+
+
 _pool_lock = threading.Lock()
 _pool_instance: concurrent.futures.ThreadPoolExecutor | None = None
 
@@ -175,6 +209,8 @@ class KeySet:
         self.keys: dict[str | None, tuple] | None = None
         self.algorithms: frozenset[str] = algorithms or frozenset()
         self.jwks_uri: str | None = None
+        #: The discovery document, once fetched: the login flow's endpoints.
+        self.document: dict[str, Any] | None = None
         self._fingerprint: frozenset[str] = frozenset()
         self._fetched = 0.0
         self._attempted = -float("inf")
@@ -199,9 +235,9 @@ class KeySet:
         # Results are stored here, before the future completes, so a loop
         # woken by its completion always finds them in place.
         try:
-            jwks_uri, algorithms = self.jwks_uri, self.algorithms
+            jwks_uri, algorithms, document = self.jwks_uri, self.algorithms, self.document
             if jwks_uri is None:
-                jwks_uri, algorithms = self._discover()
+                jwks_uri, algorithms, document = self._discover()
             keys, fingerprint = _parse(_get_json(jwks_uri, self.timeout), self._jwt)
             if not keys:
                 raise ValueError(f"{jwks_uri} holds no usable signing key")
@@ -213,7 +249,7 @@ class KeySet:
         with self._lock:
             changed = self.keys is not None and fingerprint != self._fingerprint
             self.keys, self._fingerprint = keys, fingerprint
-            self.jwks_uri, self.algorithms = jwks_uri, algorithms
+            self.jwks_uri, self.algorithms, self.document = jwks_uri, algorithms, document
             self._fetched = time.monotonic()
             self._fetching = None
         if changed:
@@ -221,7 +257,7 @@ class KeySet:
             self._changed()
         return keys
 
-    def _discover(self) -> tuple[str, frozenset[str]]:
+    def _discover(self) -> tuple[str, frozenset[str], dict[str, Any]]:
         document = _get_json(self.discovery_url, self.timeout)
         if not isinstance(document, dict):
             raise ValueError(f"{self.discovery_url} is not a discovery document")
@@ -237,14 +273,14 @@ class KeySet:
             raise ValueError(f"{self.discovery_url} has no jwks_uri")
         check_url(jwks_uri, self.allow_http, "jwks_uri")
         if self._explicit is not None:
-            return jwks_uri, self._explicit
+            return jwks_uri, self._explicit, document
         advertised = document.get("id_token_signing_alg_values_supported")
         if not isinstance(advertised, list):
-            return jwks_uri, frozenset(COMPATIBLE)
+            return jwks_uri, frozenset(COMPATIBLE), document
         algorithms = frozenset(a for a in advertised if a in COMPATIBLE)
         if not algorithms:
             raise ValueError(f"{self.issuer} advertises no public-key signing algorithm")
-        return jwks_uri, algorithms
+        return jwks_uri, algorithms, document
 
     # ---- asking: on any worker loop ----------------------------------------------
 
@@ -260,6 +296,19 @@ class KeySet:
         future = self._start(0.0)
         if future is not None:
             await self._wait(future)
+
+    async def discovered(self) -> dict[str, Any]:
+        """The discovery document, fetching it (and the keys) if need be."""
+        document = self.document
+        if document is None:
+            future = self._start(RETRY_INTERVAL)
+            if future is None:
+                raise Unavailable("the last attempt failed moments ago")
+            await self._wait(future)
+            document = self.document
+            if document is None:
+                raise Unavailable("no discovery document")
+        return document
 
     def refresh_if_stale(self) -> None:
         # Stale: fetch again in the background, and meanwhile use the keys in
@@ -309,4 +358,4 @@ def _pick(keys: dict[str | None, tuple], kid: str | None) -> tuple | None:
     return keys.get(kid)
 
 
-__all__ = ["COMPATIBLE", "KeySet", "Refused", "Unavailable", "check_url"]
+__all__ = ["COMPATIBLE", "KeySet", "Refused", "Unavailable", "call_json", "check_url"]

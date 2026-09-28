@@ -62,6 +62,18 @@ release does not; changes that break existing code are listed under
   provider, the app serves OAuth protected-resource metadata (RFC 9728) at
   `/.well-known/oauth-protected-resource/mcp`, and a `401` from `/mcp` points
   there, so an MCP client finds the provider, gets a token and retries.
+- **Logging people in**: `OAuthLogin` runs the authorization-code flow with
+  PKCE against an identity provider and leaves a session for `SessionAuth`.
+  `routes(prefix="/auth")` gives `/auth/login`, `/auth/callback` and
+  `/auth/logout`; `on_login(request, login)` receives a `Login` (the
+  provider's subject, email, whether it was verified, the ID token's claims
+  and the tokens) and returns what the session keeps. Presets for Google,
+  Microsoft (any tenant, one tenant, work or personal accounts), GitHub and
+  Keycloak, and `OAuthLogin(issuer, ...)` for any OpenID Connect provider.
+  `state` and `nonce` are checked and single-use, the callback's `iss` is
+  checked, `next` is followed only to a local path, the session is emptied
+  before the login goes in, and logout is refused across sites. A failed
+  login is `LoginFailed`.
 - `TestClient.call_tool()` takes `headers=`.
 - A response header can repeat: a list as a header's value sends it once per
   item.

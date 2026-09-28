@@ -14,6 +14,9 @@
         - Basic
         - SessionAuth
         - Tickets
+        - OAuthLogin
+        - Login
+        - LoginFailed
         - Unauthenticated
         - Forbidden
         - Requirement
