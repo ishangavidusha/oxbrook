@@ -258,9 +258,12 @@ class TestClient:
             raise RuntimeError(f"MCP {method} failed: {body['error']}")
         return body.get("result")
 
-    def call_tool(self, name: str, arguments: dict | None = None) -> Any:
-        """Invoke a capability the way an agent would."""
-        result = self.mcp("tools/call", {"name": name, "arguments": arguments or {}})
+    def call_tool(
+        self, name: str, arguments: dict | None = None, headers: dict[str, str] | None = None
+    ) -> Any:
+        """Invoke a capability the way an agent would, with the agent's `headers`."""
+        result = self.mcp("tools/call", {"name": name, "arguments": arguments or {}},
+                          headers=headers)
         if result.get("isError"):
             text = "".join(part.get("text", "") for part in result.get("content", []))
             raise RuntimeError(f"tool {name} failed: {text}")

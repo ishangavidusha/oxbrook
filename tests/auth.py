@@ -39,6 +39,7 @@ import jwt
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from oxbrook import App, BodyStream, Depends, Form, HTTPError, Request, Router, Sessions
+from oxbrook._auth import UNSET as UNSET_AUTH
 from oxbrook.auth import (
     JWT,
     APIKey,
@@ -949,6 +950,88 @@ def tool_calls_are_guarded(c: TestClient) -> None:
           f"the /mcp request's own principal was overwritten: {observed.get('/mcp')}")
 
 
+def tools_are_listed_by_who_may_call_them(_: TestClient) -> None:
+    """`tools/list` shows a caller only the tools it may call, and `/mcp` can
+    have a declaration of its own."""
+    calls: list[str] = []
+
+    class Counted(Scheme):
+        name = "counted"
+
+        async def authenticate(self, request):
+            key = request.header("x-counted")
+            if key is None:
+                return None
+            calls.append(key)
+            if key == "wrong":
+                raise Unauthenticated("no")
+            return Principal(subject=key, scopes={"read"} if key == "reader" else set())
+
+    counted = Counted()
+
+    async def explodes(who, request):
+        raise RuntimeError("a check that fails while listing")
+
+    app = App(auth=keys, mcp_auth=None)
+
+    def tool(path, auth):
+        async def handler(_: Request):
+            return {"path": path}
+
+        handler.__name__ = path.strip("/").replace("-", "_")
+        app.get(path, tool=True, auth=auth)(handler)
+
+    tool("/public", None)
+    tool("/by-default", UNSET_AUTH)
+    tool("/reader", counted.requires("read"))
+    tool("/anyone-counted", counted)
+    tool("/maybe", optional(counted))
+    tool("/checked", counted.requires(check=explodes))
+
+    def listed(headers=None):
+        return sorted(t["name"] for t in c.mcp("tools/list", headers=headers)["tools"])
+
+    with TestClient(app) as c:
+        r = c.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "ping"})
+        check(r.status_code != 401, f"mcp_auth=None still refused /mcp: {r.status_code}")
+        if r.status_code == 401:
+            return
+        # mcp_auth=None: an agent with nothing reaches /mcp, and sees what it may call.
+        check(listed() == ["maybe", "public"], f"anonymous listing: {listed()}")
+        check(listed({"x-api-key": KEY}) == ["by_default", "maybe", "public"],
+              f"an API key's listing: {listed({'x-api-key': KEY})}")
+        calls.clear()
+        got = listed({"x-counted": "reader"})
+        check(got == ["anyone_counted", "maybe", "public", "reader"],
+              f"the reader's listing: {got}")
+        # One authentication per scheme per listing, not one per tool.
+        check(calls == ["reader"], f"four tools on one scheme authenticated {len(calls)} times")
+        got = listed({"x-counted": "someone"})
+        check(got == ["anyone_counted", "maybe", "public"], f"a principal without the scope: {got}")
+        # A wrong credential hides everything it guards, optional or not.
+        got = listed({"x-counted": "wrong"})
+        check(got == ["public"], f"a wrong credential's listing: {got}")
+        # Hidden is not the only guard: calling anyway is still refused.
+        result = c.mcp("tools/call", {"name": "reader", "arguments": {}},
+                       headers={"x-counted": "someone"})
+        check(result["isError"], f"a hidden tool, called anyway, answered {result}")
+        # Without an OIDC provider there is no metadata to serve or point at.
+        r = c.get("/.well-known/oauth-protected-resource/mcp")
+        check(r.status_code in (401, 404), f"metadata served with no provider: {r.status_code}")
+
+    app = App(mcp_auth=keys)
+
+    @app.get("/open", tool=True)
+    async def open_tool(_: Request):
+        return {"ok": True}
+
+    with TestClient(app) as c:
+        r = c.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+        check(r.status_code == 401, f"mcp_auth=keys let an agent without a key in: {r.status_code}")
+        check(listed({"x-api-key": KEY}) == ["open_tool"], "mcp_auth=keys hid a public tool")
+        check(c.get("/open").status_code == 200, "mcp_auth protected an ordinary route")
+
+
 def openapi_describes_it(c: TestClient) -> None:
     from openapi_spec_validator import validate
 
@@ -1153,6 +1236,7 @@ def main() -> None:
             failures_are_errors_not_leaks,
             websockets_are_guarded,
             tool_calls_are_guarded,
+            tools_are_listed_by_who_may_call_them,
             openapi_describes_it,
         ):
             try:

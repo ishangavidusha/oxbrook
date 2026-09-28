@@ -8,7 +8,7 @@ from . import _auth, _openapi
 from ._auth import UNSET
 from ._blocking import Pool as BlockingPool
 from ._cors import CORS, check_origin
-from ._errors import DEFAULT_HANDLERS
+from ._errors import DEFAULT_HANDLERS, HTTPError
 from ._errors import guard as guard_exceptions
 from ._files import StaticMount, build_mount
 from ._lifecycle import Lifecycle, ServerHandle, State, check_hook
@@ -63,6 +63,7 @@ class App:
         cors: CORS | None = None,
         websocket_origins: Any = None,
         auth: Any = None,
+        mcp_auth: Any = _auth.UNSET,
     ) -> None:
         """`openapi_url` and `docs_url` can each be set to None to disable them.
 
@@ -102,6 +103,14 @@ class App:
         `auth=None`. See `oxbrook.auth`. The OpenAPI document and the docs page
         stay public; turn them off with `openapi_url=None` and `docs_url=None`
         if the API's shape is not for everyone.
+
+        `mcp_auth` guards the MCP endpoint itself, apart from `auth`: who may
+        connect, list tools, and read topics as resources. Each tool is still
+        guarded by its own route's declaration, and the tool list shows a
+        caller only the tools it may call. Left unset, `/mcp` follows `auth`.
+        When either names an `OIDC` provider, the endpoint also serves OAuth
+        protected-resource metadata, and a `401` from it points there, so an
+        MCP client can find where to log in.
         """
         self.routes: list[RouteInfo] = []
         self.mounts: list[StaticMount] = []
@@ -144,6 +153,10 @@ class App:
         self.state = State()
         #: The declaration every route without its own gets; None for none.
         self.auth = _auth.check(auth, "App(auth=...)") or None
+        #: The MCP endpoint's own declaration; UNSET follows `auth`.
+        self.mcp_auth = _auth.check(mcp_auth, "App(mcp_auth=...)")
+        #: The path of the endpoint's protected-resource metadata, when served.
+        self._resource_metadata: str | None = None
         #: Whether the server built from this app speaks TLS; `Basic` asks.
         self._serving_tls = False
 
@@ -440,7 +453,10 @@ class App:
             if not chain and not self._exception_handlers:
                 return target
             return self._layer(target, chain, self._handlers())
-        gate = _auth.Gate(route.auth)
+        if self._resource_metadata is not None and route.path == self.mcp_url:
+            gate = _auth.ResourceGate(route.auth, self._resource_metadata)
+        else:
+            gate = _auth.Gate(route.auth)
         if socket:
             link = gate.socket_middleware()
         elif not chain and not self._exception_handlers:
@@ -630,8 +646,15 @@ class App:
 
         # Capabilities are built once, at start, so a malformed one is an error
         # at boot rather than on an agent's first call.
-        server = MCP(self, self.capabilities())
+        capabilities = self.capabilities()
+        server = MCP(self, capabilities)
         self._mcp = server
+        declared = _auth.resolve(self.mcp_auth, self.auth)
+        issuers, scopes = _auth.authorization_servers(
+            [declared, *(c.route.auth for c in capabilities.values())]
+        )
+        if issuers:
+            self._register_resource_metadata(issuers, scopes)
 
         # All three on one path, which is what Streamable HTTP means by "a
         # single endpoint". POST carries messages, GET is the stream the server
@@ -640,20 +663,49 @@ class App:
         # `cancel_on_disconnect` is off for the GET: the stream ending *is* the
         # client leaving, and cancelling the handler that owns the subscription
         # would race the generator's own cleanup.
-        @self.post(self.mcp_url)
+        @self.post(self.mcp_url, auth=self.mcp_auth)
         async def mcp_endpoint(request):
             """Model Context Protocol endpoint."""
             return await server.post(request)
 
-        @self.get(self.mcp_url, cancel_on_disconnect=False)
+        @self.get(self.mcp_url, cancel_on_disconnect=False, auth=self.mcp_auth)
         async def mcp_stream(request):
             """Model Context Protocol server-to-client stream."""
             return await server.get(request)
 
-        @self.delete(self.mcp_url)
+        @self.delete(self.mcp_url, auth=self.mcp_auth)
         async def mcp_end(request):
             """End a Model Context Protocol session."""
             return await server.delete(request)
+
+    def _register_resource_metadata(self, issuers: list[str], scopes: list[str]) -> None:
+        """OAuth protected-resource metadata for the MCP endpoint (RFC 9728).
+
+        At the path-suffixed well-known URI, which is where the metadata of a
+        resource with a path lives and where MCP clients look first. Public,
+        since a client reads it precisely because it has no token yet.
+        """
+        path = "/.well-known/oauth-protected-resource" + self.mcp_url
+        if ("GET", path) in {(r.method, r.path) for r in self.routes}:
+            return
+        self._resource_metadata = path
+        mcp_url, title = self.mcp_url, self.title
+
+        @self.get(path, auth=None)
+        async def protected_resource(request):
+            """OAuth protected-resource metadata for the MCP endpoint."""
+            base = _auth.public_base(request)
+            if base is None:
+                raise HTTPError(400, "a Host header is needed to name the resource")
+            document = {
+                "resource": base + mcp_url,
+                "authorization_servers": issuers,
+                "bearer_methods_supported": ["header"],
+                "resource_name": title,
+            }
+            if scopes:
+                document["scopes_supported"] = scopes
+            return document
 
     def _register_docs(self) -> None:
         """Add the OpenAPI and docs routes, unless the user turned them off."""

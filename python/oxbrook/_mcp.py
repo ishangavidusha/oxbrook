@@ -308,7 +308,7 @@ def _tool_error(text: str) -> dict:
 class MCP:
     """Dispatch for one app's MCP endpoint."""
 
-    __slots__ = ("app", "capabilities", "sessions")
+    __slots__ = ("app", "capabilities", "gates", "sessions")
 
     def __init__(
         self,
@@ -316,15 +316,35 @@ class MCP:
         capabilities: dict[str, Capability],
         sessions: "Sessions | None" = None,
     ) -> None:
+        from ._auth import Gate
+
         self.app = app
         self.capabilities = capabilities
+        #: Each protected tool's declaration, for listing. Calling a tool runs
+        #: its own gate, inside its target; these only decide what is shown.
+        self.gates = {
+            name: Gate(capability.route.auth)
+            for name, capability in capabilities.items()
+            if capability.route.auth is not None
+        }
         self.sessions = sessions if sessions is not None else Sessions()
 
     # ---- descriptions -----------------------------------------------------
 
-    def tool_list(self) -> list[dict]:
+    async def tool_list(self, parent: Any = None) -> list[dict]:
+        """The tools the caller of `parent` may call.
+
+        A tool whose declaration would refuse this caller is left out: an
+        agent that cannot delete should not be offered a delete tool, and
+        listing it anyway invites the agent to try. With no request, as when
+        the list is built outside one, only unprotected tools are listed.
+        """
         tools = []
-        for capability in self.capabilities.values():
+        memo: dict[int, Any] = {}
+        for name, capability in self.capabilities.items():
+            gate = self.gates.get(name)
+            if gate is not None and (parent is None or not await gate.permits(parent, memo)):
+                continue
             described = capability.describe()
             model = capability.route.response_model
             if model is not None:
@@ -540,7 +560,7 @@ class MCP:
             elif method == "ping":
                 result = {}
             elif method == "tools/list":
-                result = {"tools": self.tool_list()}
+                result = {"tools": await self.tool_list(parent)}
             elif method == "tools/call":
                 result = await self.call_tool(params, parent)
             elif method == "resources/list":

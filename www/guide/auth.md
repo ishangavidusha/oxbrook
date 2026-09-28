@@ -499,8 +499,18 @@ read `principal(request)`.
 
 A tool is guarded by its route's declaration, checked with the headers the
 agent sent: an admin tool called without the scope comes back to the agent as
-an error with status `403`, as it would over HTTP. `/mcp` itself follows the
-app's declaration.
+an error with status `403`, as it would over HTTP. `tools/list` shows an agent
+only the tools it may call, each scheme authenticating once per listing.
+
+`/mcp` itself follows the app's declaration, or its own:
+
+```python
+app = App(auth=users, mcp_auth=users.requires("agents"))
+```
+
+With an `OIDC` provider in either, the endpoint serves the metadata an MCP
+client needs to log in by itself, and its `401` points there. See
+[Agents that log in](../agents.md#agents-that-log-in).
 
 ## OpenAPI
 

@@ -21,6 +21,11 @@ Bob is a viewer: the same request with his token is `403`. A script uses the
     curl -s localhost:8199/realms/oxbrook/protocol/openid-connect/token \\
         -d grant_type=client_credentials -d client_id=reporter -d client_secret=reporter-secret
 
+Agents use the same routes as tools, at `/mcp`. An MCP client given only that
+URL gets a `401` pointing at `/.well-known/oauth-protected-resource/mcp`,
+which names Keycloak; it gets a token there and retries, and its tool list
+holds what its token may call.
+
 Pointing this at another provider changes one line: `OIDC.auth0(...)`,
 `OIDC.entra(...)`, or `OIDC(issuer, audience=...)` for any other.
 """
@@ -67,15 +72,17 @@ async def me(_: Request, who: Principal = Depends(principal)):
             "scopes": sorted(who.scopes), "roles": sorted(who.roles)}
 
 
-@app.get("/notes", auth=users.requires("notes:read"))
+@app.get("/notes", auth=users.requires("notes:read"), tool=True)
 async def list_notes(_: Request):
+    """List every note."""
     return NOTES
 
 
 # The client must hold the scope, and the person the role: a scope is what
 # they let the client do, a role is what the realm says they are.
-@app.post("/notes", auth=users.requires("notes:write", roles=("editor",)))
+@app.post("/notes", auth=users.requires("notes:write", roles=("editor",)), tool=True)
 async def create_note(_: Request, note: NoteIn, who: Principal = Depends(principal)):
+    """Add a note, owned by the caller."""
     created = {"id": len(NOTES) + 1, "title": note.title, "owner": who.subject}
     NOTES.append(created)
     return created

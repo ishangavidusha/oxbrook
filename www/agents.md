@@ -53,7 +53,14 @@ it the way it runs around any request.
 A tool is guarded by its route's [`auth=`](guide/auth.md#agents), checked with
 the headers the agent sent. An admin tool called without the scope comes back
 to the agent as an error with status `403`, exactly as the route would answer
-over HTTP. `/mcp` itself follows the app's declaration.
+over HTTP. `tools/list` shows an agent only the tools its credentials would
+pass, so an agent that cannot delete is not offered a delete tool.
+
+`/mcp` itself follows the app's declaration unless `App(mcp_auth=...)` gives
+it one of its own. That declaration decides who may connect, list tools and
+read topics; each tool still answers to its route's. With an
+[OpenID Connect provider](guide/auth.md#openid-connect-providers), an agent can
+log in by itself — see [Agents that log in](#agents-that-log-in).
 
 The route's own [router](guide/routers.md) middleware runs around the tool call
 as well, with the headers the agent sent. An admin router that refuses a request
@@ -71,10 +78,44 @@ Routes that read a [form or a streamed body](guide/forms.md) cannot be tools:
 tool arguments arrive as JSON, and marking one `tool=True` raises at
 registration.
 
+## Agents that log in
+
+When `/mcp`'s declaration, or a tool's, uses an `OIDC` provider, the app
+serves OAuth protected-resource metadata (RFC 9728) for the endpoint:
+
+```http
+GET /.well-known/oauth-protected-resource/mcp
+
+{"resource": "https://api.example.com/mcp",
+ "authorization_servers": ["https://sso.example.com/realms/acme"],
+ "scopes_supported": ["notes:read", "notes:write"],
+ "bearer_methods_supported": ["header"]}
+```
+
+and a `401` or `403` from `/mcp` points at it:
+
+```http
+WWW-Authenticate: Bearer resource_metadata="https://api.example.com/.well-known/oauth-protected-resource/mcp"
+```
+
+An MCP client that receives the `401` reads the metadata, asks the provider
+for a token with the scopes listed — every scope any tool requires — and
+retries. Nothing else has to be configured for that. The metadata is public,
+since a client reads it precisely because it has no token yet.
+
+`/mcp` has to refuse a caller without a token for the login to start, so an
+app with public tools and protected ones declares `mcp_auth=` with the
+provider. The provider must put the MCP endpoint's audience in its tokens, as
+with any `OIDC` audience.
+
+The resource URL is built from the `Host` the client used, with `https` when
+the server serves TLS or a proxy sends `X-Forwarded-Proto: https`.
+
 ## Topics as resources
 
 Topics show up as readable resources at `topic://<name>`. A durable one returns
-recent messages.
+recent messages. They are read under `/mcp`'s declaration, so `mcp_auth=None`
+makes every topic readable by any agent.
 
 An agent can also **follow** a topic instead of polling it. Subscribing to
 `topic://orders` means the server tells the agent when there is something new,
@@ -140,7 +181,9 @@ Turn the endpoint off entirely with `App(mcp_url=None)`.
 
 `tests/capabilities.py` drives the official MCP SDK client against a running
 server, and `tests/agents.py` drives the transport underneath it on both
-wires.
+wires. `tests/oidc.py` gives the same client nothing but the endpoint's URL and
+a client id and secret, and it finds Keycloak through the metadata, gets a
+token and calls a tool.
 
 A constant exported by an SDK is not the same thing as a version a client will
 negotiate, and nothing short of a real handshake distinguishes the two. The same

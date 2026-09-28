@@ -46,6 +46,13 @@ release does not; changes that break existing code are listed under
 - `JWT` and `OIDC` remember a verified token until it expires, so an RSA
   signature is checked once per token rather than once per request
   (`cache_size=`, `0` to turn it off).
+- **Agents see only what they may call, and can log in by themselves.**
+  `tools/list` leaves out tools whose declaration would refuse the caller.
+  `App(mcp_auth=...)` gives `/mcp` a declaration of its own. With an `OIDC`
+  provider, the app serves OAuth protected-resource metadata (RFC 9728) at
+  `/.well-known/oauth-protected-resource/mcp`, and a `401` from `/mcp` points
+  there, so an MCP client finds the provider, gets a token and retries.
+- `TestClient.call_tool()` takes `headers=`.
 - A response header can repeat: a list as a header's value sends it once per
   item.
 - `Depends` works on WebSocket handlers. It raised `TypeError` on every

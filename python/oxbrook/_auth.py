@@ -8,13 +8,16 @@ upgrade and for an MCP tool call alike, which is what keeps them from
 disagreeing (invariant 10).
 """
 
+import logging
 import secrets
 import time
 from typing import Any
 
+from ._errors import HTTPError
 from ._middleware import Reply
 from ._response import Response
 from .auth import (
+    OIDC,
     PRINCIPAL,
     Forbidden,
     Principal,
@@ -40,6 +43,12 @@ class _Unset:
 
 
 UNSET: Any = _Unset()
+
+logger = logging.getLogger("oxbrook.auth")
+
+#: A scheme that found a credential of its kind and refused it, in a
+#: `permits` memo: distinct from None, which is no credential at all.
+_REFUSED = object()
 
 
 def check(value: Any, where: str) -> Any:
@@ -178,6 +187,42 @@ class Gate:
             refused.headers["www-authenticate"] = value
         return refused
 
+    async def permits(self, request: Any, memo: dict[int, Any]) -> bool:
+        """Whether this request would get past the gate, without raising.
+
+        For listing: `tools/list` shows an agent only the tools it may call.
+        `memo` is shared across the gates asked about one request, so each
+        scheme authenticates once however many tools use it. A requirement's
+        `check=` runs against this request, and a check that raises counts
+        as a refusal.
+        """
+        for scheme, options in self.schemes:
+            key = id(scheme)
+            if key not in memo:
+                try:
+                    memo[key] = await scheme.authenticate(request)
+                except HTTPError:
+                    memo[key] = _REFUSED
+            found = memo[key]
+            if found is _REFUSED:
+                return False
+            if found is None:
+                continue
+            if not found.scheme:
+                found = Principal(found.subject, _name(scheme), found.scopes, found.roles,
+                                  found.claims, found.user)
+            for requirements in options:
+                try:
+                    for requirement in requirements:
+                        if not await requirement.met(found, request):
+                            break
+                    else:
+                        return True
+                except Exception:  # listing must not fail on one check
+                    logger.exception("a requirement's check raised while listing tools")
+            return False
+        return self.anonymous
+
     # ---- where it runs ------------------------------------------------------
 
     async def admit(self, request: Any) -> None:
@@ -231,6 +276,86 @@ class Gate:
             return reply
 
         return authenticate
+
+
+class ResourceGate(Gate):
+    """The gate on `/mcp`, whose refusals say where to find out how to log in.
+
+    RFC 9728: a `401` or `403` from a protected resource names its metadata
+    in the Bearer challenge, `resource_metadata="..."`, and an MCP client
+    follows it to the authorization server. The URL is absolute, so it is
+    built per request from the host the client used.
+    """
+
+    __slots__ = ("metadata",)
+
+    def __init__(self, policy: Any, metadata: str) -> None:
+        super().__init__(policy)
+        self.metadata = metadata
+
+    async def admit(self, request: Any) -> None:
+        try:
+            await super().admit(request)
+        except (Unauthenticated, Forbidden) as exc:
+            base = public_base(request)
+            if base is not None:
+                _point(exc, base + self.metadata)
+            raise
+
+
+def _point(error: HTTPError, url: str) -> None:
+    param = f'resource_metadata="{url}"'
+    challenges = error.headers.get("www-authenticate")
+    if challenges is None:
+        return
+    listed = challenges if isinstance(challenges, list) else [challenges]
+    pointed = []
+    for challenge in listed:
+        if challenge.split(" ", 1)[0].lower() == "bearer":
+            challenge = f"{challenge}, {param}" if " " in challenge else f"Bearer {param}"
+        pointed.append(challenge)
+    error.headers["www-authenticate"] = pointed if isinstance(challenges, list) else pointed[0]
+
+
+def public_base(request: Any) -> str | None:
+    """`scheme://host` as the client addressed this server, or None.
+
+    From the `Host` header and, behind a proxy that terminated TLS,
+    `X-Forwarded-Proto`. Both are the client's to write, which is harmless
+    here: the URL is only ever sent back to the client that wrote them.
+    """
+    host = request.header("host")
+    if not host or any(c in host for c in "/\\ \"@"):
+        return None
+    app = request.app
+    tls = app is not None and getattr(app, "_serving_tls", False)
+    forwarded = (request.header("x-forwarded-proto") or "").split(",")[0].strip().lower()
+    return f"{'https' if tls or forwarded == 'https' else 'http'}://{host}"
+
+
+def authorization_servers(policies: list[Any]) -> tuple[list[str], list[str]]:
+    """The OIDC issuers in these declarations, and the scopes they require.
+
+    What protected-resource metadata lists: where a token comes from, and
+    what to ask for so that every tool the declarations guard is callable.
+    """
+    issuers: list[str] = []
+    scopes: list[str] = []
+    for policy in policies:
+        if policy is None or policy is UNSET:
+            continue
+        schemes, _ = plan(policy)
+        for scheme, options in schemes:
+            if not isinstance(scheme, OIDC):
+                continue
+            if scheme.issuer not in issuers:
+                issuers.append(scheme.issuer)
+            for requirements in options:
+                for requirement in requirements:
+                    for scope in sorted(requirement.all_of | requirement.any_of):
+                        if scope not in scopes:
+                            scopes.append(scope)
+    return issuers, scopes
 
 
 async def forget(request: Any, call_next: Any) -> Any:
@@ -339,5 +464,5 @@ def security(policy: Any) -> tuple[list[dict[str, list[str]]], dict[str, Any]]:
     return listed, used
 
 
-__all__ = ["UNSET", "Gate", "_Combinable", "accept", "check", "describe", "forget",
-           "receive", "resolve", "security"]
+__all__ = ["UNSET", "Gate", "ResourceGate", "_Combinable", "accept", "authorization_servers",
+           "check", "describe", "forget", "public_base", "receive", "resolve", "security"]

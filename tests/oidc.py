@@ -539,6 +539,59 @@ def openapi_says_where_the_provider_is(c: TestClient) -> None:
           f"the OIDC security scheme is {entry}")
 
 
+def mcp_says_where_to_log_in(_: TestClient) -> None:
+    """RFC 9728: `/mcp` names its authorization server, and refusals point there."""
+    mcp_app = App(auth=provider, mcp_auth=provider.requires("agents"))
+
+    @mcp_app.get("/notes", tool=True, auth=provider.requires("notes:read"))
+    async def notes(_: Request):
+        return []
+
+    @mcp_app.get("/health", auth=None)
+    async def health(_: Request):
+        return {"ok": True}
+
+    with TestClient(mcp_app) as c:
+        base = c.base_url
+        pointer = f'resource_metadata="{base}/.well-known/oauth-protected-resource/mcp"'
+        r = c.get("/.well-known/oauth-protected-resource/mcp")
+        check(r.status_code == 200, f"the metadata answered {r.status_code} in a protected app")
+        document = r.json() if r.status_code == 200 else {}
+        check(document.get("resource") == base + "/mcp"
+              and document.get("authorization_servers") == [main_issuer.url]
+              and document.get("scopes_supported") == ["agents", "notes:read"]
+              and document.get("bearer_methods_supported") == ["header"],
+              f"the metadata is {document}")
+        ping = {"jsonrpc": "2.0", "id": 1, "method": "ping"}
+        r = c.post("/mcp", json=ping)
+        check(r.status_code == 401 and r.headers.get("www-authenticate") == f"Bearer {pointer}",
+              f"a 401 from /mcp said {r.headers.get('www-authenticate')!r}")
+        r = c.post("/mcp", json=ping, headers=bearer(signed(main_issuer, exp=1)))
+        challenge = r.headers.get("www-authenticate", "")
+        check(r.status_code == 401 and 'error="invalid_token"' in challenge
+              and challenge.endswith(pointer), f"an expired token's 401 said {challenge!r}")
+        r = c.post("/mcp", json=ping, headers=bearer(signed(main_issuer)))
+        challenge = r.headers.get("www-authenticate", "")
+        check(r.status_code == 403 and 'error="insufficient_scope"' in challenge
+              and pointer in challenge, f"a 403 from /mcp said {r.status_code} {challenge!r}")
+        # Behind a proxy that terminated TLS, the resource is the https one.
+        r = c.get("/.well-known/oauth-protected-resource/mcp",
+                  headers={"x-forwarded-proto": "https", "host": "api.example.com"})
+        check(r.json().get("resource") == "https://api.example.com/mcp",
+              f"behind a proxy the resource is {r.json().get('resource')}")
+        # Only /mcp points: an ordinary route's 401 is unchanged.
+        r = c.get("/notes")
+        check(r.headers.get("www-authenticate") == "Bearer",
+              f"an ordinary route's 401 said {r.headers.get('www-authenticate')!r}")
+        # A Host that could smuggle a URL gets no pointer rather than a bad one.
+        with socket.create_connection((c.host, c.port), timeout=5) as sock:
+            sock.sendall(b"POST /mcp HTTP/1.1\r\nHost: evil.example.com/x\"y\r\n"
+                         b"Content-Type: application/json\r\nContent-Length: 2\r\n"
+                         b"Connection: close\r\n\r\n{}")
+            head = sock.recv(4096)
+        check(b"evil" not in head, f"a hostile Host reached the challenge: {head[:300]!r}")
+
+
 def no_token_reaches_a_log(records: list[logging.LogRecord], tokens: list[str]) -> None:
     text = "\n".join(r.getMessage() + repr(r.__dict__) for r in records)
     # The signature is the part that is secret-shaped and unique; an unsigned
@@ -632,6 +685,12 @@ async def kc_ws(_: Request, sock, who=Depends(principal)):
     await sock.send(json.dumps(describe(who)))
 
 
+@kc_app.get("/read", tool=True, auth=kc.requires("notes:read"))
+async def kc_read(_: Request, who=Depends(principal)):
+    """Read the notes."""
+    return {"scopes": sorted(who.scopes)}
+
+
 @kc_app.post("/publish", tool=True, auth=kc.requires(roles=("editor",)))
 async def kc_publish(_: Request, who=Depends(principal)):
     """Publish the notes."""
@@ -680,6 +739,65 @@ def keycloak_tokens_are_checked(c: TestClient) -> None:
     result = c.mcp("tools/call", {"name": "kc_publish", "arguments": {}}, headers=bearer(ada))
     check(not result["isError"], f"ada's tool call gave {result}")
     check(kc.keys.fetches == 1, f"one realm, {kc.keys.fetches} key fetches")
+
+
+class Memory:
+    """Token storage for the SDK's OAuth provider: this process, nothing kept."""
+
+    def __init__(self) -> None:
+        self.tokens = None
+        self.info = None
+
+    async def get_tokens(self):
+        return self.tokens
+
+    async def set_tokens(self, tokens) -> None:
+        self.tokens = tokens
+
+    async def get_client_info(self):
+        return self.info
+
+    async def set_client_info(self, info) -> None:
+        self.info = info
+
+
+def an_agent_logs_in_by_itself(c: TestClient) -> None:
+    """The official SDK client, told only the MCP URL and its client
+    credentials, finds Keycloak through the metadata and calls a tool."""
+    import httpx2
+    from mcp import ClientSession
+    from mcp.client.auth.extensions.client_credentials import ClientCredentialsOAuthProvider
+    from mcp.client.streamable_http import streamable_http_client
+
+    visited: list[str] = []
+
+    async def seen(request):
+        visited.append(f"{request.method} {request.url.copy_with(query=None)}")
+
+    async def agent():
+        provider = ClientCredentialsOAuthProvider(
+            server_url=c.base_url + "/mcp", storage=Memory(),
+            client_id="reporter", client_secret="reporter-secret",
+        )
+        async with httpx2.AsyncClient(auth=provider, event_hooks={"request": [seen]}) as http:
+            async with streamable_http_client(c.base_url + "/mcp", http_client=http) as (r, w):
+                async with ClientSession(r, w) as session:
+                    await session.initialize()
+                    names = sorted(t.name for t in (await session.list_tools()).tools)
+                    read = await session.call_tool("kc_read", {})
+                    publish = await session.call_tool("kc_publish", {})
+                    return names, read, publish
+
+    names, read, publish = asyncio.run(agent())
+    check(f"GET {c.base_url}/.well-known/oauth-protected-resource/mcp" in visited,
+          f"the agent never read the metadata: {visited[:6]}")
+    check(any(v.startswith("POST " + KEYCLOAK) and v.endswith("/token") for v in visited),
+          f"the agent never asked Keycloak for a token: {visited[:6]}")
+    # The reporter client reads and is not an editor: publish is not offered.
+    check(names == ["kc_read"], f"the agent was offered {names}")
+    check(not read.is_error and json.loads(read.content[0].text) == {"scopes": ["notes:read"]},
+          f"the agent's call gave {read}")
+    check(publish.is_error, "the agent called a tool its client may not")
 
 
 def keycloak_rotates_a_key(c: TestClient) -> None:
@@ -758,6 +876,14 @@ def the_example_works(_: TestClient) -> None:
               f"the reporter client could not read: {r.status_code}")
         check(c.post("/notes", json={"title": "x"}, headers=reporter).status_code == 403,
               "the reporter client wrote a note")
+        # The same routes as tools: listed by what each caller may call.
+        tools = sorted(t["name"] for t in c.mcp("tools/list", headers=ada)["tools"])
+        check(tools == ["create_note", "list_notes"], f"ada was offered {tools}")
+        tools = sorted(t["name"] for t in c.mcp("tools/list", headers=reporter)["tools"])
+        check(tools == ["list_notes"], f"the reporter client was offered {tools}")
+        r = c.get("/.well-known/oauth-protected-resource/mcp")
+        check(r.status_code == 200 and r.json()["authorization_servers"]
+              == [f"{KEYCLOAK}/realms/{REALM}"], f"the example's metadata: {r.text}")
 
 
 # ---- running -----------------------------------------------------------------
@@ -820,12 +946,13 @@ def main() -> None:
              one_fetch_for_every_loop, unknown_keys_are_rate_limited,
              withdrawn_keys_stop_working, an_unreachable_provider_is_503,
              bad_documents_are_refused, verified_tokens_are_remembered,
-             openapi_says_where_the_provider_is], c)
+             openapi_says_where_the_provider_is, mcp_says_where_to_log_in], c)
 
     if reachable:
         print("keycloak")
         with TestClient(kc_app) as c:
-            run([keycloak_tokens_are_checked, the_example_works, keycloak_rotates_a_key], c)
+            run([keycloak_tokens_are_checked, an_agent_logs_in_by_itself, the_example_works,
+                 keycloak_rotates_a_key], c)
     else:
         print("keycloak: SKIP")
 
