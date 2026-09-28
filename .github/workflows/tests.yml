@@ -94,9 +94,17 @@ jobs:
       OXBROOK_REQUIRE_REDIS: "1"
       # The same for tests/database.py and PostgreSQL.
       OXBROOK_REQUIRE_POSTGRES: "1"
+      # And for tests/oidc.py's Keycloak half.
+      OXBROOK_REQUIRE_KEYCLOAK: "1"
 
     steps:
       - uses: actions/checkout@v7
+
+      # Keycloak needs a start command and the test realm mounted, which a
+      # service container cannot be given; compose already says both. Started
+      # first and waited on last, so its start-up overlaps the build.
+      - name: Start Keycloak
+        run: docker compose up -d keycloak
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -125,6 +133,9 @@ jobs:
           ${{ matrix.venv }}/bin/python -c "import sys; \
             print(sys.version); \
             print('gil:', getattr(sys, '_is_gil_enabled', lambda: True)())"
+
+      - name: Wait for Keycloak
+        run: docker compose up -d --wait keycloak
 
       - name: Run the suites
         run: make ${{ matrix.target }}

@@ -1,0 +1,153 @@
+{
+  "realm": "oxbrook",
+  "enabled": true,
+  "sslRequired": "none",
+  "accessTokenLifespan": 900,
+  "roles": {
+    "realm": [
+      {"name": "editor", "description": "may change notes"},
+      {"name": "viewer", "description": "may read notes"}
+    ]
+  },
+  "clientScopes": [
+    {
+      "name": "basic",
+      "protocol": "openid-connect",
+      "attributes": {"include.in.token.scope": "false", "display.on.consent.screen": "false"},
+      "protocolMappers": [
+        {
+          "name": "sub",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-sub-mapper",
+          "config": {"access.token.claim": "true", "introspection.token.claim": "true"}
+        },
+        {
+          "name": "username",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "config": {
+            "user.attribute": "username",
+            "claim.name": "preferred_username",
+            "jsonType.label": "String",
+            "access.token.claim": "true",
+            "id.token.claim": "true",
+            "introspection.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "name": "roles",
+      "protocol": "openid-connect",
+      "attributes": {"include.in.token.scope": "false", "display.on.consent.screen": "false"},
+      "protocolMappers": [
+        {
+          "name": "realm roles",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-realm-role-mapper",
+          "config": {
+            "claim.name": "realm_access.roles",
+            "jsonType.label": "String",
+            "multivalued": "true",
+            "access.token.claim": "true",
+            "introspection.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "name": "notes-audience",
+      "protocol": "openid-connect",
+      "attributes": {"include.in.token.scope": "false", "display.on.consent.screen": "false"},
+      "protocolMappers": [
+        {
+          "name": "notes-api audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.client.audience": "notes-api",
+            "access.token.claim": "true",
+            "introspection.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "name": "notes:read",
+      "protocol": "openid-connect",
+      "attributes": {"include.in.token.scope": "true", "display.on.consent.screen": "false"}
+    },
+    {
+      "name": "notes:write",
+      "protocol": "openid-connect",
+      "attributes": {"include.in.token.scope": "true", "display.on.consent.screen": "false"}
+    }
+  ],
+  "clients": [
+    {
+      "clientId": "notes-api",
+      "enabled": true,
+      "publicClient": false,
+      "secret": "notes-api-unused-secret",
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false
+    },
+    {
+      "clientId": "notes-web",
+      "enabled": true,
+      "publicClient": true,
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": true,
+      "defaultClientScopes": ["basic", "roles", "notes-audience"],
+      "optionalClientScopes": ["notes:read", "notes:write"]
+    },
+    {
+      "clientId": "reporter",
+      "enabled": true,
+      "publicClient": false,
+      "secret": "reporter-secret",
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": true,
+      "defaultClientScopes": ["basic", "roles", "notes-audience", "notes:read"]
+    },
+    {
+      "clientId": "other-app",
+      "enabled": true,
+      "publicClient": true,
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": true,
+      "defaultClientScopes": ["basic", "roles"],
+      "optionalClientScopes": ["notes:read", "notes:write"]
+    }
+  ],
+  "users": [
+    {
+      "username": "ada",
+      "enabled": true,
+      "email": "ada@example.com",
+      "emailVerified": true,
+      "firstName": "Ada",
+      "lastName": "Lovelace",
+      "credentials": [{"type": "password", "value": "ada-password", "temporary": false}],
+      "realmRoles": ["editor", "viewer"]
+    },
+    {
+      "username": "bob",
+      "enabled": true,
+      "email": "bob@example.com",
+      "emailVerified": true,
+      "firstName": "Bob",
+      "lastName": "Builder",
+      "credentials": [{"type": "password", "value": "bob-password", "temporary": false}],
+      "realmRoles": ["viewer"]
+    },
+    {
+      "username": "service-account-reporter",
+      "enabled": true,
+      "serviceAccountClientId": "reporter",
+      "realmRoles": ["viewer"]
+    }
+  ]
+}

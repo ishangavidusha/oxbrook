@@ -119,7 +119,10 @@ class Gate:
                     f"raise Unauthenticated for a wrong one"
                 )
             if not found.scheme:
-                found = Principal(found.subject, _name(scheme), found.scopes,
+                # Spelled out: dataclasses.replace here, with a loop in
+                # Principal's __post_init__, took an API key from ~5 to ~13 µs
+                # per request under four loops (BENCHMARKS run 22).
+                found = Principal(found.subject, _name(scheme), found.scopes, found.roles,
                                   found.claims, found.user)
             for requirements in options:
                 for requirement in requirements:
@@ -159,11 +162,16 @@ class Gate:
 
     def forbidden(self, scheme: Any, requirements: tuple, found: Principal) -> Forbidden:
         missing: list[str] = []
+        roles: list[str] = []
         for requirement in requirements:
             missing.extend(s for s in requirement.missing(found) if s not in missing)
-        refused = Forbidden(
-            f"requires scope {' '.join(missing)}" if missing else None, scopes=missing
-        )
+            roles.extend(r for r in requirement.missing_roles(found) if r not in roles)
+        said = []
+        if missing:
+            said.append(f"requires scope {' '.join(missing)}")
+        if roles:
+            said.append(f"requires role {' '.join(roles)}")
+        refused = Forbidden("; ".join(said) or None, scopes=missing, roles=roles)
         challenge = getattr(scheme, "challenge", None)
         value = challenge(refused) if challenge is not None else None
         if value:

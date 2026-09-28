@@ -50,7 +50,7 @@ C. The CI leg is what actually runs them.
 ## Tests
 
 ```bash
-make verify        # thirty-three suites, free-threaded
+make verify        # thirty-four suites, free-threaded
 make verify-gil    # the same suites on the GIL build
 ```
 
@@ -64,25 +64,30 @@ freshly built wheel, and it holds the list that the Makefile reads.
 ``` Each suite is a standalone script that exits non-zero on
 failure and runs against a real server on a real socket.
 
-**Start the services first**, with `make up`. Two suites need one each:
+**Start the services first**, with `make up`. Three suites need one each:
 `tests/durable.py` is the only suite covering durable topics, and needs Redis;
 `tests/database.py` is the only one that runs a query — the pool per loop,
-transactions, migrations, `examples/database/` — and needs PostgreSQL. Each
-prints `SKIP` rather than failing when its service is unreachable, so a green
-run without them has not tested any of that. `make verify` therefore requires
-both and checks for them before the suites start:
+transactions, migrations, `examples/database/` — and needs PostgreSQL; the
+second half of `tests/oidc.py` checks real tokens and a key rotation against
+Keycloak. Each prints `SKIP` rather than failing when its service is
+unreachable, so a green run without them has not tested any of that. `make
+verify` therefore requires all three and checks for them before the suites
+start:
 
 ```bash
-make up                            # redis and postgres, in containers
-make verify                        # refuses to start without them
-make verify REDIS= POSTGRES=       # accept the gap instead, with no containers
+make up                                  # redis, postgres and keycloak, in containers
+make verify                              # refuses to start without them
+make verify REDIS= POSTGRES= KEYCLOAK=   # accept the gap instead, with no containers
 ```
 
-`tests/run.py` makes the same checks, and honours `OXBROOK_REQUIRE_REDIS` and
-`OXBROOK_REQUIRE_POSTGRES`. `OXBROOK_TEST_REDIS` and `OXBROOK_TEST_POSTGRES`
-point elsewhere than the defaults, `redis://127.0.0.1:6399` and
-`postgresql://oxbrook:oxbrook@127.0.0.1:5499/oxbrook`. The database suite
-creates a database per run and drops it afterwards.
+`tests/run.py` makes the same checks, and honours `OXBROOK_REQUIRE_REDIS`,
+`OXBROOK_REQUIRE_POSTGRES` and `OXBROOK_REQUIRE_KEYCLOAK`.
+`OXBROOK_TEST_REDIS`, `OXBROOK_TEST_POSTGRES` and `OXBROOK_TEST_KEYCLOAK` point
+elsewhere than the defaults, `redis://127.0.0.1:6399`,
+`postgresql://oxbrook:oxbrook@127.0.0.1:5499/oxbrook` and
+`http://localhost:8199`. The database suite creates a database per run and
+drops it afterwards; Keycloak imports its test realm from `tests/keycloak/`
+at every start, so the key the OIDC suite rotates away comes back.
 
 Coverage of both halves:
 
@@ -96,7 +101,7 @@ instrumented extension, runs the suites against it, and rebuilds release
 afterwards so a benchmark never measures the instrumented build.
 
 ```bash
-make up            # redis and postgres
+make up            # redis, postgres and keycloak
 make stack         # two nodes against one redis, for cross-process behaviour
 ```
 

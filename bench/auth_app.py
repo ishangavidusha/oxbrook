@@ -1,5 +1,10 @@
 """The app bench/auth.py measures: one route per scheme, and one without.
 
+JWT routes come in pairs, with the verified-token cache and without it, since
+the cache is what the first request pays and every later one skips. The OIDC
+route's issuer is this app itself, serving its own discovery document and
+key set, so the measured path is the whole of it: key lookup included.
+
 `--eager` collects a protected route's body before authenticating, as an
 unprotected route does, so the deferred body's cost can be measured against
 the alternative rather than argued about.
@@ -10,8 +15,9 @@ import time
 import jwt
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
+from jwt.algorithms import RSAAlgorithm
 from oxbrook import App, Request
-from oxbrook.auth import JWT, APIKey, Principal
+from oxbrook.auth import JWT, OIDC, APIKey, Principal
 from pydantic import BaseModel
 
 KEY = "sk-bench-" + "k" * 40
@@ -40,11 +46,37 @@ def rs256_token(private: bytes) -> str:
     return jwt.encode(claims(), private, algorithm="RS256")
 
 
-def build(public_key: bytes) -> App:
+def issuer(port: int) -> str:
+    return f"http://127.0.0.1:{port}"
+
+
+def oidc_token(private: bytes, port: int) -> str:
+    return jwt.encode({**claims(), "iss": issuer(port)}, private, algorithm="RS256",
+                      headers={"kid": "bench"})
+
+
+def build(public_key: bytes, port: int) -> App:
     keys = APIKey(header="x-api-key", verify=DIGESTS.get)
     hs = JWT(key=SECRET, algorithms=["HS256"], audience="bench")
+    hs_nocache = JWT(key=SECRET, algorithms=["HS256"], audience="bench", cache_size=0,
+                     name="hs_nocache")
     rs = JWT(key=public_key, algorithms=["RS256"], audience="bench", name="rs")
+    rs_nocache = JWT(key=public_key, algorithms=["RS256"], audience="bench", cache_size=0,
+                     name="rs_nocache")
+    provider = OIDC(issuer(port), audience="bench")
+    provider_nocache = OIDC(issuer(port), audience="bench", cache_size=0, name="oidc_nocache")
+    jwk = {**RSAAlgorithm.to_jwk(serialization.load_pem_public_key(public_key), as_dict=True),
+           "kid": "bench", "alg": "RS256", "use": "sig"}
     app = App(openapi_url=None, docs_url=None, mcp_url=None)
+
+    @app.get("/.well-known/openid-configuration")
+    async def discovery(_: Request):
+        return {"issuer": issuer(port), "jwks_uri": issuer(port) + "/keys",
+                "id_token_signing_alg_values_supported": ["RS256"]}
+
+    @app.get("/keys")
+    async def key_set(_: Request):
+        return {"keys": [jwk]}
 
     class Item(BaseModel):
         name: str
@@ -66,6 +98,22 @@ def build(public_key: bytes) -> App:
     async def rs256(_: Request):
         return {"hello": "world"}
 
+    @app.get("/hs256-nocache", auth=hs_nocache)
+    async def hs256_nocache(_: Request):
+        return {"hello": "world"}
+
+    @app.get("/rs256-nocache", auth=rs_nocache)
+    async def rs256_nocache(_: Request):
+        return {"hello": "world"}
+
+    @app.get("/oidc", auth=provider)
+    async def oidc(_: Request):
+        return {"hello": "world"}
+
+    @app.get("/oidc-nocache", auth=provider_nocache)
+    async def oidc_nocache(_: Request):
+        return {"hello": "world"}
+
     @app.post("/public-body")
     async def public_body(_: Request, item: Item):
         return {"name": item.name}
@@ -84,7 +132,7 @@ if __name__ == "__main__":
     p.add_argument("--public-key", required=True)
     p.add_argument("--eager", action="store_true")
     a = p.parse_args()
-    app = build(open(a.public_key, "rb").read())
+    app = build(open(a.public_key, "rb").read(), a.port)
     if a.eager:
         # Measurement only: the body mode is not a public setting.
         spec = App._spec

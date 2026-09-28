@@ -10,6 +10,7 @@
         - APIKey
         - Bearer
         - JWT
+        - OIDC
         - Basic
         - SessionAuth
         - Unauthenticated

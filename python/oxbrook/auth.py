@@ -38,8 +38,10 @@ import base64
 import binascii
 import hashlib
 import inspect
+import itertools
 import logging
 import secrets
+import time
 import types
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
@@ -60,14 +62,19 @@ class Principal:
     `subject` identifies the caller — a user id, a key id, a client id — and
     is a string, so `str(user.id)` rather than the id itself. `scheme` is the
     name of the scheme that found it, filled in by the framework when left
-    empty. `scopes` are what the credential grants, which `requires(...)`
-    checks. `claims` is anything else the credential carried, and `user`
+    empty. `scopes` are what the credential grants the client, and `roles`
+    what the caller is, as an identity provider assigns them; `requires(...)`
+    checks both. `claims` is anything else the credential carried, and `user`
     whatever a verify function looked up, if anything.
+
+    Scopes and roles are kept apart because providers issue them separately,
+    and a role that shares a name with a scope must not grant it.
     """
 
     subject: str
     scheme: str = ""
     scopes: frozenset[str] = frozenset()
+    roles: frozenset[str] = frozenset()
     claims: Mapping[str, Any] = field(default_factory=dict)
     user: Any = None
 
@@ -77,15 +84,23 @@ class Principal:
                 f"a Principal's subject is a non-empty str, got {self.subject!r}; "
                 f"pass str(user.id) for a numeric id"
             )
-        if isinstance(self.scopes, str):
-            # frozenset("admin") is five one-letter scopes, which would pass a
-            # requirement for "a" and fail one for "admin" without a word.
-            raise TypeError(
-                "a Principal's scopes are a collection of names, not one string; "
-                "split a space-separated scope claim first"
-            )
-        if not isinstance(self.scopes, frozenset):
-            object.__setattr__(self, "scopes", frozenset(self.scopes))
+        # Unrolled rather than a loop over the two: this runs on every
+        # authenticated request.
+        if type(self.scopes) is not frozenset:
+            object.__setattr__(self, "scopes", _names_of(self.scopes, "scopes"))
+        if type(self.roles) is not frozenset:
+            object.__setattr__(self, "roles", _names_of(self.roles, "roles"))
+
+
+def _names_of(value: Any, kind: str) -> frozenset[str]:
+    if isinstance(value, str):
+        # frozenset("admin") is five one-letter names, which would pass a
+        # requirement for "a" and fail one for "admin" without a word.
+        raise TypeError(
+            f"a Principal's {kind} are a collection of names, not one string; "
+            f"split a space-separated claim first"
+        )
+    return frozenset(value)
 
 
 class Unauthenticated(HTTPError):
@@ -117,11 +132,14 @@ class Forbidden(HTTPError):
         headers: dict[str, Any] | None = None,
         *,
         scopes: Iterable[str] = (),
+        roles: Iterable[str] = (),
         **kwargs: Any,
     ) -> None:
         super().__init__(403, detail, headers, **kwargs)
         #: The scopes the caller lacked, when that is why.
         self.scopes = tuple(scopes)
+        #: The roles the caller lacked, when that is why.
+        self.roles = tuple(roles)
 
 
 # ---- declaring --------------------------------------------------------------
@@ -134,11 +152,14 @@ class Requirement:
     all_of: frozenset[str] = frozenset()
     any_of: frozenset[str] = frozenset()
     check: Callable[..., Any] | None = None
+    roles: frozenset[str] = frozenset()
 
     async def met(self, found: Principal, request: Any) -> bool:
         if not self.all_of <= found.scopes:
             return False
         if self.any_of and not self.any_of & found.scopes:
+            return False
+        if not self.roles <= found.roles:
             return False
         if self.check is not None:
             return bool(await _call(self.check, found, request))
@@ -151,45 +172,65 @@ class Requirement:
             lacking.extend(sorted(self.any_of))
         return lacking
 
+    def missing_roles(self, found: Principal) -> list[str]:
+        return sorted(self.roles - found.roles)
+
     def __repr__(self) -> str:
         parts = [repr(s) for s in sorted(self.all_of)]
         if self.any_of:
             parts.append(f"any_of={tuple(sorted(self.any_of))!r}")
+        if self.roles:
+            parts.append(f"roles={tuple(sorted(self.roles))!r}")
         if self.check is not None:
             parts.append(f"check={getattr(self.check, '__name__', self.check)}")
         return ", ".join(parts)
 
 
-def _requirement(scopes: tuple, any_of: Iterable[str], check: Any) -> Requirement:
+def _requirement(
+    scopes: tuple, any_of: Iterable[str], roles: Iterable[str], check: Any
+) -> Requirement:
     if isinstance(any_of, str):
         raise TypeError("any_of is a collection of scopes, not one string: any_of=('a', 'b')")
+    if isinstance(roles, str):
+        raise TypeError("roles is a collection of roles, not one string: roles=('admin',)")
     any_of = tuple(any_of)
+    roles = tuple(roles)
     for scope in (*scopes, *any_of):
         if not isinstance(scope, str) or not scope:
             raise TypeError(f"a scope is a non-empty str, got {scope!r}")
+    for role in roles:
+        if not isinstance(role, str) or not role:
+            raise TypeError(f"a role is a non-empty str, got {role!r}")
     if check is not None and not callable(check):
         raise TypeError(f"check= needs a callable, got {type(check).__name__}")
-    if not scopes and not any_of and check is None:
-        raise TypeError("requires() needs scopes, any_of=, or check=")
-    return Requirement(frozenset(scopes), frozenset(any_of), check)
+    if not scopes and not any_of and not roles and check is None:
+        raise TypeError("requires() needs scopes, any_of=, roles= or check=")
+    return Requirement(frozenset(scopes), frozenset(any_of), check, frozenset(roles))
 
 
 class _Combinable:
     """`|` and `.requires(...)`, for schemes and for what they combine into."""
 
     def requires(
-        self, *scopes: str, any_of: Iterable[str] = (), check: Any = None
+        self,
+        *scopes: str,
+        any_of: Iterable[str] = (),
+        roles: Iterable[str] = (),
+        check: Any = None,
     ) -> "_Combinable":
         """This, plus a requirement on the principal it finds.
 
-            tokens.requires("notes:write")                 # every one of these
-            tokens.requires(any_of=("admin", "support"))   # at least one
+            tokens.requires("notes:write")                 # every one of these scopes
+            tokens.requires(any_of=("notes:read", "notes:admin"))   # at least one
+            tokens.requires(roles=("editor",))             # every one of these roles
             tokens.requires(check=is_staff)                # async (principal, request) -> bool
 
         A principal that fails it is refused with `403`. On `a | b` it applies
-        to both; on one side of a `|`, to that side alone.
+        to both; on one side of a `|`, to that side alone. Either of two roles
+        is two requirements on one scheme, which is tried as one credential:
+        `tokens.requires(roles=("admin",)) | tokens.requires(roles=("support",))`.
         """
-        return _Required(self, _requirement(scopes, any_of, check))
+        return _Required(self, _requirement(scopes, any_of, roles, check))
 
     def __or__(self, other: Any) -> "_Combinable":
         return _Either((*_members(self), *_members(_checked(other, "|"))))
@@ -433,8 +474,203 @@ _ASYMMETRIC = {
     "ES256", "ES256K", "ES384", "ES512", "EdDSA",
 }
 
+#: Verified tokens a scheme remembers, by default. A few thousand callers with
+#: live tokens at once; past that the oldest quarter is dropped and verified
+#: again when next seen.
+_CACHE_SIZE = 4096
 
-class JWT(Bearer):
+
+def _pyjwt(what: str) -> Any:
+    try:
+        import jwt
+    except ModuleNotFoundError:  # pragma: no cover - depends on the environment
+        raise ModuleNotFoundError(
+            f"{what} needs PyJWT, with cryptography for public keys: "
+            f"pip install 'oxbrook[auth]'"
+        ) from None
+    return jwt
+
+
+def _claim_path(value: Any, what: str) -> tuple[str, ...] | None:
+    """A claim name, or a tuple of names into nested objects."""
+    if value is None:
+        return None
+    path = (value,) if isinstance(value, str) else tuple(value)
+    if not path or not all(isinstance(step, str) and step for step in path):
+        raise TypeError(
+            f"{what} is a claim name, or a tuple of names for a nested claim such as "
+            f"('realm_access', 'roles'); got {value!r}"
+        )
+    return path
+
+
+def _names(claims: Mapping[str, Any], path: tuple[str, ...] | None) -> frozenset[str]:
+    """The names at `path`: a space-separated string or a list of strings."""
+    if path is None:
+        return frozenset()
+    value: Any = claims
+    for step in path:
+        if not isinstance(value, Mapping):
+            return frozenset()
+        value = value.get(step)
+    if isinstance(value, str):
+        return frozenset(value.split())
+    if isinstance(value, (list, tuple)):
+        return frozenset(v for v in value if isinstance(v, str) and v)
+    return frozenset()
+
+
+def _expectations(claims: Mapping[str, Any] | None) -> dict[str, Any]:
+    if claims is None:
+        return {}
+    if not isinstance(claims, Mapping):
+        raise TypeError("claims= maps a claim name to the value it must have")
+    expected = {}
+    for name, value in claims.items():
+        if not isinstance(name, str) or not name:
+            raise TypeError(f"claims= keys are claim names, got {name!r}")
+        if isinstance(value, (list, tuple, set, frozenset)):
+            value = frozenset(value)
+            if not value:
+                raise ValueError(f"claims={{{name!r}: ...}} lists no acceptable value")
+        expected[name] = value
+    return expected
+
+
+def _frozen(value: Any) -> Any:
+    """Claims made read-only all the way down: a remembered principal is
+    shared by every request that carries its token, so a handler that changed
+    a nested list would change it for the caller's later requests too."""
+    if isinstance(value, dict):
+        return types.MappingProxyType({k: _frozen(v) for k, v in value.items()})
+    if isinstance(value, list):
+        return tuple(_frozen(v) for v in value)
+    return value
+
+
+class _Signed(Bearer):
+    """What `JWT` and `OIDC` share: claims into a principal, and a memory of
+    tokens already verified.
+
+    The memory is the reason a public-key signature is not checked again on
+    every request: a token that verified once is the same token until it
+    expires, so a hit costs a dictionary lookup and an `exp` comparison. Only
+    a token that verified is kept, so a caller cannot fill it with forgeries,
+    and `OIDC` empties it whenever the provider's keys change, so a withdrawn
+    key stops working at the next refresh rather than at each token's expiry.
+    """
+
+    def _configure(
+        self,
+        *,
+        audience: Any,
+        issuer: Any,
+        leeway: float,
+        scopes_claim: Any,
+        roles_claim: Any,
+        subject_claim: str,
+        claims: Mapping[str, Any] | None,
+        cache_size: int,
+    ) -> None:
+        if audience is not None and not isinstance(audience, str):
+            audience = list(audience)
+        if not isinstance(cache_size, int) or isinstance(cache_size, bool) or cache_size < 0:
+            raise ValueError("cache_size is a count of tokens, 0 to turn the cache off")
+        self.audience = audience
+        self.issuer = issuer
+        self._issuers = issuer
+        self.leeway = leeway
+        self.scopes_claim = scopes_claim
+        self.roles_claim = roles_claim
+        self.subject_claim = subject_claim
+        self._scopes = _claim_path(scopes_claim, "scopes_claim")
+        self._roles = _claim_path(roles_claim, "roles_claim")
+        self.expected = _expectations(claims)
+        self.cache_size = cache_size
+        self._verified: dict[str, tuple[float, Principal]] = {}
+        self.require = ["exp", subject_claim] + (["iss"] if issuer else [])
+
+    async def _claims(self, token: str) -> dict[str, Any]:
+        raise NotImplementedError
+
+    def _fresh(self) -> None:
+        """Called on every remembered token: where keys can go stale, look."""
+
+    async def check(self, token: str) -> Principal:
+        remembered = self._verified.get(token)
+        if remembered is not None:
+            if time.time() <= remembered[0]:
+                self._fresh()
+                return remembered[1]
+            self._verified.pop(token, None)
+        claims = await self._claims(token)
+        found = self._principal(claims)
+        if self.cache_size:
+            self._remember(token, float(claims["exp"]) + self.leeway, found)
+        return found
+
+    def _remember(self, token: str, until: float, found: Principal) -> None:
+        verified = self._verified
+        if len(verified) >= self.cache_size:
+            # The oldest quarter, in one pass: popping them one at a time from
+            # the front is quadratic in a dict.
+            try:
+                for stale in list(itertools.islice(verified, max(1, self.cache_size // 4))):
+                    verified.pop(stale, None)
+            except RuntimeError:
+                # Another worker loop changed it mid-pass; a later insert trims.
+                pass
+        verified[token] = (until, found)
+
+    def _decode(self, token: str, key: Any, algorithms: list[str]) -> dict[str, Any]:
+        jwt = self._jwt
+        try:
+            return jwt.decode(
+                token,
+                key,
+                algorithms=algorithms,
+                audience=self.audience,
+                issuer=self._issuers,
+                leeway=self.leeway,
+                options={"require": self.require, "verify_aud": self.audience is not None},
+            )
+        except jwt.ExpiredSignatureError:
+            logger.info("jwt refused: expired", extra={"scheme": self.name})
+            raise Unauthenticated("token expired") from None
+        except jwt.PyJWTError as exc:
+            # The reason is for the log. The client learns only that the token
+            # is invalid: which check failed is a map for forging the next one.
+            logger.info("jwt refused: %s", type(exc).__name__, extra={"scheme": self.name})
+            raise Unauthenticated("token invalid") from None
+
+    def _principal(self, claims: dict[str, Any]) -> Principal:
+        for name, wanted in self.expected.items():
+            value = claims.get(name)
+            if isinstance(value, (dict, list)):
+                ok = False
+            elif isinstance(wanted, frozenset):
+                ok = value in wanted
+            else:
+                ok = value == wanted
+            if not ok:
+                logger.info("jwt refused: claim %s", name, extra={"scheme": self.name})
+                raise Unauthenticated("token invalid")
+        subject = claims.get(self.subject_claim)
+        if isinstance(subject, int) and not isinstance(subject, bool):
+            subject = str(subject)
+        if not isinstance(subject, str) or not subject:
+            logger.info("jwt refused: no usable subject", extra={"scheme": self.name})
+            raise Unauthenticated("token invalid")
+        return Principal(
+            subject=subject,
+            scheme=self.name,
+            scopes=_names(claims, self._scopes),
+            roles=_names(claims, self._roles),
+            claims=_frozen(claims),
+        )
+
+
+class JWT(_Signed):
     """A JSON Web Token this app can verify itself.
 
         tokens = JWT(key=os.environ["JWT_SECRET"], algorithms=["HS256"], audience="notes")
@@ -445,7 +681,10 @@ class JWT(Bearer):
     skew, `nbf`, `aud` against `audience`, and `iss` against `issuer` when one
     is given. The principal's subject is the `sub` claim and its scopes the
     `scope` claim, a space-separated string or a list; `scopes_claim` names a
-    different claim, such as `"scp"` or `"permissions"`.
+    different claim, such as `"scp"` or `"permissions"`, and `roles_claim`
+    one to read roles from. Either may be a tuple naming a nested claim:
+    `roles_claim=("realm_access", "roles")`. `claims=` names claims that must
+    have a given value, or one of a list: `claims={"token_use": "access"}`.
 
     `algorithms` is required, and cannot mix families: an HMAC secret with
     `HS*`, or a public key with the asymmetric ones. Accepting both is how a
@@ -454,6 +693,10 @@ class JWT(Bearer):
 
     `audience=None` accepts a token for any audience, and has to be written
     out: a token issued for another service is otherwise accepted by this one.
+
+    A token that verified is remembered until it expires, up to `cache_size`
+    of them, so a caller's next request skips the signature check; `0` turns
+    that off.
 
     Needs PyJWT: `pip install 'oxbrook[auth]'`.
     """
@@ -467,18 +710,15 @@ class JWT(Bearer):
         audience: str | Iterable[str] | None,
         issuer: str | None = None,
         leeway: float = 60,
-        scopes_claim: str = "scope",
+        scopes_claim: str | tuple[str, ...] = "scope",
+        roles_claim: str | tuple[str, ...] | None = None,
         subject_claim: str = "sub",
+        claims: Mapping[str, Any] | None = None,
+        cache_size: int = _CACHE_SIZE,
         realm: str | None = None,
         name: str = "jwt",
     ) -> None:
-        try:
-            import jwt
-        except ModuleNotFoundError:  # pragma: no cover - depends on the environment
-            raise ModuleNotFoundError(
-                "JWT needs PyJWT, with cryptography for public keys: "
-                "pip install 'oxbrook[auth]'"
-            ) from None
+        jwt = _pyjwt("JWT")
         super().__init__(realm=realm, name=name, bearer_format="JWT")
         self._jwt = jwt
         if isinstance(algorithms, str):
@@ -513,54 +753,310 @@ class JWT(Bearer):
                     f"{needed} bytes; this one is {len(secret)}. "
                     f"secrets.token_urlsafe({needed}) makes one"
                 )
-        if audience is not None and not isinstance(audience, str):
-            audience = list(audience)
         self.key = key
+        self._key = key if hmac_algorithms else self._prepared(jwt, key, algorithms)
         self.algorithms = algorithms
-        self.audience = audience
-        self.issuer = issuer
-        self.leeway = leeway
-        self.scopes_claim = scopes_claim
-        self.subject_claim = subject_claim
-        self.require = ["exp", subject_claim] + (["iss"] if issuer else [])
+        self._configure(
+            audience=audience, issuer=issuer, leeway=leeway, scopes_claim=scopes_claim,
+            roles_claim=roles_claim, subject_claim=subject_claim, claims=claims,
+            cache_size=cache_size,
+        )
 
-    async def check(self, token: str) -> Principal:
+    @staticmethod
+    def _prepared(jwt: Any, key: Any, algorithms: list[str]) -> Any:
+        """A PEM key parsed once, here, rather than by PyJWT on every token:
+        parsing is most of an uncached RS256 check. Also finds a key that
+        suits none of the algorithms now rather than on the first request."""
+        for name in algorithms:
+            try:
+                return jwt.get_algorithm_by_name(name).prepare_key(key)
+            except (jwt.PyJWTError, ValueError, TypeError):
+                continue
+        raise ValueError(f"the key is not a public key for {', '.join(algorithms)}")
+
+    async def _claims(self, token: str) -> dict[str, Any]:
+        return self._decode(token, self._key, self.algorithms)
+
+
+class OIDC(_Signed):
+    """Tokens from an OpenID Connect provider, checked against its published keys.
+
+        users = OIDC("https://login.example.com/realms/acme", audience="notes-api")
+        users = OIDC.auth0("acme.eu.auth0.com", audience="https://notes.example.com")
+
+    The provider's discovery document, `/.well-known/openid-configuration`
+    under the issuer, says where its signing keys are. They are fetched on
+    the first token, once for the whole process however many worker loops
+    ask, and again every `keys_max_age` seconds so that a key the provider
+    withdraws stops being accepted. A token signed with a key id not yet seen
+    fetches them again at once — how a provider's key rotation arrives — but
+    at most once a minute, so tokens with made-up key ids cannot turn into a
+    stream of requests to the provider. Call `await scheme.load()` from a
+    lifespan to fetch them at startup instead, and fail there if the provider
+    is unreachable.
+
+    Only public-key algorithms are accepted, those the provider advertises,
+    and each only with a key of its own type: never `none`, never HMAC, so a
+    provider's public key cannot be used as a shared secret to forge a token.
+    `algorithms=` narrows the list further. Every token is checked for its
+    signature, `iss`, `aud`, `exp` and `nbf`, with `leeway` seconds of clock
+    skew; claims are read as in `JWT`, including `roles_claim` and `claims=`.
+
+    When the provider cannot be reached before any keys were fetched, the
+    answer is `503` rather than `401`: the token may well be good, and a `401`
+    tells a client to throw it away.
+
+    The issuer must be HTTPS, since keys fetched over plain HTTP can be
+    replaced in transit; `http://localhost` is allowed for development, and
+    `allow_http=True` for a provider on a private network.
+
+    The class methods set up known providers: `keycloak`, `auth0`, `entra`,
+    `okta`, `cognito`, `google` and `firebase`. Each takes the same keyword
+    arguments as `OIDC` itself, to override what it sets.
+    """
+
+
+    def __init__(
+        self,
+        issuer: str,
+        *,
+        audience: str | Iterable[str] | None,
+        algorithms: Iterable[str] | None = None,
+        scopes_claim: str | tuple[str, ...] = "scope",
+        roles_claim: str | tuple[str, ...] | None = None,
+        subject_claim: str = "sub",
+        claims: Mapping[str, Any] | None = None,
+        leeway: float = 60,
+        discovery_url: str | None = None,
+        keys_max_age: float = 300,
+        allow_http: bool = False,
+        timeout: float = 10,
+        cache_size: int = _CACHE_SIZE,
+        realm: str | None = None,
+        name: str = "oidc",
+    ) -> None:
+        jwt = _pyjwt("OIDC")
+        from . import _jwks
+
+        super().__init__(realm=realm, name=name, bearer_format="JWT")
+        self._jwt = jwt
+        if not isinstance(issuer, str) or not issuer:
+            raise TypeError("OIDC needs the provider's issuer URL")
+        _jwks.check_url(issuer, allow_http, "issuer")
+        if discovery_url is None:
+            discovery_url = issuer.rstrip("/") + "/.well-known/openid-configuration"
+        _jwks.check_url(discovery_url, allow_http, "discovery_url")
+        if algorithms is not None:
+            if isinstance(algorithms, str):
+                raise TypeError("algorithms is a list: algorithms=['RS256']")
+            algorithms = frozenset(algorithms)
+            refused = [a for a in algorithms if a not in _ASYMMETRIC]
+            if refused or not algorithms:
+                raise ValueError(
+                    f"OIDC accepts only public-key algorithms ({', '.join(sorted(_ASYMMETRIC))}); "
+                    f"a provider's tokens are never HMAC or unsigned. Refused: {refused}"
+                )
+        if keys_max_age <= 0:
+            raise ValueError("keys_max_age is seconds, more than 0")
+        self.discovery_url = discovery_url
+        self._configure(
+            audience=audience, issuer=issuer, leeway=leeway, scopes_claim=scopes_claim,
+            roles_claim=roles_claim, subject_claim=subject_claim, claims=claims,
+            cache_size=cache_size,
+        )
+        self.keys = _jwks.KeySet(
+            discovery_url,
+            issuer,
+            algorithms=algorithms,
+            allow_http=allow_http,
+            timeout=timeout,
+            max_age=keys_max_age,
+            changed=self._verified.clear,
+        )
+
+    def _fresh(self) -> None:
+        # Without this, a caller whose token is remembered never reaches the
+        # key set, and a withdrawn key would work until each token expired.
+        self.keys.refresh_if_stale()
+
+    async def load(self) -> None:
+        """Fetch the discovery document and keys now, raising if that fails."""
+        from . import _jwks
+
+        try:
+            await self.keys.load()
+        except _jwks.Unavailable as exc:
+            raise RuntimeError(f"{self.name}: {exc}") from None
+
+    async def _claims(self, token: str) -> dict[str, Any]:
+        from . import _jwks
+
         jwt = self._jwt
         try:
-            claims = jwt.decode(
-                token,
-                self.key,
-                algorithms=self.algorithms,
-                audience=self.audience,
-                issuer=self.issuer,
-                leeway=self.leeway,
-                options={"require": self.require, "verify_aud": self.audience is not None},
-            )
-        except jwt.ExpiredSignatureError:
-            logger.info("jwt refused: expired", extra={"scheme": self.name})
-            raise Unauthenticated("token expired") from None
-        except jwt.InvalidTokenError as exc:
-            # The reason is for the log. The client learns only that the token
-            # is invalid: which check failed is a map for forging the next one.
-            logger.info("jwt refused: %s", type(exc).__name__, extra={"scheme": self.name})
+            header = jwt.get_unverified_header(token)
+        except jwt.PyJWTError:
+            logger.info("jwt refused: malformed", extra={"scheme": self.name})
             raise Unauthenticated("token invalid") from None
-
-        subject = claims.get(self.subject_claim)
-        if isinstance(subject, int) and not isinstance(subject, bool):
-            subject = str(subject)
-        if not isinstance(subject, str) or not subject:
-            logger.info("jwt refused: no usable subject", extra={"scheme": self.name})
+        alg, kid = header.get("alg"), header.get("kid")
+        if not isinstance(alg, str) or not (kid is None or isinstance(kid, str)):
+            logger.info("jwt refused: malformed header", extra={"scheme": self.name})
             raise Unauthenticated("token invalid")
-        granted = claims.get(self.scopes_claim) or ()
-        if isinstance(granted, str):
-            granted = granted.split()
-        scopes = frozenset(s for s in granted if isinstance(s, str))
-        return Principal(
-            subject=subject,
-            scheme=self.name,
-            scopes=scopes,
-            claims=types.MappingProxyType(claims),
+        try:
+            key = await self.keys.find(kid, alg)
+        except _jwks.Unavailable:
+            raise HTTPError(
+                503, "the identity provider could not be reached", {"retry-after": "5"}
+            ) from None
+        except _jwks.Refused as exc:
+            logger.info("jwt refused: %s", exc, extra={"scheme": self.name})
+            raise Unauthenticated("token invalid") from None
+        return self._decode(token, key, [alg])
+
+    def openapi(self) -> dict[str, Any]:
+        return {"type": "openIdConnect", "openIdConnectUrl": self.discovery_url}
+
+    def __repr__(self) -> str:
+        return self.name
+
+    # ---- providers ------------------------------------------------------------
+
+    @classmethod
+    def _preset(cls, issuer: str, defaults: dict[str, Any], options: dict[str, Any]) -> "OIDC":
+        return cls(issuer, **{**defaults, **options})
+
+    @classmethod
+    def keycloak(cls, url: str, realm: str, *, audience: Any, **options: Any) -> "OIDC":
+        """Keycloak: `OIDC.keycloak("https://sso.example.com", "acme", audience="notes-api")`.
+
+        Scopes from `scope`, roles from the realm roles in `realm_access`. For
+        a client's own roles, `roles_claim=("resource_access", client, "roles")`.
+        Keycloak puts a client in `aud` only through an audience mapper, which
+        the API's clients need.
+        """
+        issuer = f"{_bare(url, 'url', scheme=True)}/realms/{_segment(realm, 'realm')}"
+        defaults = {"audience": audience, "roles_claim": ("realm_access", "roles")}
+        return cls._preset(issuer, defaults, options)
+
+    @classmethod
+    def auth0(cls, domain: str, *, audience: Any, **options: Any) -> "OIDC":
+        """Auth0: `OIDC.auth0("acme.eu.auth0.com", audience="https://notes.example.com")`.
+
+        `audience` is the API's identifier. Scopes from `scope`; with RBAC's
+        "Add Permissions in the Access Token", `scopes_claim="permissions"`.
+        """
+        issuer = f"https://{_bare(domain, 'domain')}/"
+        return cls._preset(issuer, {"audience": audience}, options)
+
+    @classmethod
+    def entra(
+        cls, tenant_id: str, *, audience: Any, version: int = 2, **options: Any
+    ) -> "OIDC":
+        """Microsoft Entra ID: `OIDC.entra(tenant_id, audience=api_client_id)`.
+
+        `tenant_id` is the directory's GUID; `common` and `organizations`
+        name no single issuer and are refused. Scopes from `scp`, app roles
+        from `roles`. An API's access tokens are version 1 unless its manifest
+        sets `requestedAccessTokenVersion` to 2, and the two have different
+        issuers: pass `version=1` for those.
+        """
+        tenant = _segment(tenant_id, "tenant_id")
+        if tenant.lower() in {"common", "organizations", "consumers"}:
+            raise ValueError(
+                f"{tenant!r} is not one tenant, so it names no issuer to check; pass the "
+                f"tenant id"
+            )
+        defaults: dict[str, Any] = {
+            "audience": audience, "scopes_claim": "scp", "roles_claim": "roles",
+        }
+        if version == 2:
+            issuer = f"https://login.microsoftonline.com/{tenant}/v2.0"
+        elif version == 1:
+            issuer = f"https://sts.windows.net/{tenant}/"
+            defaults["discovery_url"] = (
+                f"https://login.microsoftonline.com/{tenant}/.well-known/openid-configuration"
+            )
+        else:
+            raise ValueError("Entra access tokens are version 1 or 2")
+        return cls._preset(issuer, defaults, options)
+
+    @classmethod
+    def okta(
+        cls, domain: str, *, audience: Any, server: str = "default", **options: Any
+    ) -> "OIDC":
+        """Okta: `OIDC.okta("acme.okta.com", audience="api://default")`.
+
+        A custom authorization server, `default` unless `server` names
+        another; the org server's access tokens are for Okta alone to verify.
+        Scopes from `scp`.
+        """
+        issuer = f"https://{_bare(domain, 'domain')}/oauth2/{_segment(server, 'server')}"
+        return cls._preset(issuer, {"audience": audience, "scopes_claim": "scp"}, options)
+
+    @classmethod
+    def cognito(
+        cls, region: str, user_pool_id: str, *, client_id: str | Iterable[str], **options: Any
+    ) -> "OIDC":
+        """Amazon Cognito: `OIDC.cognito("eu-west-1", "eu-west-1_AbC123", client_id="...")`.
+
+        Cognito access tokens carry no `aud`: the app client is in
+        `client_id`, which is checked instead, along with `token_use` being
+        `access` so an ID token is not accepted in its place. Scopes from
+        `scope`, groups as roles from `cognito:groups`.
+        """
+        issuer = (
+            f"https://cognito-idp.{_segment(region, 'region')}.amazonaws.com/"
+            f"{_segment(user_pool_id, 'user_pool_id')}"
         )
+        clients = [client_id] if isinstance(client_id, str) else list(client_id)
+        defaults = {
+            "audience": None,
+            "claims": {"token_use": "access", "client_id": clients},
+            "roles_claim": "cognito:groups",
+        }
+        return cls._preset(issuer, defaults, options)
+
+    @classmethod
+    def google(cls, client_id: str | Iterable[str], **options: Any) -> "OIDC":
+        """Google ID tokens, from Sign in with Google: `OIDC.google(client_id)`.
+
+        Identity only: Google's tokens carry no scopes for an API. `aud` is
+        the app's OAuth client id, and `iss` either of the two forms Google
+        uses.
+        """
+        scheme = cls._preset("https://accounts.google.com", {"audience": client_id}, options)
+        scheme._issuers = ["https://accounts.google.com", "accounts.google.com"]
+        return scheme
+
+    @classmethod
+    def firebase(cls, project_id: str, **options: Any) -> "OIDC":
+        """Firebase Authentication ID tokens: `OIDC.firebase("acme-app")`.
+
+        `aud` is the project id. Custom claims set through the Admin SDK are
+        top-level claims, so `roles_claim="roles"` reads a `roles` list.
+        """
+        project = _segment(project_id, "project_id")
+        return cls._preset(
+            f"https://securetoken.google.com/{project}", {"audience": project}, options
+        )
+
+
+def _segment(value: Any, what: str) -> str:
+    if not isinstance(value, str) or not value or "/" in value or "?" in value or "#" in value:
+        raise ValueError(f"{what} is one name, without slashes; got {value!r}")
+    return value
+
+
+def _bare(value: Any, what: str, scheme: bool = False) -> str:
+    """A host (`scheme=False`) or a base URL (`scheme=True`), without a trailing slash."""
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{what} is required")
+    if scheme:
+        if "://" not in value:
+            raise ValueError(f"{what} is a URL with its scheme: 'https://sso.example.com'")
+        return value.rstrip("/")
+    if "://" in value or "/" in value.rstrip("/"):
+        raise ValueError(f"{what} is a host name, such as 'acme.eu.auth0.com'; got {value!r}")
+    return value.rstrip("/")
 
 
 class APIKey(Scheme):
@@ -784,6 +1280,7 @@ class SessionAuth(Scheme):
 
 __all__ = [
     "JWT",
+    "OIDC",
     "PRINCIPAL",
     "APIKey",
     "Basic",

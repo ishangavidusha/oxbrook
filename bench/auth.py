@@ -5,7 +5,10 @@
 
 Each protected route is measured against the same route unprotected, on one
 server, so the difference is the scheme and nothing else: an API key looked
-up in a dict, an HS256 JWT, an RS256 JWT. Then a protected POST with a small
+up in a dict, an HS256 JWT, an RS256 JWT and an OIDC provider's RS256 token,
+each with the verified-token cache and without it. Every request carries the
+same token, so the cached rows are the steady state of a caller's second
+request onwards, and the uncached ones the cost of its first. Then a protected POST with a small
 JSON body, whose body is read after authentication — against the same route
 with its body collected first, which is what `--eager` starts.
 
@@ -97,6 +100,7 @@ def main() -> None:
         "key": ["-H", f"x-api-key: {auth_app.KEY}"],
         "hs256": ["-H", f"authorization: Bearer {auth_app.hs256_token()}"],
         "rs256": ["-H", f"authorization: Bearer {auth_app.rs256_token(auth_app.PRIVATE)}"],
+        "oidc": ["-H", f"authorization: Bearer {auth_app.oidc_token(auth_app.PRIVATE, PORT)}"],
     }
     post = ["-m", "POST", "-H", "content-type: application/json", "-d", BODY]
     try:
@@ -105,7 +109,14 @@ def main() -> None:
             rows.append(("GET public", measure("/public", [], args)))
             rows.append(("GET api key", measure("/key", headers["key"], args)))
             rows.append(("GET jwt hs256", measure("/hs256", headers["hs256"], args)))
+            rows.append(("GET jwt hs256, no cache", measure("/hs256-nocache", headers["hs256"],
+                                                            args)))
             rows.append(("GET jwt rs256", measure("/rs256", headers["rs256"], args)))
+            rows.append(("GET jwt rs256, no cache", measure("/rs256-nocache", headers["rs256"],
+                                                            args)))
+            rows.append(("GET oidc rs256", measure("/oidc", headers["oidc"], args)))
+            rows.append(("GET oidc rs256, no cache", measure("/oidc-nocache", headers["oidc"],
+                                                             args)))
             rows.append(("POST public", measure("/public-body", post, args)))
             rows.append(("POST api key, deferred", measure("/key-body", post + headers["key"],
                                                            args)))
@@ -120,12 +131,13 @@ def main() -> None:
     finally:
         os.unlink(key_file.name)
 
-    base = {"GET": rows[0][1]["rps"], "POST": rows[4][1]["rps"]}
-    print(f"\n{'route':<26}{'req/s':>10}{'p50 ms':>9}{'p99 ms':>9}{'+us/req':>10}")
+    base = {"GET": rows[0][1]["rps"],
+            "POST": next(r["rps"] for label, r in rows if label == "POST public")}
+    print(f"\n{'route':<28}{'req/s':>10}{'p50 ms':>9}{'p99 ms':>9}{'+us/req':>10}")
     results = []
     for label, r in rows:
         added = (1 / r["rps"] - 1 / base[label.split()[0]]) * args.workers * 1e6
-        print(f"{label:<26}{r['rps']:>10.0f}{r['p50_ms']:>9.2f}{r['p99_ms']:>9.2f}"
+        print(f"{label:<28}{r['rps']:>10.0f}{r['p50_ms']:>9.2f}{r['p99_ms']:>9.2f}"
               f"{added:>10.1f}")
         results.append({"route": label, **r, "added_us": added})
     path = session.finish({"workers": args.workers, "conns": args.conns, "results": results})

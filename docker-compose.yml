@@ -5,9 +5,10 @@
 #
 #   redis     backing store for durable topics (milestone 4)
 #   postgres  the database the database suite and example run against
+#   keycloak  a real OpenID Connect provider, for tests/oidc.py
 #
-# Ports are deliberately non-default (6399 and 5499, not 6379 and 5432) so this
-# never collides with anything already running on the machine.
+# Ports are deliberately non-default (6399, 5499 and 8199, not 6379, 5432 and
+# 8080) so this never collides with anything already running on the machine.
 
 name: oxbrook-dev
 
@@ -61,3 +62,30 @@ services:
     tmpfs:
       # Same reasoning as redis: every run starts from an empty database.
       - /var/lib/postgresql
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.7
+    container_name: oxbrook-keycloak
+    # Development mode on an in-memory database, with the test realm imported
+    # at every start: the OIDC suite rotates keys, and each run should begin
+    # from the realm as the file describes it.
+    command: start-dev --import-realm
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+      # Tokens name their issuer from this, and the suite reaches Keycloak
+      # through the published port, so the two must agree.
+      KC_HOSTNAME: http://localhost:8199
+      KC_HEALTH_ENABLED: "true"
+      KC_DB: dev-mem
+    ports:
+      - "127.0.0.1:8199:8080"
+    volumes:
+      - ./tests/keycloak:/opt/keycloak/data/import:ro
+    healthcheck:
+      # The image has no curl; bash can speak enough HTTP to ask.
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/9000 && printf 'GET /health/ready HTTP/1.0\\r\\n\\r\\n' >&3 && grep -q UP <&3"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+      start_period: 10s

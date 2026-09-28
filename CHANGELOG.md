@@ -31,6 +31,21 @@ release does not; changes that break existing code are listed under
   before the handshake, a tool call is checked against its route's
   declaration with the agent's headers, and the OpenAPI document lists
   `securitySchemes` and each operation's `security`.
+- **OpenID Connect providers**: `OIDC(issuer, audience=...)` checks an identity
+  provider's access tokens against the keys its discovery document names, with
+  presets for Keycloak, Auth0, Entra ID, Okta, Cognito, Google and Firebase.
+  Keys are fetched once per process and kept fresh; a rotated-in key is picked
+  up by the first token that uses it, at most one fetch a minute; only the
+  provider's public-key algorithms are accepted, each with its own kind of key;
+  an unreachable provider is `503`, not `401`. `await scheme.load()` fetches the
+  keys at startup.
+- **Roles**, apart from scopes: `Principal.roles`, filled from a claim named by
+  `roles_claim=` on `JWT` and `OIDC`, and checked by `.requires(roles=...)`. A
+  role never satisfies a scope requirement, or the other way round. `claims=`
+  on both requires claims to have given values.
+- `JWT` and `OIDC` remember a verified token until it expires, so an RSA
+  signature is checked once per token rather than once per request
+  (`cache_size=`, `0` to turn it off).
 - A response header can repeat: a list as a header's value sends it once per
   item.
 - `Depends` works on WebSocket handlers. It raised `TypeError` on every

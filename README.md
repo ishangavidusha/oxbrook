@@ -50,8 +50,9 @@ larger than memory with backpressure, static files, routers, middleware,
 exception handlers, dependency injection with teardown, lifespans, signed
 cookie sessions, CORS, and OpenAPI 3.1 from the same route metadata the router
 uses. Authentication with one `auth=` declaration — API keys, bearer tokens,
-JWT, Basic, sessions or a scheme of your own — enforced before the body is
-read, on HTTP, WebSockets and agent tool calls alike.
+JWT, OpenID Connect providers, Basic, sessions or a scheme of your own —
+enforced before the body is read, on HTTP, WebSockets and agent tool calls
+alike.
 
 **Serving.** HTTP/1.1 and HTTP/2, HTTPS, bounded concurrency with `503` rather
 than an unbounded backlog, request timeouts, handlers cancelled when their

@@ -33,7 +33,7 @@ request body.
 ## Three ideas
 
 A **scheme** finds a credential in a request and checks it: `APIKey`, `Bearer`,
-`JWT`, `Basic`, `SessionAuth`, or one you write. A **principal** is who it
+`JWT`, `OIDC`, `Basic`, `SessionAuth`, or one you write. A **principal** is who it
 found. A **requirement** is what a route demands of that principal:
 `keys.requires("admin")`.
 
@@ -47,7 +47,8 @@ and a script's API key reach the same route under the same rule.
 | --------- | ----- |
 | `subject` | who: a user id, a key id, a client id. Always a `str` |
 | `scheme`  | the name of the scheme that found it: `"api_key"`, `"jwt"`, ... |
-| `scopes`  | a `frozenset` of what the credential grants, which `requires` checks |
+| `scopes`  | a `frozenset` of what the credential grants the client, which `requires` checks |
+| `roles`   | a `frozenset` of the roles an identity provider gave the caller, checked by `requires(roles=...)` |
 | `claims`  | everything else the credential carried, such as a token's claims |
 | `user`    | whatever a verify function looked up, if anything |
 
@@ -123,12 +124,23 @@ signed-in caller it would show less without saying why.
 
 ```python
 tokens.requires("notes:write")                  # every scope listed
-tokens.requires(any_of=("admin", "support"))   # at least one of them
+tokens.requires(any_of=("notes:read", "notes:admin"))   # at least one of them
+tokens.requires(roles=("editor",))              # every role listed
 tokens.requires(check=is_staff)                 # async def is_staff(principal, request) -> bool
 ```
 
 A principal that fails one gets `403`. Retrying with the same credential will
 not help, which is what separates it from `401`.
+
+Scopes and roles are different things and are checked separately. A scope is
+what the user let a client do on their behalf; a role is what an identity
+provider says the user is. A role named `write` does not satisfy a requirement
+for the scope `write`, or the other way round. Either of two roles is two
+requirements joined by `|`, tried as one credential:
+
+```python
+staff = tokens.requires(roles=("admin",)) | tokens.requires(roles=("support",))
+```
 
 A rule about one particular record — only its owner may edit a note — belongs
 in the handler, where the record is. Raise `Forbidden`:
@@ -243,20 +255,8 @@ bearer = Bearer(verify=check_token)
 ```
 
 `verify` is for any token Oxbrook cannot check itself: an opaque token in a
-database, one introspected at its issuer, or a provider's SDK.
-
-```python
-from firebase_admin import auth as firebase
-
-async def firebase_token(token: str) -> Principal | None:
-    try:
-        claims = await asyncio.to_thread(firebase.verify_id_token, token)
-    except firebase.InvalidIdTokenError:
-        return None
-    return Principal(subject=claims["uid"], claims=claims)
-
-firebase_users = Bearer(verify=firebase_token)
-```
+database, one introspected at its issuer, or a provider's SDK. A JWT signed with
+a key this app holds is `JWT`; one from an identity provider is `OIDC`.
 
 A `verify` that returns None refuses the token with `401`. One that blocks —
 most SDKs do — goes through `asyncio.to_thread`, as in any handler.
@@ -273,7 +273,15 @@ For tokens this app can verify with a key it holds. Checked on every request:
 the signature, `exp` and `nbf` with 60 seconds of clock skew (`leeway=`), `aud`,
 and `iss` when `issuer` is given. The subject is the `sub` claim; scopes are the
 `scope` claim, space-separated or a list, and `scopes_claim="scp"` or
-`"permissions"` reads another.
+`"permissions"` reads another. `roles_claim=` names a claim to read roles from,
+and either may be a tuple for a nested claim: `roles_claim=("realm_access",
+"roles")`. `claims=` requires claims to have a value, or one of a list:
+`claims={"token_use": "access"}`.
+
+A token that verified is remembered until it expires, so a caller's second
+request skips the signature check: for an RSA key that is most of the cost of
+authentication. Only tokens that verified are kept, up to `cache_size` (4096
+by default; `0` turns it off).
 
 Some mistakes cannot be written:
 
@@ -286,6 +294,100 @@ Some mistakes cannot be written:
   written out, since it means accepting tokens issued for other services.
 
 Needs PyJWT: `pip install 'oxbrook[auth]'`.
+
+### OpenID Connect providers
+
+```python
+from oxbrook.auth import OIDC
+
+users = OIDC("https://sso.example.com/realms/acme", audience="notes-api")
+users = OIDC.keycloak("https://sso.example.com", "acme", audience="notes-api")
+users = OIDC.auth0("acme.eu.auth0.com", audience="https://notes.example.com")
+```
+
+For access tokens issued by an identity provider. `OIDC` reads the provider's
+discovery document, `/.well-known/openid-configuration` under the issuer,
+fetches the signing keys it names, and checks every token against them: the
+signature, `iss`, `aud`, `exp` and `nbf`, as `JWT` does. Claims are read the
+same way, with the same `scopes_claim`, `roles_claim` and `claims=`.
+
+The providers whose tokens differ from the defaults have a preset. Each takes
+the same keyword arguments as `OIDC`, to override what it sets:
+
+| preset | issuer | scopes | roles |
+| ------ | ------ | ------ | ----- |
+| `OIDC.keycloak(url, realm, audience=...)` | `<url>/realms/<realm>` | `scope` | realm roles, `realm_access.roles` |
+| `OIDC.auth0(domain, audience=...)` | `https://<domain>/` | `scope` | none; `scopes_claim="permissions"` with RBAC |
+| `OIDC.entra(tenant_id, audience=...)` | `https://login.microsoftonline.com/<tenant>/v2.0` | `scp` | `roles` |
+| `OIDC.okta(domain, audience=...)` | `https://<domain>/oauth2/default` | `scp` | none |
+| `OIDC.cognito(region, pool, client_id=...)` | `https://cognito-idp.<region>.amazonaws.com/<pool>` | `scope` | `cognito:groups` |
+| `OIDC.google(client_id)` | `https://accounts.google.com` | none | none |
+| `OIDC.firebase(project_id)` | `https://securetoken.google.com/<project>` | none | custom claims |
+
+Where each one differs:
+
+- **Keycloak** puts the API in `aud` only through an audience mapper on the
+  clients that call it, or in a client scope they share. Without one, every
+  token is refused for its audience. A client's own roles, rather than the
+  realm's, are `roles_claim=("resource_access", "<client>", "roles")`.
+- **Entra ID** takes the tenant's id; `common` and `organizations` name no one
+  issuer and are refused. An API receives version 1 tokens, with issuer
+  `https://sts.windows.net/<tenant>/`, unless its manifest sets
+  `requestedAccessTokenVersion` to 2: pass `version=1` for those.
+- **Okta** tokens are checked for a custom authorization server, `default`
+  unless `server=` names another. The org server's access tokens are for Okta
+  alone.
+- **Cognito** access tokens carry no `aud`. The preset checks `client_id`
+  instead, and `token_use` being `access`, so an ID token is not accepted in
+  place of an access token.
+- **Google** and **Firebase** issue ID tokens: they say who signed in, for an
+  app's own backend, and carry no scopes.
+
+Any other standards-following provider works with its issuer URL and the
+audience it puts in its tokens.
+
+What `OIDC` does so that an app does not have to:
+
+- **Keys are fetched once per process.** Every worker loop shares them, and
+  requests that arrive together before the first fetch wait for the same one.
+  They are fetched again every five minutes (`keys_max_age=`) in the
+  background, so a key the provider withdraws stops working, including for
+  tokens already remembered.
+- **Rotation arrives by itself.** A token signed with a key id not yet seen
+  fetches the keys again at once, at most once a minute, so tokens with
+  invented key ids cannot turn into a stream of requests to the provider.
+- **Only the provider's public-key algorithms are accepted**, each only with a
+  key of its own type. `none` and HMAC are refused whatever the token's header
+  says, which closes the attack where a provider's public key is used as a
+  shared secret. `algorithms=["RS256"]` narrows the list further.
+- **An unreachable provider is `503`, not `401`.** Before any keys have been
+  fetched, a token cannot be checked, and it may well be good; `401` tells a
+  client to throw it away. After a failure the provider is not asked again for
+  five seconds. Once keys are in hand, a provider that goes away changes
+  nothing until it comes back.
+- **The issuer must be HTTPS**, because keys fetched in clear can be replaced in
+  transit; redirects are never followed from HTTPS to plain HTTP. `http://`
+  is accepted for `localhost`, and for anything with `allow_http=True`.
+
+The first token fetches the keys. To fetch them at startup instead, and fail
+there when the provider is unreachable, load them in a lifespan:
+
+```python
+@asynccontextmanager
+async def lifespan(app):
+    await users.load()
+    yield
+
+app = App(auth=users, lifespan=lifespan)
+```
+
+An **ID token is not an access token**: it says who signed in to a client, and
+its audience is that client. Checking `aud` against the API, as `audience`
+requires, is what keeps a client from sending one in place of an access token.
+
+Signing users in — the redirect to the provider and back — is the client's
+job, or a library such as Authlib's on a server-rendered app. `OIDC` checks
+the tokens that result.
 
 ### Basic
 
@@ -406,8 +508,9 @@ Each scheme is declared under `securitySchemes`, and each operation lists what
 it accepts under `security`: `a | b` as alternatives, required scopes by name,
 `optional(...)` as the empty alternative `{}`, and `auth=None` in a protected app
 as `security: []`. The docs page's **Authorize** button then works without
-further setup. A requirement's `check=` function has no OpenAPI form and is left
-out.
+further setup. A requirement's `check=` function and its roles have no OpenAPI
+form and are left out. `OIDC` is an `openIdConnect` scheme, pointing at the
+provider's discovery document.
 
 ## Testing
 
@@ -423,3 +526,8 @@ with TestClient(app) as client:
 
     client.mcp("tools/call", {"name": "admin_tool"}, headers={"x-api-key": ADMIN_KEY})
 ```
+
+An app that trusts a provider is tested against one that behaves the same:
+Keycloak runs in a container and issues real tokens, from a realm file loaded
+at startup. `examples/oidc.py` is an app set up for the realm in Oxbrook's own
+`tests/keycloak/`, with the commands to get a token from it.

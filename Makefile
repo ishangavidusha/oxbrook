@@ -67,14 +67,24 @@ ifeq ($(POSTGRES),require)
 export OXBROOK_REQUIRE_POSTGRES := 1
 endif
 
+# And for tests/oidc.py's second half, which runs against a real Keycloak: real
+# tokens, and a key rotated through its admin API. `make verify KEYCLOAK=`
+# accepts that gap; the first half runs regardless.
+KEYCLOAK ?= require
+ifeq ($(KEYCLOAK),require)
+export OXBROOK_REQUIRE_KEYCLOAK := 1
+endif
+
 verify: build-ft
 	@.venv/bin/python tests/durable.py --check
 	@.venv/bin/python tests/database.py --check
+	@.venv/bin/python tests/oidc.py --check
 	@for s in $(SUITES); do echo "== $$s"; $(SUITE_TIMEOUT) .venv/bin/python tests/$$s.py || exit 1; done
 
 verify-gil: build-gil
 	@.venv-gil/bin/python tests/durable.py --check
 	@.venv-gil/bin/python tests/database.py --check
+	@.venv-gil/bin/python tests/oidc.py --check
 	@for s in $(SUITES); do echo "== $$s"; $(SUITE_TIMEOUT) .venv-gil/bin/python tests/$$s.py || exit 1; done
 
 # Branch coverage of the Python half. COVERAGE_CORE=sysmon matters: handlers run
@@ -87,6 +97,7 @@ COVERAGE_MIN := 85
 coverage: build-ft
 	@.venv/bin/python tests/durable.py --check
 	@.venv/bin/python tests/database.py --check
+	@.venv/bin/python tests/oidc.py --check
 	@rm -f .coverage .coverage.* 2>/dev/null || true
 	@for s in $(SUITES); do echo "== $$s"; \
 		COVERAGE_FILE=$(CURDIR)/.coverage COVERAGE_CORE=sysmon $(SUITE_TIMEOUT) \

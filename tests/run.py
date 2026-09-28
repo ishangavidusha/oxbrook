@@ -30,14 +30,14 @@ SUITES = [
     "agents", "streams", "sse",
     "websocket", "hardening", "escaping", "wire", "failures", "plumbing", "injection",
     "durable", "database", "backpressure", "assignment", "composition", "lifespan", "cors",
-    "uploads", "origins", "auth", "cli", "files", "protocols", "cancellation", "verify",
+    "uploads", "origins", "auth", "oidc", "cli", "files", "protocols", "cancellation", "verify",
 ]
 
 #: What a built wheel is checked with, in `[tool.cibuildwheel]`. A subset,
 #: because this runs once per wheel on a CI runner: the dispatch path, the
 #: request path, the protections, the static mounts, cancellation, TLS and
-#: HTTP/2, and the end-to-end pass. Redis and PostgreSQL are not there, so
-#: `durable` and `database` are out.
+#: HTTP/2, and the end-to-end pass. Redis, PostgreSQL and Keycloak are not
+#: there, so `durable`, `database` and `oidc` are out.
 WHEEL = ["routing", "bodies", "hardening", "files", "cancellation", "protocols", "verify"]
 
 
@@ -65,8 +65,8 @@ def main() -> int:
     # tested none of it (I-019). Ask first: when Redis is required, this is
     # the difference between finding out now and finding out fifteen suites
     # in, and when it is not, the warning still reaches the top of the log.
-    # `database` is the same shape for PostgreSQL.
-    for gated in ("durable", "database"):
+    # `database` is the same shape for PostgreSQL, `oidc` for Keycloak.
+    for gated in ("durable", "database", "oidc"):
         if gated in chosen:
             probe = subprocess.run([sys.executable, str(HERE / f"{gated}.py"), "--check"],
                                    cwd=HERE.parent)
