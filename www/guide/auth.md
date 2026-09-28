@@ -431,10 +431,46 @@ session rather than a wrong credential: a browser sends the cookie by itself,
 and the person using it has no way to remove a stale one. `load` may return a
 `Principal` to set scopes.
 
-A session cookie is sent by the browser on any request to your site, including
-one a hostile page causes. `SameSite=Lax`, the default, stops most cross-site
-posts but not all; for a state-changing route authenticated only by a session,
-check `Origin` or use a token.
+A browser sends the session cookie on any request to your site, including one
+a hostile page causes it to make — the attack called cross-site request
+forgery. `SameSite=Lax`, the default, stops most cross-site posts but not all,
+so `SessionAuth` refuses, with `403`, a state-changing request (anything but
+`GET`, `HEAD` and `OPTIONS`) that cannot show it came from your own pages:
+
+1. **`Sec-Fetch-Site`**, which browsers set themselves: `same-origin` and
+   `none` (typed or bookmarked) pass; `same-site` and `cross-site` go on to
+   the next check.
+2. **`Origin`**: this server, as the client addressed it (or as a proxy says in
+   `X-Forwarded-Host`), or an origin in `trusted_origins`. `null` never passes.
+3. **Neither header** — an old browser, mostly — needs an `X-CSRF-Token`
+   header equal to the session's token.
+
+`trusted_origins` defaults to the app's [CORS](cors.md) origins: a page allowed
+to call the API with credentials is trusted to change things through it.
+
+```python
+web = SessionAuth(sessions, key="user_id", load=load_user,
+                  trusted_origins=["https://app.example.com"])
+```
+
+The token is for clients that send neither header. Put it where the page can
+read it, and send it back as a header:
+
+```python
+@app.get("/csrf")
+async def csrf(_: Request, session=Depends(sessions.load)):
+    return {"token": SessionAuth.csrf_token(session)}
+```
+
+```js
+await fetch("/notes", {method: "POST", headers: {"X-CSRF-Token": token}, body});
+```
+
+Only a session is checked this way. An API key or a bearer token is sent by
+code that chose to send it, not attached by the browser, so a request carrying
+one needs no origin. A route that writes the session without `SessionAuth`
+guarding it, such as `/login`, is not checked; `csrf=False` turns the check
+off for an app that does its own.
 
 ## Writing a scheme
 
@@ -488,8 +524,35 @@ async def feed(_: Request, ws, who=Depends(principal)):
 ```
 
 Browsers cannot set headers on a WebSocket, so a page authenticates with a
-cookie — `SessionAuth`. A token in the query string would end up in proxy logs,
-and no shipped scheme looks there.
+cookie — `SessionAuth` — or with a **ticket**. A long-lived token in the query
+string would end up in proxy logs and browser history, and no shipped scheme
+looks for one there. A ticket is safe there because it opens one socket, within
+thirty seconds, and nothing else:
+
+```python
+from oxbrook.auth import Tickets
+
+tickets = Tickets()
+
+@app.post("/ws-ticket", auth=users)                # an ordinary authenticated call
+async def ws_ticket(_: Request, who: Principal = Depends(principal)):
+    return {"ticket": tickets.issue(who)}
+
+@app.websocket("/feed", auth=tickets)
+async def feed(_: Request, ws, who: Principal = Depends(principal)):
+    ...                                            # who is the principal it was issued for
+```
+
+```js
+const {ticket} = await (await fetch("/ws-ticket", {method: "POST", headers})).json();
+const ws = new WebSocket(`wss://api.example.com/feed?ticket=${ticket}`);
+```
+
+A ticket is read only from a WebSocket upgrade, is removed the moment it is
+presented, and expires after `ttl` seconds. `auth=tickets | web` accepts either
+a ticket or a session cookie. Tickets are kept in the process that issued
+them, so behind a load balancer with several processes the socket has to
+reach the same one.
 
 The check runs once, when the socket opens; a connection can outlive the
 credential that opened it. An `authorize=` function runs after `auth=`, and can

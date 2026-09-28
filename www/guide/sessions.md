@@ -42,6 +42,15 @@ a stale cookie should get a fresh session, not a `400`.
 To make a session a way of logging in — a route that needs a signed-in user —
 use [`SessionAuth`](auth.md#sessions).
 
+## Cross-site requests
+
+A session cookie goes with every request the browser makes to your site,
+including ones another site's page causes. When [`SessionAuth`](auth.md#sessions)
+authenticates a route, a state-changing request has to show it came from your
+own pages — by the browser's `Sec-Fetch-Site` or `Origin` header, or a CSRF
+token — and is refused with `403` otherwise. A handler that reads the session
+without `SessionAuth` is not checked.
+
 ## Options
 
 ```python

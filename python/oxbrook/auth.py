@@ -37,6 +37,7 @@ and raising `Unauthenticated` when it carries one that is wrong. Subclass
 import base64
 import binascii
 import hashlib
+import hmac
 import inspect
 import itertools
 import logging
@@ -1218,6 +1219,43 @@ class Basic(Scheme):
         return {"type": "http", "scheme": "basic"}
 
 
+#: Methods that must not change state, so a request forged across sites with
+#: one of them gains the attacker nothing.
+_SAFE = frozenset({"GET", "HEAD", "OPTIONS"})
+
+#: Where `SessionAuth` keeps the session's CSRF token, and the header a
+#: request that needs it sends it in.
+CSRF_KEY = "_csrf"
+CSRF_HEADER = "x-csrf-token"
+
+
+def _authority(value: str, scheme: str | None) -> str:
+    """`host[:port]`, lowercased, without the port its scheme implies."""
+    value = value.strip().lower()
+    for default, port in (("http", ":80"), ("https", ":443")):
+        if (scheme is None or scheme == default) and value.endswith(port):
+            return value[: -len(port)]
+    return value
+
+
+def _same_origin(origin: str, request: Any) -> bool:
+    """Whether `Origin` names this server, as the client addressed it.
+
+    As the WebSocket origin check does: the `Host` header, or behind a proxy
+    that rewrote it, `X-Forwarded-Host`, which a page cannot set on a request
+    it forges without a preflight this server would refuse.
+    """
+    scheme, sep, authority = origin.strip().lower().partition("://")
+    if not sep or not authority:
+        return False  # `null`, from sandboxed frames and files
+    authority = _authority(authority, scheme)
+    for header in ("host", "x-forwarded-host"):
+        value = request.header(header)
+        if value and _authority(value.split(",")[0], None) == authority:
+            return True
+    return False
+
+
 class SessionAuth(Scheme):
     """The user a signed session cookie says is logged in.
 
@@ -1238,6 +1276,19 @@ class SessionAuth(Scheme):
     browser sends the cookie on its own, and the person using it cannot remove
     a stale one; refusing it outright would lock them out of pages that accept
     anonymous visitors, until the cookie expired.
+
+    **Cross-site requests are refused.** A browser sends the session cookie
+    with a request another site's page makes, so a request that changes state
+    — anything but GET, HEAD and OPTIONS — must show it came from this site:
+
+    1. `Sec-Fetch-Site: same-origin` or `none`, which browsers set themselves;
+    2. otherwise an `Origin` naming this server, or one of `trusted_origins`;
+    3. with neither header, an `X-CSRF-Token` header equal to the session's
+       token, from `csrf_token(session)`.
+
+    Anything else is `403`. `trusted_origins` defaults to the app's CORS
+    origins: a page allowed to call the API with credentials is trusted to.
+    `csrf=False` turns the check off, for an app that does its own.
     """
 
 
@@ -1248,23 +1299,88 @@ class SessionAuth(Scheme):
         key: str = "user_id",
         load: Callable[[Any], Any] | None = None,
         name: str = "session",
+        csrf: bool = True,
+        trusted_origins: Iterable[str] | None = None,
     ) -> None:
         if not callable(getattr(sessions, "decode", None)):
             raise TypeError("SessionAuth needs the app's Sessions(...)")
         if load is not None and not callable(load):
             raise TypeError(f"load= needs a function, got {type(load).__name__}")
+        if trusted_origins is not None:
+            from ._cors import check_origin
+
+            if isinstance(trusted_origins, str):
+                raise TypeError("trusted_origins is a list of origins, not one string")
+            trusted_origins = frozenset(
+                check_origin(o).lower() for o in trusted_origins if o != "*"
+            )
         self.sessions = sessions
         self.key = key
         self.load = load
         self.name = name
+        self.csrf = csrf
+        self.trusted_origins = trusted_origins
+
+    @staticmethod
+    def csrf_token(session: Any) -> str:
+        """The session's CSRF token, made on first use.
+
+        For a request that carries neither `Sec-Fetch-Site` nor `Origin` —
+        an old browser, mostly — to send as `X-CSRF-Token`. Render it into the
+        page, or return it from an endpoint the page's script reads.
+        """
+        token = session.get(CSRF_KEY)
+        if not isinstance(token, str) or not token:
+            token = secrets.token_urlsafe(32)
+            session[CSRF_KEY] = token
+        return token
+
+    def _trusted(self, request: Any) -> frozenset[str]:
+        if self.trusted_origins is not None:
+            return self.trusted_origins
+        cors = getattr(request.app, "cors", None)
+        if cors is None:
+            return frozenset()
+        return frozenset(o.lower() for o in cors.allow_origins if o != "*")
+
+    def _forged(self, request: Any, data: dict) -> str | None:
+        """Why this request might be forged by another site, or None."""
+        if request.method in _SAFE:
+            return None
+        site = (request.header("sec-fetch-site") or "").strip().lower()
+        if site in ("same-origin", "none"):
+            return None
+        origin = request.header("origin")
+        if origin is not None:
+            if _same_origin(origin, request) or origin.strip().lower() in self._trusted(request):
+                return None
+            return "cross-origin request"
+        if site:
+            # A browser that says cross-site and sends no Origin: nothing to
+            # compare, and no reason to believe it.
+            return f"{site} request without an origin"
+        expected = data.get(CSRF_KEY)
+        offered = request.header(CSRF_HEADER)
+        if (isinstance(expected, str) and expected and offered is not None
+                and hmac.compare_digest(offered.encode(), expected.encode())):
+            return None
+        return "no origin, and no CSRF token"
 
     async def authenticate(self, request: Any) -> Principal | None:
         raw = request.cookies.get(self.sessions.cookie)
         if not raw:
             return None
-        value = self.sessions.decode(raw).get(self.key)
+        data = self.sessions.decode(raw)
+        value = data.get(self.key)
         if value is None:
             return None
+        if self.csrf:
+            # Before `load`: a forged request should not cost a lookup.
+            reason = self._forged(request, data)
+            if reason is not None:
+                logger.warning("session request refused: %s", reason,
+                               extra={"scheme": self.name, "path": request.path})
+                raise Forbidden("cross-site request refused")
         if self.load is None:
             return Principal(subject=str(value), scheme=self.name)
         user = await _call(self.load, value)
@@ -1276,6 +1392,84 @@ class SessionAuth(Scheme):
 
     def openapi(self) -> dict[str, Any]:
         return {"type": "apiKey", "in": "cookie", "name": self.sessions.cookie}
+
+
+class Tickets(Scheme):
+    """Short-lived tickets for opening a WebSocket from a browser.
+
+        tickets = Tickets()
+
+        @app.post("/ws-ticket", auth=users)
+        async def ws_ticket(_: Request, who: Principal = Depends(principal)):
+            return {"ticket": tickets.issue(who)}
+
+        @app.websocket("/feed", auth=tickets)
+        async def feed(_: Request, ws, who: Principal = Depends(principal)): ...
+
+    A browser cannot set `Authorization` on a WebSocket, and a token in the
+    URL ends up in proxy logs and history. A ticket goes in the URL instead —
+    `new WebSocket("wss://.../feed?ticket=...")` — and is safe there because
+    it is good for one connection, within `ttl` seconds (30 by default), and
+    for nothing else. The socket's principal is the one it was issued for.
+
+    Only a WebSocket upgrade reads one: on any other request a ticket in the
+    query string is ignored, and no other scheme reads the query string.
+
+    Tickets are kept in the process that issued them. Behind a load balancer
+    with several processes, the socket must reach the process the ticket
+    came from.
+    """
+
+    def __init__(
+        self, *, ttl: float = 30, param: str = "ticket", name: str = "ticket",
+        limit: int = 100_000,
+    ) -> None:
+        if ttl <= 0:
+            raise ValueError("ttl is seconds, more than 0")
+        self.ttl = ttl
+        self.param = param
+        self.name = name
+        self.limit = limit
+        self._waiting: dict[str, tuple[float, Principal]] = {}
+
+    def issue(self, who: Principal) -> str:
+        """A new ticket for `who`, good for one socket within `ttl` seconds."""
+        if not isinstance(who, Principal):
+            raise TypeError("issue() takes the Principal the socket should have")
+        now = time.monotonic()
+        waiting = self._waiting
+        if len(waiting) >= self.limit:
+            try:
+                for key in [k for k, (until, _) in list(waiting.items()) if until < now]:
+                    waiting.pop(key, None)
+                # Still full of live ones: the oldest go first. A ticket is
+                # meant to be used within a second or two of being issued.
+                for key in list(itertools.islice(waiting, max(1, len(waiting) - self.limit + 1))):
+                    waiting.pop(key, None)
+            except RuntimeError:
+                pass  # another loop changed it mid-pass; the next issue trims
+        ticket = secrets.token_urlsafe(32)
+        waiting[ticket] = (now + self.ttl, who)
+        return ticket
+
+    async def authenticate(self, request: Any) -> Principal | None:
+        if (request.header("upgrade") or "").strip().lower() != "websocket":
+            return None
+        query = request.query
+        if not query:
+            return None
+        from urllib.parse import parse_qsl
+
+        offered = [v for k, v in parse_qsl(query, keep_blank_values=True) if k == self.param]
+        if not offered:
+            return None
+        # Popped, whatever happens next: single use means a second attempt
+        # with the same ticket fails even if the first was refused later.
+        entry = self._waiting.pop(offered[0], None) if len(offered) == 1 else None
+        if entry is None or entry[0] < time.monotonic():
+            logger.info("websocket ticket refused", extra={"scheme": self.name})
+            raise Unauthenticated("ticket invalid")
+        return entry[1]
 
 
 __all__ = [
@@ -1290,6 +1484,7 @@ __all__ = [
     "Requirement",
     "Scheme",
     "SessionAuth",
+    "Tickets",
     "Unauthenticated",
     "optional",
     "principal",

@@ -13,6 +13,7 @@
         - OIDC
         - Basic
         - SessionAuth
+        - Tickets
         - Unauthenticated
         - Forbidden
         - Requirement

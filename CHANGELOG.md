@@ -46,6 +46,16 @@ release does not; changes that break existing code are listed under
 - `JWT` and `OIDC` remember a verified token until it expires, so an RSA
   signature is checked once per token rather than once per request
   (`cache_size=`, `0` to turn it off).
+- **Breaking: `SessionAuth` refuses cross-site requests.** A state-changing
+  request authenticated by a session cookie must carry `Sec-Fetch-Site:
+  same-origin`, an `Origin` naming the server or one of `trusted_origins`
+  (the CORS origins by default), or, with neither header, an `X-CSRF-Token`
+  equal to `SessionAuth.csrf_token(session)`; anything else is `403`. A script
+  that posts with a session cookie and no `Origin` now needs the token.
+  `csrf=False` turns it off.
+- **WebSocket tickets**: `Tickets().issue(principal)` from an authenticated
+  call, then `?ticket=...` on the socket URL. Single use, thirty seconds, read
+  only from an upgrade: the one credential allowed in a URL.
 - **Agents see only what they may call, and can log in by themselves.**
   `tools/list` leaves out tools whose declaration would refuse the caller.
   `App(mcp_auth=...)` gives `/mcp` a declaration of its own. With an `OIDC`

@@ -49,6 +49,7 @@ from oxbrook.auth import (
     Principal,
     Scheme,
     SessionAuth,
+    Tickets,
     Unauthenticated,
     optional,
     principal,
@@ -157,6 +158,8 @@ async def load_user(value):
 
 
 web = SessionAuth(sessions, key="user_id", load=load_user)
+tickets = Tickets()
+short_tickets = Tickets(ttl=0.5, name="short_ticket")
 
 #: What app middleware saw, per path: the status, and who was calling.
 observed: dict[str, tuple] = {}
@@ -402,6 +405,32 @@ async def ws_admin(_: Request, sock):
 @app.websocket("/ws-open", auth=None)
 async def ws_open(_: Request, sock, who=Depends(principal)):
     await sock.send(json.dumps(describe(who)))
+
+
+# Tickets: issued by an authenticated call, spent by one socket.
+@app.post("/ticket", auth=keys)
+async def ticket(_: Request, who=Depends(principal)):
+    return {"ticket": tickets.issue(who)}
+
+
+@app.post("/ticket-short", auth=keys)
+async def ticket_short(_: Request, who=Depends(principal)):
+    return {"ticket": short_tickets.issue(who)}
+
+
+@app.websocket("/ws-ticket", auth=tickets)
+async def ws_ticket(_: Request, sock, who=Depends(principal)):
+    await sock.send(json.dumps(describe(who)))
+
+
+@app.websocket("/ws-ticket-short", auth=short_tickets)
+async def ws_ticket_short(_: Request, sock, who=Depends(principal)):
+    await sock.send(json.dumps(describe(who)))
+
+
+@app.get("/ticket-http", auth=tickets)
+async def ticket_http(_: Request):
+    return {"ok": True}
 
 
 # MCP: a tool is guarded by its route's declaration, with the agent's headers.
@@ -862,6 +891,144 @@ def sessions_authenticate(c: TestClient) -> None:
     check(r.json() == {"who": None}, f"a session for a deleted user gave {r.text}")
 
 
+def cross_site_session_requests_are_refused(_: TestClient) -> None:
+    """A state-changing request authenticated by a session cookie must show it
+    came from this site: Sec-Fetch-Site, else Origin, else the CSRF token."""
+    from oxbrook import CORS
+
+    ran: list[str] = []
+    loaded: list[str] = []
+
+    async def load(value):
+        loaded.append(value)
+        return users.get(str(value))
+
+    site = SessionAuth(sessions, key="user_id", load=load)
+    unguarded = SessionAuth(sessions, key="user_id", csrf=False, name="unguarded")
+    csrf_app = App(auth=site, cors=CORS(allow_origins=["https://app.example.com"],
+                                        allow_credentials=True))
+
+    @csrf_app.post("/change")
+    async def change(_: Request, who=Depends(principal)):
+        ran.append(who.subject)
+        return {"changed": True}
+
+    @csrf_app.get("/page")
+    async def page(_: Request):
+        return {"ok": True}
+
+    @csrf_app.get("/csrf")
+    async def csrf(_: Request, session=Depends(sessions.load)):
+        return {"token": SessionAuth.csrf_token(session)}
+
+    @csrf_app.post("/either", auth=keys | site)
+    async def either(_: Request, who=Depends(principal)):
+        return {"who": who.scheme}
+
+    @csrf_app.post("/unguarded", auth=unguarded)
+    async def unguarded_route(_: Request):
+        return {"ok": True}
+
+    csrf_app.middleware(sessions.middleware)
+    cookie = f"oxbrook_session={sessions.encode({'user_id': '7'})}"
+
+    with TestClient(csrf_app) as c:
+        own = f"http://{c.host}:{c.port}"
+
+        def post(headers, path="/change"):
+            return c.post(path, headers={"cookie": cookie, **headers}).status_code
+
+        cases = {
+            "Sec-Fetch-Site same-origin": ({"sec-fetch-site": "same-origin"}, 200),
+            "Sec-Fetch-Site none": ({"sec-fetch-site": "none"}, 200),
+            "cross-site, hostile origin": (
+                {"sec-fetch-site": "cross-site", "origin": "https://evil.example"}, 403),
+            "same-site sibling": (
+                {"sec-fetch-site": "same-site", "origin": "https://evil.example.com"}, 403),
+            "cross-site, trusted CORS origin": (
+                {"sec-fetch-site": "cross-site", "origin": "https://app.example.com"}, 200),
+            "cross-site with no origin": ({"sec-fetch-site": "cross-site"}, 403),
+            "own origin, no fetch metadata": ({"origin": own}, 200),
+            "hostile origin, no fetch metadata": ({"origin": "https://evil.example"}, 403),
+            "origin null": ({"origin": "null"}, 403),
+            "proxied host": ({"origin": "https://api.example.com",
+                              "x-forwarded-host": "api.example.com"}, 200),
+            "nothing at all": ({}, 403),
+            "a wrong token": ({"x-csrf-token": "guess"}, 403),
+        }
+        for label, (headers, expected) in cases.items():
+            status = post(headers)
+            check(status == expected, f"{label}: answered {status}, expected {expected}")
+        check(ran == ["7"] * sum(1 for _, e in cases.values() if e == 200),
+              f"the handler ran {len(ran)} times; refusals must not reach it")
+        # Refused before `load`: a forged request costs no lookup.
+        loaded.clear()
+        post({"origin": "https://evil.example"})
+        check(loaded == [], f"a forged request looked the user up: {loaded}")
+
+        # The token, for a client that sends neither header.
+        with httpx.Client(base_url=c.base_url, headers={"cookie": cookie}) as browser:
+            r = browser.get("/csrf")
+            token = r.json()["token"]
+            renewed = r.cookies.get(sessions.cookie) or cookie.split("=", 1)[1]
+            r = c.post("/change", headers={"cookie": f"{sessions.cookie}={renewed}",
+                                           "x-csrf-token": token})
+            check(r.status_code == 200, f"the session's own CSRF token answered {r.status_code}")
+            r = c.post("/change", headers={"cookie": cookie, "x-csrf-token": token})
+            check(r.status_code == 403, "a token was accepted for a session that has none")
+
+        check(c.get("/page", headers={"cookie": cookie, "origin": "https://evil.example"})
+              .status_code == 200, "a GET was refused for its origin")
+        # Only a session is checked: a key sent from anywhere is not a cookie
+        # a browser attached by itself.
+        r = c.post("/either", headers={"x-api-key": KEY, "origin": "https://evil.example"})
+        check(r.status_code == 200, f"an API key from another origin answered {r.status_code}")
+        check(post({"origin": "https://evil.example"}, "/unguarded") == 200,
+              "csrf=False still refused")
+        r = c.post("/change", headers={"cookie": cookie, "origin": "https://evil.example"})
+        check(r.json().get("detail") == "cross-site request refused",
+              f"a refusal said {r.text}")
+
+
+def websocket_tickets(c: TestClient) -> None:
+    upgrade = {
+        "connection": "upgrade", "upgrade": "websocket", "sec-websocket-version": "13",
+        "sec-websocket-key": "dGhlIHNhbXBsZSBub25jZQ==",
+    }
+
+    async def receive(path):
+        async with c.websocket(path) as sock:
+            return json.loads(await asyncio.wait_for(sock.recv(), 5))
+
+    ticket = c.post("/ticket", headers={"x-api-key": KEY}).json()["ticket"]
+    got = asyncio.run(receive(f"/ws-ticket?ticket={ticket}"))
+    check(got == {"subject": "ci", "scheme": "api_key", "scopes": ["notes:read"]},
+          f"a ticketed socket saw {got}")
+    r = httpx.get(f"{c.base_url}/ws-ticket?ticket={ticket}", headers=upgrade)
+    check(r.status_code == 401, f"a used ticket opened another socket: {r.status_code}")
+    check(c.post("/ticket").status_code == 401, "a ticket was issued to nobody")
+    r = httpx.get(f"{c.base_url}/ws-ticket?ticket=made-up", headers=upgrade)
+    check(r.status_code == 401, f"a made-up ticket answered {r.status_code}")
+    short = c.post("/ticket-short", headers={"x-api-key": KEY}).json()["ticket"]
+    time.sleep(0.6)
+    r = httpx.get(f"{c.base_url}/ws-ticket-short?ticket={short}", headers=upgrade)
+    check(r.status_code == 401, f"an expired ticket answered {r.status_code}")
+    a = c.post("/ticket", headers={"x-api-key": KEY}).json()["ticket"]
+    r = httpx.get(f"{c.base_url}/ws-ticket?ticket={a}&ticket={a}", headers=upgrade)
+    check(r.status_code == 401, f"a doubled ticket answered {r.status_code}")
+    # Only an upgrade reads one: a ticket in an ordinary URL is not a credential.
+    b = c.post("/ticket", headers={"x-api-key": KEY}).json()["ticket"]
+    r = c.get(f"/ticket-http?ticket={b}")
+    check(r.status_code == 401, f"a ticket authenticated plain HTTP: {r.status_code}")
+    check(asyncio.run(receive(f"/ws-ticket?ticket={b}"))["subject"] == "ci",
+          "a ticket seen on plain HTTP was used up there")
+    # Bounded, oldest first.
+    few = Tickets(limit=3)
+    issued = [few.issue(Principal(subject=str(i))) for i in range(5)]
+    check(len(few._waiting) <= 3 and issued[-1] in few._waiting,
+          f"a limit of 3 holds {len(few._waiting)}, newest kept: {issued[-1] in few._waiting}")
+
+
 def failures_are_errors_not_leaks(c: TestClient) -> None:
     r = c.get("/broken", headers={"x-broken": "raise"})
     check(r.status_code == 500 and "RESPONSELEAK" not in r.text,
@@ -1233,6 +1400,8 @@ def main() -> None:
             query_tokens_are_not_looked_for,
             basic_needs_tls,
             sessions_authenticate,
+            cross_site_session_requests_are_refused,
+            websocket_tickets,
             failures_are_errors_not_leaks,
             websockets_are_guarded,
             tool_calls_are_guarded,
