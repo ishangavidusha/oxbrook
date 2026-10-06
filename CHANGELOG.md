@@ -12,6 +12,13 @@ release does not; changes that break existing code are listed under
   in Rust after the handler has answered. Streams, static files, images and
   bodies under `min_size` (1 KiB) are sent as they are; a reply opts out with
   `Cache-Control: no-transform`. Off unless set.
+- **Health checks.** `App(health=Health())` serves `/livez` and `/readyz`.
+  Liveness fails only when a worker loop has left requests waiting longer
+  than `stall_after`, and is answered by the server even when every loop is
+  stuck. Readiness runs `@health.check` functions on every worker loop
+  against that loop's state, and fails while draining. `drain_delay` keeps
+  serving, unready, for a few seconds after a stop, so a load balancer
+  notices before the listener closes.
 
 ## 0.3.0 — 2026-10-06
 

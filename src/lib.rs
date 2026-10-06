@@ -14,6 +14,7 @@ mod compress;
 mod cors;
 mod files;
 mod form;
+mod health;
 mod origin;
 mod problem;
 mod queue;

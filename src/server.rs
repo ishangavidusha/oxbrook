@@ -31,6 +31,7 @@ use crate::cancel::{Abandon, Cancel};
 use crate::compress::{Compression, CompressionTuple, Plan, INLINE_LIMIT};
 use crate::cors::{Cors, CorsTuple};
 use crate::files::{Mount, MountTuple};
+use crate::health::{Health, HealthTuple};
 use crate::origin::{OriginsTuple, SocketOrigins};
 use crate::queue::{ConnectionLoad, Pending};
 use crate::responder::{Body, Reply};
@@ -53,6 +54,8 @@ struct State {
     cors: Option<Arc<Cors>>,
     /// None when the app did not ask for compression, which costs one branch.
     compression: Option<Arc<Compression>>,
+    /// Probes answered before routing; None when the app declared none.
+    health: Option<Health>,
     /// Checked on every upgrade, before the authorizer or handler.
     socket_origins: SocketOrigins,
     /// Static mounts, indexed by `RouteSpec::mount`. Shared, because a file
@@ -87,6 +90,7 @@ pub struct Server {
     tls: Option<TlsTuple>,
     http2: bool,
     compression: Option<CompressionTuple>,
+    health: Option<HealthTuple>,
 }
 
 /// (method, path, handler, params, is_websocket, authorizer, body mode,
@@ -105,7 +109,7 @@ type Route = (
 #[pymethods]
 impl Server {
     #[new]
-    /// Nineteen arguments, which clippy dislikes. This is the Python
+    /// Twenty arguments, which clippy dislikes. This is the Python
     /// constructor: the signature *is* the API, and collapsing it into a
     /// config object would move the same fields behind a dict that Python has
     /// to build on every server start.
@@ -130,6 +134,7 @@ impl Server {
         tls: Option<TlsTuple>,
         http2: bool,
         compression: Option<CompressionTuple>,
+        health: Option<HealthTuple>,
     ) -> Self {
         Self {
             host,
@@ -155,6 +160,7 @@ impl Server {
             tls,
             http2,
             compression,
+            health,
         }
     }
 
@@ -286,6 +292,7 @@ impl Server {
             max_message: self.max_message,
             cors,
             compression,
+            health: self.health.clone().map(Health::build),
             socket_origins: SocketOrigins::build(self.socket_origins.clone()),
             mounts,
         });
@@ -636,7 +643,41 @@ async fn serve_loop(listen: Listen, state: Arc<State>) -> Result<(), String> {
     // own limit.
     let connections = Arc::new(tokio::sync::Semaphore::new(max_connections));
 
+    // Asked to stop with a drain delay, the server keeps accepting until this
+    // passes, failing readiness meanwhile: a load balancer takes seconds to
+    // notice a backend is going, and a listener closed at once refuses the
+    // requests it sends in that time. A second request to stop ends it early.
+    let mut draining: Option<tokio::time::Instant> = None;
+    let stopping = |draining: &mut Option<tokio::time::Instant>| -> bool {
+        let delay = state
+            .health
+            .as_ref()
+            .map_or(Duration::ZERO, |h| h.drain_delay);
+        if let Some(health) = &state.health {
+            health.drain();
+        }
+        if draining.is_some() || delay.is_zero() {
+            return true;
+        }
+        if !quiet {
+            println!(
+                "Oxbrook draining for {:.1}s before it stops accepting",
+                delay.as_secs_f64()
+            );
+        }
+        *draining = Some(tokio::time::Instant::now() + delay);
+        false
+    };
+
     loop {
+        let deadline = draining;
+        let drained = async move {
+            match deadline {
+                Some(deadline) => tokio::time::sleep_until(deadline).await,
+                None => std::future::pending::<()>().await,
+            }
+        };
+        tokio::pin!(drained);
         // Taken before accepting, so at the limit the listener simply stops
         // accepting and the OS backlog absorbs the wait. That is the shape of
         // backpressure a client understands.
@@ -645,7 +686,8 @@ async fn serve_loop(listen: Listen, state: Arc<State>) -> Result<(), String> {
                 Ok(permit) => permit,
                 Err(_) => break,
             },
-            _ = stop.notified() => break,
+            _ = stop.notified() => if stopping(&mut draining) { break } else { continue },
+            _ = &mut drained => break,
         };
 
         tokio::select! {
@@ -679,14 +721,15 @@ async fn serve_loop(listen: Listen, state: Arc<State>) -> Result<(), String> {
                 } else {
                     std::future::pending::<()>().await
                 }
-            } => break,
+            } => if stopping(&mut draining) { break },
             _ = async {
                 match terminate.as_mut() {
                     Some(signals) => signals.recv().await,
                     None => std::future::pending::<()>().await,
                 }
-            } => break,
-            _ = stop.notified() => break,
+            } => if stopping(&mut draining) { break },
+            _ = stop.notified() => if stopping(&mut draining) { break },
+            _ = &mut drained => break,
         }
     }
     Ok(())
@@ -1149,6 +1192,14 @@ async fn handle(
     // HTTP requires HEAD wherever GET is allowed, so a miss on HEAD retries as
     // GET and the body is dropped from the reply below.
     let head = req.method() == Method::HEAD;
+    // Before routing and before any worker: liveness must answer when the
+    // loops cannot, and readiness must fail while draining whatever the
+    // routes say.
+    if let Some(health) = &state.health {
+        if let Some(answer) = health.answer(req.method(), req.uri().path(), &state.workers) {
+            return Ok(answer);
+        }
+    }
     // Read now: the headers are handed to Python whole further down.
     let accept_encoding = state
         .compression

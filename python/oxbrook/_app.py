@@ -12,6 +12,7 @@ from ._cors import CORS, check_origin
 from ._errors import DEFAULT_HANDLERS, HTTPError
 from ._errors import guard as guard_exceptions
 from ._files import StaticMount, build_mount
+from ._health import Health
 from ._lifecycle import Lifecycle, ServerHandle, State, check_hook
 from ._middleware import as_reply, make_gate
 from ._middleware import wrap as wrap_middleware
@@ -63,6 +64,7 @@ class App:
         worker_lifespan: Any = None,
         cors: CORS | None = None,
         compression: Compression | None = None,
+        health: Health | None = None,
         websocket_origins: Any = None,
         auth: Any = None,
         mcp_auth: Any = _auth.UNSET,
@@ -95,6 +97,10 @@ class App:
         brotli or gzip. Off unless set: a proxy in front often does this
         already. Applied in Rust after the handler answers; streamed replies
         and static files are sent as they are. See `Compression`.
+
+        `health` serves liveness and readiness probes, `/livez` and `/readyz`
+        by default, and can delay a stop so a load balancer notices first.
+        See `Health`.
 
         `websocket_origins` lists the other origins whose pages may open a
         WebSocket. Browsers do not apply CORS to sockets and send cookies with
@@ -154,6 +160,9 @@ class App:
                 f"compression must be a Compression(...), got {type(compression).__name__}"
             )
         self.compression = compression
+        if health is not None and not isinstance(health, Health):
+            raise TypeError(f"health must be a Health(...), got {type(health).__name__}")
+        self.health = health
         if websocket_origins is not None:
             if isinstance(websocket_origins, str):
                 raise TypeError("websocket_origins is a list of origins, not a single string")
@@ -742,6 +751,24 @@ class App:
                 """API documentation."""
                 return Response(page, content_type="text/html; charset=utf-8")
 
+    def _register_health(self) -> None:
+        """The readiness route that runs the checks, when there are any.
+
+        Registered after the OpenAPI document is built, so it is not in it.
+        Liveness, and readiness without checks, are answered by the server
+        before routing and have no route at all.
+        """
+        health = self.health
+        if health is None or health.ready is None or not health.checks:
+            return
+        if ("GET", health.ready) in {(r.method, r.path) for r in self.routes}:
+            return
+
+        @self.get(health.ready, auth=None)
+        async def readiness(request):
+            """Readiness, with every check on every worker loop."""
+            return await health.evaluate(request)
+
     def run(
         self,
         host: str = "127.0.0.1",
@@ -861,6 +888,7 @@ class App:
         # Docs first: the document is built from the routes registered so far,
         # so registering /mcp afterwards keeps it out of the OpenAPI paths.
         self._register_docs()
+        self._register_health()
         self._register_mcp()
         specs = [self._spec(r) for r in self.routes]
         lifecycle = Lifecycle(self)
@@ -884,6 +912,7 @@ class App:
             tls,
             bool(http2),
             None if self.compression is None else self.compression.as_spec(),
+            None if self.health is None else self.health.as_spec(),
         )
         return ServerHandle(core, lifecycle)
 

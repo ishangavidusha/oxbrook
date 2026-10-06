@@ -91,12 +91,17 @@ class State(Mapping):
 class WorkerContext:
     """What a worker loop hands to each request it serves."""
 
-    __slots__ = ("app", "manager", "state")
+    __slots__ = ("app", "lifecycle", "manager", "state")
 
-    def __init__(self, app: Any, state: State, manager: Any = None) -> None:
+    def __init__(
+        self, app: Any, state: State, manager: Any = None, lifecycle: Any = None
+    ) -> None:
         self.app = app
         self.state = state
         self.manager = manager
+        #: The server's `Lifecycle`, through which a readiness check reaches
+        #: the other loops of the same server.
+        self.lifecycle = lifecycle
 
 
 def check_hook(hook: Any, name: str) -> Any:
@@ -133,6 +138,12 @@ class Lifecycle:
     def __init__(self, app: Any) -> None:
         self.app = app
         self._process_manager: Any = None
+        #: (loop, WorkerContext) for every loop started, so readiness checks
+        #: can run on each of them. Appended from the loops' own threads, which
+        #: list.append is safe for. Never pruned: loops stop only after the
+        #: server has begun draining, and a draining server answers readiness
+        #: itself without reaching a check.
+        self.loops: list[tuple[asyncio.AbstractEventLoop, WorkerContext]] = []
 
     # ---- process ------------------------------------------------------------
 
@@ -172,7 +183,7 @@ class Lifecycle:
         base = self.app.state
         hook = self.app.worker_lifespan
         if hook is None:
-            return WorkerContext(self.app, base)
+            return self._serving(WorkerContext(self.app, base, lifecycle=self))
         manager = _manager(hook, self.app, "worker_lifespan")
         values = _as_mapping(await manager.__aenter__(), "worker_lifespan")
         clash = sorted(set(values) & set(base))
@@ -182,7 +193,13 @@ class Lifecycle:
                 f"worker_lifespan yielded {', '.join(map(repr, clash))}, which lifespan "
                 f"already yielded; each key must come from one of them"
             )
-        return WorkerContext(self.app, State({**base, **values}), manager)
+        return self._serving(
+            WorkerContext(self.app, State({**base, **values}), manager, lifecycle=self)
+        )
+
+    def _serving(self, context: WorkerContext) -> WorkerContext:
+        self.loops.append((asyncio.get_running_loop(), context))
+        return context
 
     async def stop_worker(self, context: WorkerContext) -> None:
         """Called by each worker thread after its loop has stopped serving."""

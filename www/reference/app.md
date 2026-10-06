@@ -4,6 +4,8 @@
 
 ::: oxbrook.Router
 
+::: oxbrook.Health
+
 ::: oxbrook.HTTPError
 
 ::: oxbrook.RequestValidationError

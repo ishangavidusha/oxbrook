@@ -275,3 +275,8 @@ of these before it ends the process regardless.
 requests rather than cutting them off. Set the orchestrator's own grace period —
 `terminationGracePeriodSeconds`, `docker stop --time` — longer than
 `shutdown_grace`, or it kills the process before the drain ends.
+
+Behind a load balancer, stopping to accept at once refuses the requests the
+balancer sends before it notices the instance is leaving.
+[`Health(drain_delay=...)`](guide/health.md#draining) keeps serving, and fails
+readiness, for a few seconds first.

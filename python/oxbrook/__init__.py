@@ -17,6 +17,7 @@ from ._cors import CORS
 from ._depends import Depends
 from ._errors import HTTPError
 from ._forms import Form, FormData, UploadFile
+from ._health import Health
 from ._logging import JsonFormatter, json_logging
 from ._middleware import Reply
 from ._redis import Consumer, Message, RedisBackend
@@ -51,6 +52,7 @@ __all__ = [
     "Form",
     "FormData",
     "HTTPError",
+    "Health",
     "JsonFormatter",
     "Message",
     "RedisBackend",

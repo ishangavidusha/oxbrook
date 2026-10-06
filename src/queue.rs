@@ -10,7 +10,9 @@
 //! already watches via `loop.add_reader`. Writing one byte to a socket is a
 //! syscall, not a Python call.
 
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 use crossbeam_queue::SegQueue;
 use pyo3::prelude::*;
@@ -73,6 +75,11 @@ pub struct WorkerQueue {
     /// True when a wake byte is in flight and not yet consumed. Collapses a
     /// burst of requests into a single wakeup.
     notified: AtomicBool,
+    /// When `notified` last went from false to true, in milliseconds since
+    /// `epoch()`, or `IDLE` while it is false. A wake that stays unconsumed is
+    /// a loop that is not getting back to its queue: a handler blocking it, or
+    /// a deadlock. The liveness probe reads this (D-058).
+    notified_at: AtomicU64,
     /// Write end of the wake pair. The read end lives in the `Drainer`.
     waker: WakeWriter,
     /// Requests handed to the worker and not yet finished. Counted alongside
@@ -95,6 +102,7 @@ impl WorkerQueue {
             wakeups: SegQueue::new(),
             cancels: SegQueue::new(),
             notified: AtomicBool::new(false),
+            notified_at: AtomicU64::new(IDLE),
             waker,
             inflight: AtomicUsize::new(0),
             limit,
@@ -171,7 +179,22 @@ impl WorkerQueue {
     /// Called by the drain callback before it starts popping, so that a
     /// producer racing with the drain always triggers a fresh wakeup.
     pub fn clear_notified(&self) {
+        // Before the flag, so a reader that sees the flag still set never
+        // pairs it with this episode's start once the episode is over.
+        self.notified_at.store(IDLE, Ordering::SeqCst);
         self.notified.store(false, Ordering::SeqCst);
+    }
+
+    /// How long a wake has gone unanswered, if one is waiting. From any
+    /// thread; two atomic loads.
+    pub fn waiting_for(&self) -> Option<Duration> {
+        if !self.notified.load(Ordering::SeqCst) {
+            return None;
+        }
+        // IDLE here is the instant between the flip and the store below:
+        // just woken, not stalled.
+        let at = self.notified_at.load(Ordering::SeqCst);
+        (at != IDLE).then(|| Duration::from_millis(millis().saturating_sub(at)))
     }
 
     /// Re-arm if anything arrived while we were draining. Both queues count:
@@ -187,7 +210,22 @@ impl WorkerQueue {
         // Only the thread that flips false->true writes the byte, so at most
         // one unread byte exists and the socket buffer can never fill.
         if !self.notified.swap(true, Ordering::SeqCst) {
+            // Only the flipping thread stamps it: a later push while the wake
+            // is still pending must not restart the clock, or a loop that is
+            // stuck under steady traffic would never look stuck.
+            self.notified_at.store(millis(), Ordering::SeqCst);
             self.waker.wake();
         }
     }
+}
+
+const IDLE: u64 = u64::MAX;
+
+fn epoch() -> Instant {
+    static EPOCH: OnceLock<Instant> = OnceLock::new();
+    *EPOCH.get_or_init(Instant::now)
+}
+
+fn millis() -> u64 {
+    epoch().elapsed().as_millis() as u64
 }

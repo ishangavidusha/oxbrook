@@ -50,7 +50,7 @@ C. The CI leg is what actually runs them.
 ## Tests
 
 ```bash
-make verify        # thirty-six suites, free-threaded
+make verify        # thirty-seven suites, free-threaded
 make verify-gil    # the same suites on the GIL build
 ```
 
