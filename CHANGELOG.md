@@ -5,7 +5,7 @@ top. While the version is `0.x`, a minor release may change the API and a patch
 release does not; changes that break existing code are listed under
 **Breaking** in the release that makes them.
 
-## Unreleased
+## 0.3.0 — 2026-10-06
 
 - **Authentication**, in `oxbrook.auth`. `auth=` on the app, a router, a route
   or a WebSocket declares who may call it, and the nearest declaration wins:
