@@ -46,6 +46,10 @@ oxbrook openapi main:app -o openapi.json
 - Response models, taken from the handler's return annotation
 - The first line of the handler's docstring as the summary, the rest as the
   description
+- The handler's name as the `operationId`. Where two handlers share a name,
+  such as `list_items` on two routers, each gets its method and path added
+  (`list_items_get_a_items`), because the specification requires the id to be
+  unique and a generated client names its methods after it
 - The `422` shape, so a client knows what a validation failure looks like
 
 Left out: WebSocket routes, because OpenAPI 3.1 has no vocabulary for them, and

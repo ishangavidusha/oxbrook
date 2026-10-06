@@ -5,7 +5,7 @@ import sys
 import threading
 
 import httpx
-from oxbrook import App, Request
+from oxbrook import App, Request, Router
 from pydantic import BaseModel, Field
 
 PORT = 8801
@@ -59,6 +59,22 @@ async def plain(_: Request):
     return {"ok": True}
 
 
+# Two routers, each with a handler named list_items: a normal layout, and an
+# invalid document while the handler's name alone was the operationId.
+def _items_router(prefix: str) -> Router:
+    router = Router(prefix=prefix)
+
+    @router.get("/items")
+    async def list_items(_: Request):
+        return []
+
+    return router
+
+
+app.include(_items_router("/a"))
+app.include(_items_router("/b"))
+
+
 def document_checks(doc: dict) -> list[str]:
     failures = []
 
@@ -89,6 +105,15 @@ def document_checks(doc: dict) -> list[str]:
     check("longer description" in get_user_op["description"].lower(),
           "description not taken from docstring")
     check(get_user_op["operationId"] == "get_user", "operationId wrong")
+
+    ids = [op["operationId"] for entry in paths.values() for op in entry.values()]
+    check(len(ids) == len(set(ids)), f"operationIds repeat: {sorted(ids)}")
+    check(
+        (paths["/a/items"]["get"]["operationId"], paths["/b/items"]["get"]["operationId"])
+        == ("list_items_get_a_items", "list_items_get_b_items"),
+        f"same-named handlers got {paths['/a/items']['get']['operationId']!r} and "
+        f"{paths['/b/items']['get']['operationId']!r}",
+    )
 
     by_name = {p["name"]: p for p in get_user_op["parameters"]}
     check(by_name["user_id"]["in"] == "path", "user_id not marked as a path parameter")

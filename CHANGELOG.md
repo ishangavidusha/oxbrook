@@ -170,6 +170,9 @@ release does not; changes that break existing code are listed under
 - **Breaking:** an exception raised in a dependency's teardown is now the
   request's outcome rather than a log line, and a dependency that yields twice
   is an error rather than a logged warning.
+- Two handlers with the same name, such as `list_items` on two routers, no
+  longer make the OpenAPI document invalid: each gets its method and path added
+  to its `operationId`. A handler whose name is unique keeps it as before.
 
 ## 0.2.0 — 2026-09-21
 

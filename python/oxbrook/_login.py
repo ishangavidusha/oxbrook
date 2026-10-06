@@ -487,8 +487,8 @@ class OAuthLogin:
             return await flow._logout(request)
 
         # Named after the provider: a handler's name is its OpenAPI
-        # operationId, which must be unique, and an app with Google and GitHub
-        # both would otherwise have two `login`s.
+        # operationId, and `google_login` reads better in a generated client
+        # than the `login_get_auth_google_login` two same-named ones would get.
         for fn, action in ((begin, "login"), (finish, "callback"), (end, "logout")):
             fn.__name__ = fn.__qualname__ = f"{self.name}_{action}"
         router.get(login)(begin)

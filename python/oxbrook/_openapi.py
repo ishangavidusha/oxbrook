@@ -30,6 +30,8 @@ _REF_TEMPLATE = "#/components/schemas/{model}"
 # wildcard syntax of its own.
 _WILDCARD = re.compile(r"\{\*([A-Za-z_][A-Za-z0-9_]*)\}")
 
+_NOT_IDENT = re.compile(r"[^A-Za-z0-9]+")
+
 # RFC 9457 problem details: what every error response is.
 _PROBLEM_SCHEMA = {
     "type": "object",
@@ -144,9 +146,9 @@ def _secure(
         op["responses"]["403"] = _problem("Forbidden", components)
 
 
-def _operation(route: RouteInfo, components: dict[str, Any]) -> dict[str, Any]:
+def _operation(route: RouteInfo, components: dict[str, Any], operation_id: str) -> dict[str, Any]:
     op: dict[str, Any] = {
-        "operationId": getattr(route.fn, "__name__", "handler"),
+        "operationId": operation_id,
         "responses": {},
     }
     if route.summary:
@@ -207,6 +209,36 @@ def _operation(route: RouteInfo, components: dict[str, Any]) -> dict[str, Any]:
     return op
 
 
+def _operation_ids(routes: list[RouteInfo]) -> dict[int, str]:
+    """An `operationId` per route, by `id(route)`, unique across the document.
+
+    A handler's name is its id wherever no other handler shares it. Two
+    `list_items` on two routers are a normal layout, and the specification
+    requires the id to be unique, so every route in a group that shares a name
+    gets the method and path added: both of them, not only the second, so that
+    which id a route has does not depend on the order things were included in.
+    """
+    named = [(route, getattr(route.fn, "__name__", "handler")) for route in routes]
+    counts: dict[str, int] = {}
+    for _, name in named:
+        counts[name] = counts.get(name, 0) + 1
+    ids: dict[int, str] = {}
+    taken = {name for name, count in counts.items() if count == 1}
+    for route, name in named:
+        if counts[name] == 1:
+            ids[id(route)] = name
+            continue
+        slug = _NOT_IDENT.sub("_", route.path).strip("_") or "root"
+        candidate = base = f"{name}_{route.method.lower()}_{slug}"
+        # `/a-b` and `/a_b` slug alike; the suffix is a last resort.
+        n = 2
+        while candidate in taken:
+            candidate, n = f"{base}_{n}", n + 1
+        taken.add(candidate)
+        ids[id(route)] = candidate
+    return ids
+
+
 def build(
     routes: list[RouteInfo],
     title: str,
@@ -217,14 +249,14 @@ def build(
     components: dict[str, Any] = {}
     paths: dict[str, Any] = {}
     schemes: dict[str, Any] = {}
+    # OpenAPI 3.1 has no vocabulary for WebSocket endpoints, so they are left
+    # out rather than described as ordinary GETs.
+    routes = [route for route in routes if not route.websocket]
+    ids = _operation_ids(routes)
 
     for route in routes:
-        # OpenAPI 3.1 has no vocabulary for WebSocket endpoints, so they are
-        # left out rather than described as ordinary GETs.
-        if route.websocket:
-            continue
         entry = paths.setdefault(_openapi_path(route.path), {})
-        operation = _operation(route, components)
+        operation = _operation(route, components, ids[id(route)])
         _secure(operation, route, default_auth, schemes, components)
         entry[route.method.lower()] = operation
 
