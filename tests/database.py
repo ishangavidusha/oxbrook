@@ -108,13 +108,25 @@ def fresh(label: str) -> str:
 created: list[str] = []
 
 
+def alembic_env(name: str) -> dict[str, str]:
+    # Under `make coverage` this process is measured with COVERAGE_CORE=sysmon,
+    # and coverage follows it into alembic through COVERAGE_PROCESS_CONFIG. On
+    # Linux, CPython 3.14.8t with sys.monitoring active and greenlet loaded
+    # (SQLAlchemy's async layer) hangs at interpreter exit, after the migration
+    # has finished; 3.14.7t does not. Alembic never imports oxbrook, so there is
+    # nothing to measure there: leave it unmeasured.
+    env = {**os.environ, "DATABASE_URL": database_url(name)}
+    env.pop("COVERAGE_PROCESS_CONFIG", None)
+    return env
+
+
 def alembic(name: str, *args: str) -> subprocess.CompletedProcess:
     # The documented command, run the way a deploy step runs it: its own
     # process, in the example's directory, configured by DATABASE_URL.
     return subprocess.run(
         [sys.executable, "-m", "alembic", *args],
         cwd=EXAMPLE,
-        env={**os.environ, "DATABASE_URL": database_url(name)},
+        env=alembic_env(name),
         capture_output=True,
         text=True,
         timeout=60,
@@ -184,7 +196,7 @@ def replicas_migrating_at_once_do_not_race() -> None:
     # in env.py both see an empty database and one fails creating the table
     # the other just created.
     name = fresh("race")
-    env = {**os.environ, "DATABASE_URL": database_url(name)}
+    env = alembic_env(name)
     runs = [
         subprocess.Popen(
             [sys.executable, "-m", "alembic", "upgrade", "head"],
