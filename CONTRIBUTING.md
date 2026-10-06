@@ -255,7 +255,9 @@ To cut a release:
    ```
 
    The tag must match `Cargo.toml`. The workflow builds and checks again, then
-   waits on the `pypi` environment before uploading.
+   uploads through the `pypi` environment. Pushing the tag publishes: the
+   environment has no required reviewer, so the dry run in step 2 is the gate.
+   Tag the release commit by name if `main` has moved past it.
 
 A version on PyPI can never be uploaded again, even after it is deleted, so a
 broken release is fixed with a new patch version.
