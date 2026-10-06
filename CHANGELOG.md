@@ -5,6 +5,14 @@ top. While the version is `0.x`, a minor release may change the API and a patch
 release does not; changes that break existing code are listed under
 **Breaking** in the release that makes them.
 
+## Unreleased
+
+- **Response compression.** `App(compression=Compression())` compresses
+  whole replies with brotli or gzip, as the client's `Accept-Encoding` asks,
+  in Rust after the handler has answered. Streams, static files, images and
+  bodies under `min_size` (1 KiB) are sent as they are; a reply opts out with
+  `Cache-Control: no-transform`. Off unless set.
+
 ## 0.3.0 — 2026-10-06
 
 - **Authentication**, in `oxbrook.auth`. `auth=` on the app, a router, a route

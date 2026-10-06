@@ -7,6 +7,7 @@ from typing import Any
 from . import _auth, _openapi
 from ._auth import UNSET
 from ._blocking import Pool as BlockingPool
+from ._compression import Compression
 from ._cors import CORS, check_origin
 from ._errors import DEFAULT_HANDLERS, HTTPError
 from ._errors import guard as guard_exceptions
@@ -61,6 +62,7 @@ class App:
         lifespan: Any = None,
         worker_lifespan: Any = None,
         cors: CORS | None = None,
+        compression: Compression | None = None,
         websocket_origins: Any = None,
         auth: Any = None,
         mcp_auth: Any = _auth.UNSET,
@@ -88,6 +90,11 @@ class App:
 
         `cors` lets pages on other origins call the app from a browser. Applied
         in Rust, to every response including the ones no handler produced.
+
+        `compression` compresses replies for clients that accept it, with
+        brotli or gzip. Off unless set: a proxy in front often does this
+        already. Applied in Rust after the handler answers; streamed replies
+        and static files are sent as they are. See `Compression`.
 
         `websocket_origins` lists the other origins whose pages may open a
         WebSocket. Browsers do not apply CORS to sockets and send cookies with
@@ -142,6 +149,11 @@ class App:
         if cors is not None and not isinstance(cors, CORS):
             raise TypeError(f"cors must be a CORS(...), got {type(cors).__name__}")
         self.cors = cors
+        if compression is not None and not isinstance(compression, Compression):
+            raise TypeError(
+                f"compression must be a Compression(...), got {type(compression).__name__}"
+            )
+        self.compression = compression
         if websocket_origins is not None:
             if isinstance(websocket_origins, str):
                 raise TypeError("websocket_origins is a list of origins, not a single string")
@@ -871,6 +883,7 @@ class App:
             [mount.as_spec() for mount in self.mounts],
             tls,
             bool(http2),
+            None if self.compression is None else self.compression.as_spec(),
         )
         return ServerHandle(core, lifecycle)
 

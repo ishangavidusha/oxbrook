@@ -30,7 +30,8 @@ SUITES = [
     "agents", "streams", "sse",
     "websocket", "hardening", "escaping", "wire", "failures", "plumbing", "injection",
     "durable", "database", "backpressure", "assignment", "composition", "lifespan", "cors",
-    "uploads", "origins", "auth", "oidc", "login", "cli", "files", "protocols", "cancellation",
+    "uploads", "origins", "auth", "oidc", "login", "cli", "files", "compressed", "protocols",
+    "cancellation",
     "verify",
 ]
 

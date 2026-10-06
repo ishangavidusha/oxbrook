@@ -9,8 +9,9 @@ use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Full, StreamBody};
 use hyper::body::{Body as HttpBody, Frame, Incoming};
 use hyper::header::{
-    HeaderValue, ALLOW, CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, EXPECT, HOST, RETRY_AFTER,
-    SEC_WEBSOCKET_ACCEPT, SEC_WEBSOCKET_KEY, SEC_WEBSOCKET_VERSION, UPGRADE,
+    HeaderValue, ACCEPT_ENCODING, ALLOW, CONNECTION, CONTENT_ENCODING, CONTENT_LENGTH,
+    CONTENT_TYPE, EXPECT, HOST, RETRY_AFTER, SEC_WEBSOCKET_ACCEPT, SEC_WEBSOCKET_KEY,
+    SEC_WEBSOCKET_VERSION, UPGRADE,
 };
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
@@ -27,6 +28,7 @@ use tokio_stream::StreamExt;
 
 use crate::body::BodyShared;
 use crate::cancel::{Abandon, Cancel};
+use crate::compress::{Compression, CompressionTuple, Plan, INLINE_LIMIT};
 use crate::cors::{Cors, CorsTuple};
 use crate::files::{Mount, MountTuple};
 use crate::origin::{OriginsTuple, SocketOrigins};
@@ -49,6 +51,8 @@ struct State {
     max_message: usize,
     /// None when the app configured no CORS, which costs one branch.
     cors: Option<Arc<Cors>>,
+    /// None when the app did not ask for compression, which costs one branch.
+    compression: Option<Arc<Compression>>,
     /// Checked on every upgrade, before the authorizer or handler.
     socket_origins: SocketOrigins,
     /// Static mounts, indexed by `RouteSpec::mount`. Shared, because a file
@@ -82,6 +86,7 @@ pub struct Server {
     /// Certificate and key paths; None serves plain HTTP.
     tls: Option<TlsTuple>,
     http2: bool,
+    compression: Option<CompressionTuple>,
 }
 
 /// (method, path, handler, params, is_websocket, authorizer, body mode,
@@ -100,7 +105,7 @@ type Route = (
 #[pymethods]
 impl Server {
     #[new]
-    /// Eighteen arguments, which clippy dislikes. This is the Python
+    /// Nineteen arguments, which clippy dislikes. This is the Python
     /// constructor: the signature *is* the API, and collapsing it into a
     /// config object would move the same fields behind a dict that Python has
     /// to build on every server start.
@@ -124,6 +129,7 @@ impl Server {
         mounts: Vec<MountTuple>,
         tls: Option<TlsTuple>,
         http2: bool,
+        compression: Option<CompressionTuple>,
     ) -> Self {
         Self {
             host,
@@ -148,6 +154,7 @@ impl Server {
             mounts,
             tls,
             http2,
+            compression,
         }
     }
 
@@ -222,6 +229,13 @@ impl Server {
             .transpose()
             .map_err(PyValueError::new_err)?
             .map(Arc::new);
+        let compression = self
+            .compression
+            .clone()
+            .map(Compression::build)
+            .transpose()
+            .map_err(PyValueError::new_err)?
+            .map(Arc::new);
 
         // Built before the workers, because each Responder needs a handle to
         // spawn its disconnect watcher on.
@@ -271,6 +285,7 @@ impl Server {
             max_body: self.max_body,
             max_message: self.max_message,
             cors,
+            compression,
             socket_origins: SocketOrigins::build(self.socket_origins.clone()),
             mounts,
         });
@@ -680,6 +695,19 @@ async fn serve_loop(listen: Listen, state: Arc<State>) -> Result<(), String> {
 /// Responses are either a complete buffer or a stream of chunks, so every
 /// helper hands back the same boxed body type.
 pub(crate) type Out = BoxBody<Bytes, Infallible>;
+
+/// The headers a compression plan implies, on a reply already built.
+fn encoded(plan: &Plan, headers: &mut hyper::HeaderMap) {
+    match plan {
+        Plan::Skip => {}
+        Plan::Identity => crate::compress::vary(headers),
+        Plan::Encode(encoding) => {
+            headers.insert(CONTENT_ENCODING, HeaderValue::from_static(encoding.token()));
+            crate::compress::vary(headers);
+            crate::compress::weaken_etag(headers);
+        }
+    }
+}
 
 pub(crate) fn full(bytes: Bytes) -> Out {
     Full::new(bytes).boxed()
@@ -1121,6 +1149,11 @@ async fn handle(
     // HTTP requires HEAD wherever GET is allowed, so a miss on HEAD retries as
     // GET and the body is dropped from the reply below.
     let head = req.method() == Method::HEAD;
+    // Read now: the headers are handed to Python whole further down.
+    let accept_encoding = state
+        .compression
+        .as_ref()
+        .and_then(|_| req.headers().get(ACCEPT_ENCODING).cloned());
     let found = state
         .router
         .find(req.method().as_str(), req.uri().path(), req.uri().query());
@@ -1300,6 +1333,16 @@ async fn handle(
             }
             // A HEAD reply carries the headers a GET would, including the
             // length it would have had, but no body.
+            let plan = match (&state.compression, &reply.body) {
+                (Some(compression), Body::Full(bytes)) => compression.plan(
+                    accept_encoding.as_ref(),
+                    reply.status,
+                    &reply.content_type,
+                    &reply.headers,
+                    bytes.len(),
+                ),
+                _ => Plan::Skip,
+            };
             if head {
                 let length = match &reply.body {
                     Body::Full(bytes) => bytes.len(),
@@ -1307,18 +1350,51 @@ async fn handle(
                 };
                 let mut builder = Response::builder()
                     .status(reply.status)
-                    .header(CONTENT_TYPE, reply.content_type)
-                    .header(CONTENT_LENGTH, length);
+                    .header(CONTENT_TYPE, reply.content_type);
+                // The length a GET would have is the compressed one, which is
+                // not worth compressing the body to learn: RFC 9110 lets a
+                // HEAD leave it out.
+                if !matches!(plan, Plan::Encode(_)) {
+                    builder = builder.header(CONTENT_LENGTH, length);
+                }
                 for (name, value) in &reply.headers {
                     builder = builder.header(name.as_str(), value.as_str());
                 }
-                return Ok(builder.body(full(Bytes::new())).unwrap_or_else(|_| {
-                    plain(StatusCode::INTERNAL_SERVER_ERROR, "bad response header")
-                }));
+                return Ok(match builder.body(full(Bytes::new())) {
+                    Ok(mut response) => {
+                        encoded(&plan, response.headers_mut());
+                        response
+                    }
+                    Err(_) => plain(StatusCode::INTERNAL_SERVER_ERROR, "bad response header"),
+                });
             }
 
             let body = match reply.body {
-                Body::Full(bytes) => full(Bytes::from(bytes)),
+                Body::Full(bytes) => match (&plan, &state.compression) {
+                    (Plan::Encode(encoding), Some(compression)) => {
+                        let encoding = *encoding;
+                        let compressed = if bytes.len() < INLINE_LIMIT {
+                            compression.encode(encoding, &bytes)
+                        } else {
+                            let compression = compression.clone();
+                            match tokio::task::spawn_blocking(move || {
+                                compression.encode(encoding, &bytes)
+                            })
+                            .await
+                            {
+                                Ok(compressed) => compressed,
+                                Err(_) => {
+                                    return Ok(plain(
+                                        StatusCode::INTERNAL_SERVER_ERROR,
+                                        "could not compress the response",
+                                    ))
+                                }
+                            }
+                        };
+                        full(Bytes::from(compressed))
+                    }
+                    _ => full(Bytes::from(bytes)),
+                },
                 // Headers go out now; chunks follow as the handler produces
                 // them, which is what makes SSE possible. `guard` is moved into
                 // the closure so it lives exactly as long as the body, and its
@@ -1339,9 +1415,13 @@ async fn handle(
             }
             // A handler-supplied header could be malformed; fall back rather
             // than kill the connection.
-            Ok(builder.body(body).unwrap_or_else(|_| {
-                plain(StatusCode::INTERNAL_SERVER_ERROR, "bad response header")
-            }))
+            Ok(match builder.body(body) {
+                Ok(mut response) => {
+                    encoded(&plan, response.headers_mut());
+                    response
+                }
+                Err(_) => plain(StatusCode::INTERNAL_SERVER_ERROR, "bad response header"),
+            })
         }
         Err(_) => Ok(plain(
             StatusCode::INTERNAL_SERVER_ERROR,

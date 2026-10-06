@@ -105,6 +105,7 @@ nav:
       - guide/logging.md
       - guide/errors.md
       - guide/cors.md
+      - guide/compression.md
       - guide/testing.md
   - Streams:
       - streams/topics.md

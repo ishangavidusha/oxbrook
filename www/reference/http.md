@@ -17,3 +17,5 @@
 ::: oxbrook.BodyStream
 
 ::: oxbrook.CORS
+
+::: oxbrook.Compression

@@ -10,6 +10,7 @@
 
 mod body;
 mod cancel;
+mod compress;
 mod cors;
 mod files;
 mod form;

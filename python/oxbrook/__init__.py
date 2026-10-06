@@ -11,6 +11,7 @@ from importlib.metadata import version as _version
 from ._app import App
 from ._bodies import BodyStream
 from ._capabilities import Capability, CapabilityError
+from ._compression import Compression
 from ._core import Request
 from ._cors import CORS
 from ._depends import Depends
@@ -43,6 +44,7 @@ __all__ = [
     "BodyStream",
     "Capability",
     "CapabilityError",
+    "Compression",
     "Consumer",
     "Depends",
     "Event",

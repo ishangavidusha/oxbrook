@@ -48,7 +48,7 @@ succeed is answered before a Python worker is woken. Pydantic request and
 response bodies, forms and multipart uploads parsed in Rust, request bodies
 larger than memory with backpressure, static files, routers, middleware,
 exception handlers, dependency injection with teardown, lifespans, signed
-cookie sessions, CORS, and OpenAPI 3.1 from the same route metadata the router
+cookie sessions, CORS, response compression, and OpenAPI 3.1 from the same route metadata the router
 uses. Authentication with one `auth=` declaration — API keys, bearer tokens,
 JWT, OpenID Connect providers, Basic, sessions or a scheme of your own —
 enforced before the body is read, on HTTP, WebSockets and agent tool calls

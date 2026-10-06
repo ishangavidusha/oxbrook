@@ -126,7 +126,7 @@ jobs:
           uv venv --python ${{ matrix.python }} ${{ matrix.venv }}
           uv pip install --python ${{ matrix.venv }}/bin/python \
             maturin "httpx[http2]" cryptography openapi-spec-validator websockets redis mcp coverage pydantic \
-            asyncpg "sqlalchemy[asyncio]" alembic "pyjwt[crypto]"
+            asyncpg "sqlalchemy[asyncio]" alembic "pyjwt[crypto]" brotlicffi
 
       - name: Confirm the interpreter is the one asked for
         run: |
@@ -194,7 +194,7 @@ jobs:
         run: |
           uv venv --python ${{ matrix.python }} .venv
           uv pip install --python .venv/Scripts/python.exe `
-            maturin "httpx[http2]" cryptography openapi-spec-validator websockets redis mcp pydantic "pyjwt[crypto]"
+            maturin "httpx[http2]" cryptography openapi-spec-validator websockets redis mcp pydantic "pyjwt[crypto]" brotlicffi
 
       - name: Confirm the interpreter is the one asked for
         run: |

@@ -39,6 +39,10 @@ crossbeam-queue = "0.3"
 serde_json = "1"
 time = { version = "0.3", default-features = false, features = ["parsing", "formatting", "alloc", "macros"] }
 uuid = { version = "1", default-features = false }
+# Response compression (D-057). Both pure Rust, so no C toolchain in the wheel
+# builds; zlib-rs is the faster of flate2's pure-Rust backends.
+flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
+brotli = { version = "8", default-features = false, features = ["std"] }
 
 [profile.release]
 lto = "fat"
