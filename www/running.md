@@ -36,6 +36,11 @@ uses.
 The command also takes `--access-log`, to log every request, and
 `--log-level`, which sets the level of Oxbrook's own loggers.
 
+Every option can be set in the environment instead, as `OXBROOK_` and its
+name — `OXBROOK_PORT=8080` — and `PORT` is followed where a platform sets it;
+a flag wins over both. `--env-file .env` reads variables from a file first.
+See [Configuration](guide/configuration.md).
+
 ## Reloading during development
 
 ```bash
@@ -67,12 +72,14 @@ process to do it.
 oxbrook routes main:app          # every route, including the built-in ones
 oxbrook routes main:app --json
 oxbrook openapi main:app -o openapi.json
+oxbrook settings main:app        # the variables its Settings read, and what is missing
 ```
 
 `routes` marks tools, WebSockets, streaming bodies, forms and router middleware,
 and lists `/openapi.json`, `/docs` and `/mcp` as the server would serve them.
 `openapi` writes the document without starting a server, for generating clients
-in CI.
+in CI. `settings` exits with status 1 when a variable the app needs is missing
+or invalid; see [Configuration](guide/configuration.md#checking-what-is-needed).
 
 For an app built by a function, pass `--factory`: `oxbrook run main:create_app
 --factory`. A target that cannot be loaded exits with status 2 and says why;

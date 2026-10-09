@@ -31,7 +31,7 @@ SUITES = [
     "websocket", "hardening", "escaping", "wire", "failures", "plumbing", "injection",
     "durable", "database", "backpressure", "assignment", "composition", "lifespan", "cors",
     "uploads", "origins", "auth", "oidc", "login", "cli", "files", "compressed", "health",
-    "metrics", "limits", "protocols", "cancellation",
+    "metrics", "limits", "settings", "protocols", "cancellation",
     "verify",
 ]
 

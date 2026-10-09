@@ -33,6 +33,13 @@ release does not; changes that break existing code are listed under
 - **The client's address.** `request.client` is the caller's IP, and
   `App(trusted_proxies=...)` says which peers' `X-Forwarded-For` to believe:
   a list of networks, or how many proxies stand in front.
+- **Configuration.** `oxbrook.Settings` is a pydantic model read from
+  environment variables, with a prefix, secrets files, and every missing or
+  invalid variable reported at once by name, never by value. Every
+  `oxbrook run` option reads `OXBROOK_<OPTION>`, and `PORT` is followed;
+  `--env-file` loads a `.env` for development and is re-read on reload.
+  `oxbrook settings main:app` lists what an app needs and exits 1 if the
+  environment does not provide it.
 - **Fixed:** Ctrl-C stopped a server with several worker loops only after the
   whole `shutdown_grace`, and a Ctrl-C sent just as the server started was
   ignored. Both now stop at once.

@@ -27,6 +27,7 @@ from ._response import Response
 from ._routers import Router
 from ._schema import RequestValidationError
 from ._sessions import Session, Sessions
+from ._settings import Settings, SettingsError
 from ._sse import SSE, Event
 from ._streams import BLOCK, DROP_NEWEST, DROP_OLDEST, ERROR, Subscription, Topic, TopicFull
 from ._websocket import WebSocket, WebSocketClosed
@@ -67,6 +68,8 @@ __all__ = [
     "Router",
     "Session",
     "Sessions",
+    "Settings",
+    "SettingsError",
     "Subscription",
     "Topic",
     "TopicFull",

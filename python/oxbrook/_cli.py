@@ -4,10 +4,17 @@
     oxbrook run main:app --reload         restart when a file changes
     oxbrook routes main:app               list every route
     oxbrook openapi main:app              print the OpenAPI document
+    oxbrook settings main:app             list the settings it reads, and what is missing
 
 A target is `module:attribute`, imported with the working directory (or
 `--app-dir`) on the path. With no attribute, `app` is used. `--factory` calls
 the attribute and serves what it returns.
+
+Every `run` option can also be set in the environment, as `OXBROOK_` and the
+option's name: `OXBROOK_PORT=8080`, `OXBROOK_ACCESS_LOG=true`. A flag wins over
+the variable. `PORT` is read too, after `OXBROOK_PORT`, since that is what
+hosting platforms set. `--env-file` reads variables from a file first, without
+overriding any already set.
 
 **Reload restarts the process** rather than re-importing modules inside it. The
 Rust extension cannot be reloaded in a running interpreter, and a fresh process
@@ -50,6 +57,128 @@ IGNORED_DIRS = frozenset({
 
 class TargetError(Exception):
     """The target could not be turned into an App. The message is the whole story."""
+
+
+class UsageError(Exception):
+    """An option or its environment variable is wrong. The message says which."""
+
+
+# ---------------------------------------------------------------------------
+# the environment
+# ---------------------------------------------------------------------------
+def _flag(text: str) -> bool:
+    lowered = text.strip().lower()
+    if lowered in ("1", "true", "yes", "on"):
+        return True
+    if lowered in ("0", "false", "no", "off", ""):
+        return False
+    raise ValueError
+
+
+#: `run` options that can come from the environment: the argument's dest, how
+#: to read the text, and the default when neither a flag nor a variable says.
+#: The variable is `OXBROOK_` and the dest in capitals.
+def _run_options() -> dict[str, tuple[Any, Any, str]]:
+    from . import _app
+
+    return {
+        "host": (str, "127.0.0.1", "text"),
+        "port": (int, 8000, "a whole number"),
+        "workers": (int, None, "a whole number"),
+        "reload": (_flag, False, "true or false"),
+        "tls_cert": (str, None, "text"),
+        "tls_key": (str, None, "text"),
+        "http2": (_flag, True, "true or false"),
+        "access_log": (_flag, False, "true or false"),
+        "log_level": (str.lower, "info", "text"),
+        "max_concurrency": (int, _app.DEFAULT_MAX_CONCURRENCY, "a whole number"),
+        "max_connections": (int, _app.DEFAULT_MAX_CONNECTIONS, "a whole number"),
+        "max_body": (int, _app.DEFAULT_MAX_BODY, "a whole number"),
+        "max_message": (int, _app.DEFAULT_MAX_MESSAGE, "a whole number"),
+        "request_timeout": (float, _app.DEFAULT_REQUEST_TIMEOUT, "a number"),
+        "shutdown_grace": (float, None, "a number"),
+    }
+
+
+LOG_LEVELS = ("debug", "info", "warning", "error")
+
+
+def resolve_options(args: argparse.Namespace) -> None:
+    """Fill each `run` option the command line left unset: from its variable,
+    then, for the port, from `PORT`, then from the default."""
+    for dest, (read, default, kind) in _run_options().items():
+        if getattr(args, dest) is not None:
+            continue
+        variable = f"OXBROOK_{dest.upper()}"
+        names = [variable, "PORT"] if dest == "port" else [variable]
+        value = default
+        for name in names:
+            text = os.environ.get(name)
+            # Set but empty is unset: `PORT=` in a compose file means nothing.
+            if text is None or not text.strip():
+                continue
+            try:
+                value = read(text.strip())
+            except ValueError:
+                # The variable's name, never its value: it may be a secret
+                # that was set in the wrong place.
+                raise UsageError(f"{name} must be {kind}") from None
+            break
+        setattr(args, dest, value)
+    if args.log_level not in LOG_LEVELS:
+        raise UsageError(f"the log level must be one of {', '.join(LOG_LEVELS)}, "
+                         f"not {args.log_level!r}")
+
+
+def read_env_file(path: str | os.PathLike[str]) -> dict[str, str]:
+    """`NAME=value` lines, as `.env` files write them.
+
+    Blank lines and `#` comments are skipped, and `export ` before a name is
+    allowed. A value in single quotes is taken as written; in double quotes,
+    `\\n`, `\\t`, `\\"` and `\\\\` are escapes; unquoted, it ends at ` #` and
+    surrounding space is dropped. Nothing is interpolated.
+    """
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except OSError as exc:
+        raise UsageError(f"cannot read the env file {os.fspath(path)!r}: "
+                         f"{exc.strerror or exc}") from None
+    values: dict[str, str] = {}
+    for number, line in enumerate(text.splitlines(), 1):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):].lstrip()
+        name, equals, value = line.partition("=")
+        name = name.strip()
+        if not equals or not name.isidentifier():
+            raise UsageError(f"{os.fspath(path)}, line {number}: expected NAME=value")
+        value = value.strip()
+        if value[:1] in ("'", '"'):
+            quote = value[0]
+            end = value.find(quote, 1)
+            while quote == '"' and end > 0 and value[end - 1] == "\\":
+                end = value.find(quote, end + 1)
+            if end < 0:
+                raise UsageError(f"{os.fspath(path)}, line {number}: "
+                                 f"the value of {name} has no closing {quote}")
+            inner = value[1:end]
+            if quote == '"':
+                inner = (inner.replace("\\\\", "\0").replace("\\n", "\n")
+                         .replace("\\t", "\t").replace('\\"', '"').replace("\0", "\\"))
+            value = inner
+        else:
+            value = value.split(" #", 1)[0].rstrip()
+        values[name] = value
+    return values
+
+
+def load_env_file(path: str | os.PathLike[str]) -> None:
+    """Put a file's variables into the environment, under any already set:
+    the real environment is where a deployment overrides development."""
+    for name, value in read_env_file(path).items():
+        os.environ.setdefault(name, value)
 
 
 def fail(message: str) -> int:
@@ -150,8 +279,15 @@ def serve(args: argparse.Namespace) -> int:
 
 
 def run(args: argparse.Namespace) -> int:
+    # The environment as it was before the env file, for a reload's server:
+    # it reads the file again itself each time it starts, so an edit to the
+    # file takes effect on the next restart.
+    original = dict(os.environ)
+    if args.env_file:
+        load_env_file(args.env_file)
+    resolve_options(args)
     if args.reload and not os.environ.get(RELOAD_CHILD):
-        return supervise(args)
+        return supervise(args, original)
     return serve(args)
 
 
@@ -270,14 +406,17 @@ def stop(child: subprocess.Popen, grace: float) -> None:
         child.wait()
 
 
-def supervise(args: argparse.Namespace) -> int:
+def supervise(args: argparse.Namespace, original: dict[str, str] | None = None) -> int:
     """Run the server in a child process and replace it whenever a file changes."""
     base = Path(args.app_dir or os.getcwd()).resolve()
     directories = [Path(d).resolve() for d in args.reload_dir] or [base]
     patterns = ["*.py", *args.reload_include]
+    if args.env_file:
+        # A dotfile, which the default patterns never match.
+        patterns.append(Path(args.env_file).name)
     grace = args.shutdown_grace if args.shutdown_grace is not None else RELOAD_GRACE
 
-    environment = {**os.environ, RELOAD_CHILD: "1"}
+    environment = {**(os.environ if original is None else original), RELOAD_CHILD: "1"}
     command = [sys.executable, "-m", "oxbrook", *sys.argv[1:]]
     shown = ", ".join(str(d) for d in directories)
     print(f"oxbrook: watching {shown} for changes to {', '.join(patterns)}", flush=True)
@@ -407,6 +546,63 @@ def openapi(args: argparse.Namespace) -> int:
     return 0
 
 
+def settings(args: argparse.Namespace) -> int:
+    """Every Settings class the target defines, each variable it reads, and
+    whether the environment would satisfy it now. Exits 1 if it would not."""
+    from ._settings import _DEFINED, SettingsError
+
+    if args.env_file:
+        load_env_file(args.env_file)
+    known = len(_DEFINED)
+    failed: SettingsError | None = None
+    try:
+        load_app(args.target, args.app_dir, args.factory)
+    except SettingsError as exc:
+        # Creating one at import is the usual pattern, and the reason this
+        # command exists: what it lists is most wanted when that fails.
+        failed = exc
+    # A class is recorded when it is defined, before anything creates one, so
+    # one whose creation failed during the import is listed like the rest.
+    classes = [c for c in _DEFINED[known:] if not c.__module__.startswith("oxbrook.")]
+
+    report = []
+    for cls in classes:
+        try:
+            cls()
+            problems: dict[str, str] = {}
+        except SettingsError as exc:
+            problems = exc.problems
+        rows = cls.variables()
+        for row in rows:
+            row["problem"] = problems.get(row["variable"])
+        report.append({"settings": f"{cls.__module__}.{cls.__qualname__}", "variables": rows})
+    bad = any(row["problem"] for entry in report for row in entry["variables"])
+
+    if args.json:
+        print(json.dumps(report, indent=2))
+        return 1 if bad else 0
+    if not report:
+        print("no Settings classes found")
+        if failed is None:
+            return 0
+    for entry in report:
+        print(entry["settings"])
+        table = []
+        for row in entry["variables"]:
+            if row["problem"]:
+                status = row["problem"]
+            elif row["source"] == "default":
+                status = "default" if row["secret"] else f"default {json.dumps(row['default'])}"
+            else:
+                status = f"set ({row['source']})" if row["source"] != "environment" else "set"
+            kind = row["type"] + (", secret" if row["secret"] else "")
+            table.append((row["variable"], kind, status))
+        widths = [max(len(r[i]) for r in [("VARIABLE", "TYPE", ""), *table]) for i in range(2)]
+        for name, kind, status in [("VARIABLE", "TYPE", "STATUS"), *table]:
+            print(f"  {name:<{widths[0]}}  {kind:<{widths[1]}}  {status}".rstrip())
+    return 1 if bad else 0
+
+
 # ---------------------------------------------------------------------------
 # argument parsing
 # ---------------------------------------------------------------------------
@@ -441,14 +637,24 @@ def parser() -> argparse.ArgumentParser:
         sub.add_argument("--factory", action="store_true",
                          help="call the target and use the App it returns")
 
-    serve_cmd = commands.add_parser("run", help="serve an app")
+    serve_cmd = commands.add_parser(
+        "run", help="serve an app",
+        epilog="Each option can also be set as OXBROOK_<OPTION> in the environment, "
+               "e.g. OXBROOK_PORT=8080; PORT is read after OXBROOK_PORT. A flag wins.")
     target(serve_cmd)
-    serve_cmd.add_argument("--host", default="127.0.0.1",
+    env_file = {"metavar": "FILE",
+                "help": "read NAME=value lines into the environment first, without "
+                        "overriding variables already set; for development"}
+    serve_cmd.add_argument("--env-file", **env_file)
+    # Defaults are None here and filled by `resolve_options`, after the
+    # environment has had its say: argparse cannot tell a default it filled in
+    # from the same value typed on the command line.
+    serve_cmd.add_argument("--host", default=None,
                            help="interface to bind (default: 127.0.0.1; 0.0.0.0 in a container)")
-    serve_cmd.add_argument("--port", type=int, default=8000, help="port to bind (default: 8000)")
+    serve_cmd.add_argument("--port", type=int, default=None, help="port to bind (default: 8000)")
     serve_cmd.add_argument("--workers", type=int, default=None,
                            help="worker loops (default: detected; 1 on the GIL build)")
-    serve_cmd.add_argument("--reload", action="store_true",
+    serve_cmd.add_argument("--reload", action="store_true", default=None,
                            help="restart when a watched file changes; for development")
     serve_cmd.add_argument("--reload-dir", action="append", default=[], metavar="DIR",
                            help="directory to watch, repeatable (default: the app directory)")
@@ -457,17 +663,22 @@ def parser() -> argparse.ArgumentParser:
     serve_cmd.add_argument("--tls-cert", metavar="FILE",
                            help="PEM certificate chain; serve HTTPS (needs --tls-key)")
     serve_cmd.add_argument("--tls-key", metavar="FILE", help="PEM private key for --tls-cert")
-    serve_cmd.add_argument("--http2", action=argparse.BooleanOptionalAction, default=True,
+    serve_cmd.add_argument("--http2", action=argparse.BooleanOptionalAction, default=None,
                            help="serve HTTP/2 as well as HTTP/1.1 (default: on)")
-    serve_cmd.add_argument("--access-log", action="store_true", help="log every request")
-    serve_cmd.add_argument("--log-level", default="info",
-                           choices=["debug", "info", "warning", "error"])
-    serve_cmd.add_argument("--max-concurrency", type=int, default=_app.DEFAULT_MAX_CONCURRENCY)
-    serve_cmd.add_argument("--max-connections", type=int, default=_app.DEFAULT_MAX_CONNECTIONS)
-    serve_cmd.add_argument("--max-body", type=int, default=_app.DEFAULT_MAX_BODY)
-    serve_cmd.add_argument("--max-message", type=int, default=_app.DEFAULT_MAX_MESSAGE)
-    serve_cmd.add_argument("--request-timeout", type=float,
-                           default=_app.DEFAULT_REQUEST_TIMEOUT)
+    serve_cmd.add_argument("--access-log", action="store_true", default=None,
+                           help="log every request")
+    serve_cmd.add_argument("--log-level", default=None, type=str.lower,
+                           help=f"one of {', '.join(LOG_LEVELS)} (default: info)")
+    serve_cmd.add_argument("--max-concurrency", type=int, default=None,
+                           help=f"default: {_app.DEFAULT_MAX_CONCURRENCY}")
+    serve_cmd.add_argument("--max-connections", type=int, default=None,
+                           help=f"default: {_app.DEFAULT_MAX_CONNECTIONS}")
+    serve_cmd.add_argument("--max-body", type=int, default=None,
+                           help=f"bytes (default: {_app.DEFAULT_MAX_BODY})")
+    serve_cmd.add_argument("--max-message", type=int, default=None,
+                           help=f"bytes (default: {_app.DEFAULT_MAX_MESSAGE})")
+    serve_cmd.add_argument("--request-timeout", type=float, default=None,
+                           help=f"seconds, 0 for none (default: {_app.DEFAULT_REQUEST_TIMEOUT:g})")
     serve_cmd.add_argument("--shutdown-grace", type=float, default=None,
                            help=f"seconds to let requests finish on stop "
                                 f"(default: {_app.DEFAULT_SHUTDOWN_GRACE:g}, "
@@ -484,6 +695,13 @@ def parser() -> argparse.ArgumentParser:
     openapi_cmd.add_argument("--output", "-o", help="write to this file instead of stdout")
     openapi_cmd.set_defaults(handler=openapi)
 
+    settings_cmd = commands.add_parser(
+        "settings", help="list the settings an app reads, and which are missing or invalid")
+    target(settings_cmd)
+    settings_cmd.add_argument("--env-file", **env_file)
+    settings_cmd.add_argument("--json", action="store_true", help="print JSON instead of a table")
+    settings_cmd.set_defaults(handler=settings)
+
     return main
 
 
@@ -493,9 +711,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.command is None:
         cli.print_help()
         return 2
+    from ._settings import SettingsError
+
     try:
         return args.handler(args)
-    except TargetError as exc:
+    except (TargetError, UsageError, SettingsError) as exc:
         return fail(str(exc))
     except KeyboardInterrupt:
         return 0

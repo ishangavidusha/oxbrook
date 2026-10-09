@@ -10,6 +10,10 @@
 
 ::: oxbrook.RateLimit
 
+::: oxbrook.Settings
+
+::: oxbrook.SettingsError
+
 ::: oxbrook.HTTPError
 
 ::: oxbrook.RequestValidationError
