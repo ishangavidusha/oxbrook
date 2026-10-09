@@ -15,6 +15,7 @@ mod cors;
 mod files;
 mod form;
 mod health;
+mod metrics;
 mod origin;
 mod problem;
 mod queue;

@@ -37,7 +37,7 @@ commands it would have run:
 uv venv --python 3.14t .venv
 uv pip install --python .venv/Scripts/python.exe `
   maturin "httpx[http2]" cryptography openapi-spec-validator websockets redis mcp pydantic `
-  asyncpg "sqlalchemy[asyncio]" alembic "pyjwt[crypto]" brotlicffi
+  asyncpg "sqlalchemy[asyncio]" alembic "pyjwt[crypto]" brotlicffi prometheus-client
 .venv/Scripts/maturin.exe develop --release
 ```
 
@@ -50,7 +50,7 @@ C. The CI leg is what actually runs them.
 ## Tests
 
 ```bash
-make verify        # thirty-seven suites, free-threaded
+make verify        # thirty-eight suites, free-threaded
 make verify-gil    # the same suites on the GIL build
 ```
 

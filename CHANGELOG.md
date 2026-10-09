@@ -19,6 +19,11 @@ release does not; changes that break existing code are listed under
   against that loop's state, and fails while draining. `drain_delay` keeps
   serving, unready, for a few seconds after a stop, so a load balancer
   notices before the listener closes.
+- **Metrics.** `App(metrics=Metrics())` serves the server's own metrics at
+  `/metrics` in the Prometheus text format: requests and durations by route
+  template and status, time waiting for a worker loop, queue depth per loop,
+  connections, and requests shed or timed out. Measured in Rust and answered
+  without a worker loop.
 
 ## 0.3.0 — 2026-10-06
 

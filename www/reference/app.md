@@ -6,6 +6,8 @@
 
 ::: oxbrook.Health
 
+::: oxbrook.Metrics
+
 ::: oxbrook.HTTPError
 
 ::: oxbrook.RequestValidationError

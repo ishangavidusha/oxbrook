@@ -14,6 +14,7 @@ from ._errors import guard as guard_exceptions
 from ._files import StaticMount, build_mount
 from ._health import Health
 from ._lifecycle import Lifecycle, ServerHandle, State, check_hook
+from ._metrics import Metrics
 from ._middleware import as_reply, make_gate
 from ._middleware import wrap as wrap_middleware
 from ._response import Response
@@ -65,6 +66,7 @@ class App:
         cors: CORS | None = None,
         compression: Compression | None = None,
         health: Health | None = None,
+        metrics: Metrics | None = None,
         websocket_origins: Any = None,
         auth: Any = None,
         mcp_auth: Any = _auth.UNSET,
@@ -101,6 +103,10 @@ class App:
         `health` serves liveness and readiness probes, `/livez` and `/readyz`
         by default, and can delay a stop so a load balancer notices first.
         See `Health`.
+
+        `metrics` serves the server's own counters and histograms for
+        Prometheus at `/metrics`: requests by route and status, time waiting
+        for a worker loop, queue depth, connections. See `Metrics`.
 
         `websocket_origins` lists the other origins whose pages may open a
         WebSocket. Browsers do not apply CORS to sockets and send cookies with
@@ -163,6 +169,11 @@ class App:
         if health is not None and not isinstance(health, Health):
             raise TypeError(f"health must be a Health(...), got {type(health).__name__}")
         self.health = health
+        if metrics is not None and not isinstance(metrics, Metrics):
+            raise TypeError(f"metrics must be a Metrics(...), got {type(metrics).__name__}")
+        if metrics and health and metrics.path in (health.live, health.ready):
+            raise ValueError(f"metrics and health both use {metrics.path!r}")
+        self.metrics = metrics
         if websocket_origins is not None:
             if isinstance(websocket_origins, str):
                 raise TypeError("websocket_origins is a list of origins, not a single string")
@@ -913,6 +924,7 @@ class App:
             bool(http2),
             None if self.compression is None else self.compression.as_spec(),
             None if self.health is None else self.health.as_spec(),
+            None if self.metrics is None else self.metrics.as_spec(),
         )
         return ServerHandle(core, lifecycle)
 

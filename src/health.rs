@@ -53,6 +53,10 @@ impl Health {
         self.draining.store(true, Ordering::SeqCst);
     }
 
+    pub fn is_draining(&self) -> bool {
+        self.draining.load(Ordering::SeqCst)
+    }
+
     /// A probe's answer, or None for anything this does not answer.
     pub fn answer(&self, method: &Method, path: &str, workers: &[Worker]) -> Option<Response<Out>> {
         if method != Method::GET && method != Method::HEAD {

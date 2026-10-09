@@ -197,7 +197,8 @@ pub enum RouteError {
     NotFound,
     /// Path exists under other methods; carries the `Allow` header value.
     MethodNotAllowed(String),
-    BadParam(ParamError),
+    /// A parameter that would not coerce, on the route at this index.
+    BadParam(usize, ParamError),
 }
 
 pub struct Matched {
@@ -348,18 +349,23 @@ impl Router {
                 let mut items = Vec::new();
                 for (key, value) in &pairs {
                     if key == &param.name {
-                        items.push(coerce(value, param).map_err(RouteError::BadParam)?);
+                        items.push(
+                            coerce(value, param).map_err(|e| RouteError::BadParam(route, e))?,
+                        );
                     }
                 }
                 params.push(match (items.is_empty(), param.presence) {
                     (true, Presence::Required) => {
-                        return Err(RouteError::BadParam(ParamError {
-                            source: param.source.label(),
-                            name: param.name.clone(),
-                            error_type: "missing",
-                            msg: "Field required".to_owned(),
-                            input: None,
-                        }))
+                        return Err(RouteError::BadParam(
+                            route,
+                            ParamError {
+                                source: param.source.label(),
+                                name: param.name.clone(),
+                                error_type: "missing",
+                                msg: "Field required".to_owned(),
+                                input: None,
+                            },
+                        ))
                     }
                     (true, Presence::Omit) => ParamValue::Omit,
                     (true, Presence::Null) => ParamValue::Null,
@@ -383,18 +389,21 @@ impl Router {
             };
 
             let value = match raw {
-                Some(raw) => coerce(raw, param).map_err(RouteError::BadParam)?,
+                Some(raw) => coerce(raw, param).map_err(|e| RouteError::BadParam(route, e))?,
                 None => match param.presence {
                     Presence::Omit => ParamValue::Omit,
                     Presence::Null => ParamValue::Null,
                     Presence::Required => {
-                        return Err(RouteError::BadParam(ParamError {
-                            source: param.source.label(),
-                            name: param.name.clone(),
-                            error_type: "missing",
-                            msg: "Field required".to_owned(),
-                            input: None,
-                        }))
+                        return Err(RouteError::BadParam(
+                            route,
+                            ParamError {
+                                source: param.source.label(),
+                                name: param.name.clone(),
+                                error_type: "missing",
+                                msg: "Field required".to_owned(),
+                                input: None,
+                            },
+                        ))
                     }
                 },
             };

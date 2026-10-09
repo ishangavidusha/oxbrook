@@ -19,6 +19,7 @@ from ._errors import HTTPError
 from ._forms import Form, FormData, UploadFile
 from ._health import Health
 from ._logging import JsonFormatter, json_logging
+from ._metrics import Metrics
 from ._middleware import Reply
 from ._redis import Consumer, Message, RedisBackend
 from ._response import Response
@@ -55,6 +56,7 @@ __all__ = [
     "Health",
     "JsonFormatter",
     "Message",
+    "Metrics",
     "RedisBackend",
     "Reply",
     "Request",

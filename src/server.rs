@@ -32,6 +32,7 @@ use crate::compress::{Compression, CompressionTuple, Plan, INLINE_LIMIT};
 use crate::cors::{Cors, CorsTuple};
 use crate::files::{Mount, MountTuple};
 use crate::health::{Health, HealthTuple};
+use crate::metrics::{Metrics, MetricsTuple, Refusal, Uncounted};
 use crate::origin::{OriginsTuple, SocketOrigins};
 use crate::queue::{ConnectionLoad, Pending};
 use crate::responder::{Body, Reply};
@@ -56,6 +57,8 @@ struct State {
     compression: Option<Arc<Compression>>,
     /// Probes answered before routing; None when the app declared none.
     health: Option<Health>,
+    /// Counters and histograms, and the scrape path; None when not asked for.
+    metrics: Option<Arc<Metrics>>,
     /// Checked on every upgrade, before the authorizer or handler.
     socket_origins: SocketOrigins,
     /// Static mounts, indexed by `RouteSpec::mount`. Shared, because a file
@@ -91,6 +94,7 @@ pub struct Server {
     http2: bool,
     compression: Option<CompressionTuple>,
     health: Option<HealthTuple>,
+    metrics: Option<MetricsTuple>,
 }
 
 /// (method, path, handler, params, is_websocket, authorizer, body mode,
@@ -109,7 +113,7 @@ type Route = (
 #[pymethods]
 impl Server {
     #[new]
-    /// Twenty arguments, which clippy dislikes. This is the Python
+    /// Twenty-one arguments, which clippy dislikes. This is the Python
     /// constructor: the signature *is* the API, and collapsing it into a
     /// config object would move the same fields behind a dict that Python has
     /// to build on every server start.
@@ -135,6 +139,7 @@ impl Server {
         http2: bool,
         compression: Option<CompressionTuple>,
         health: Option<HealthTuple>,
+        metrics: Option<MetricsTuple>,
     ) -> Self {
         Self {
             host,
@@ -161,6 +166,7 @@ impl Server {
             http2,
             compression,
             health,
+            metrics,
         }
     }
 
@@ -220,6 +226,21 @@ impl Server {
             .map_err(PyValueError::new_err)?;
         let patterns: Vec<_> = mounts.iter().map(|m| m.patterns()).collect();
         let router = Arc::new(Router::build(&specs, &patterns).map_err(PyValueError::new_err)?);
+        // Labelled in the router's own numbering: routes, then each mount's
+        // patterns, which the router appends in the same order.
+        let metrics = self.metrics.clone().map(|spec| {
+            let labels: Vec<(String, String)> = specs
+                .iter()
+                .map(|(method, path, ..)| (method.to_ascii_uppercase(), path.clone()))
+                .chain(
+                    patterns
+                        .iter()
+                        .flatten()
+                        .map(|(p, _)| ("GET".to_owned(), p.clone())),
+                )
+                .collect();
+            Arc::new(Metrics::build(spec, &labels))
+        });
         // Read before any worker starts, so a missing or mismatched
         // certificate is a startup error with nothing to tear down.
         let tls = self
@@ -283,6 +304,12 @@ impl Server {
             }
         }
 
+        if metrics.is_some() {
+            for worker in &workers {
+                worker.queue.measure_wait();
+            }
+        }
+
         let state = Arc::new(State {
             router,
             workers,
@@ -293,6 +320,7 @@ impl Server {
             cors,
             compression,
             health: self.health.clone().map(Health::build),
+            metrics,
             socket_origins: SocketOrigins::build(self.socket_origins.clone()),
             mounts,
         });
@@ -642,6 +670,9 @@ async fn serve_loop(listen: Listen, state: Arc<State>) -> Result<(), String> {
     // descriptor and buffers without ever reaching a worker, so it needs its
     // own limit.
     let connections = Arc::new(tokio::sync::Semaphore::new(max_connections));
+    if let Some(metrics) = &state.metrics {
+        metrics.watch_connections(connections.clone(), max_connections);
+    }
 
     // Asked to stop with a drain delay, the server keeps accepting until this
     // passes, failing readiness meanwhile: a load balancer takes seconds to
@@ -762,6 +793,12 @@ fn plain(status: StatusCode, msg: &'static str) -> Response<Out> {
 }
 
 fn overloaded() -> Response<Out> {
+    let mut response = overloaded_response();
+    response.extensions_mut().insert(Refusal::Shed);
+    response
+}
+
+fn overloaded_response() -> Response<Out> {
     let mut response =
         crate::problem::response(StatusCode::SERVICE_UNAVAILABLE, Some("server overloaded"));
     response
@@ -996,6 +1033,7 @@ async fn upgrade_websocket(
                 handoff: None,
                 connection: None,
                 cancel: None,
+                queued_at: None,
             },
         );
         if queued.is_none() {
@@ -1073,6 +1111,7 @@ async fn upgrade_websocket(
             handoff,
             connection: None,
             cancel: None,
+            queued_at: None,
         },
     );
     if queued.is_none() {
@@ -1110,11 +1149,48 @@ async fn serve_request(
     state: Arc<State>,
     connection: Option<ConnectionLoad>,
 ) -> Result<Response<Out>, Infallible> {
+    // Probes and scrapes first, before CORS and routing, and not counted:
+    // they are the server describing itself, at a rate set by a scraper.
+    if let Some(metrics) = &state.metrics {
+        if metrics.is_scrape(req.method(), req.uri().path()) {
+            let draining = state.health.as_ref().map(Health::is_draining);
+            return Ok(metrics.scrape(&state.workers, draining, req.method() == Method::HEAD));
+        }
+    }
+    if let Some(health) = &state.health {
+        if let Some(answer) = health.answer(req.method(), req.uri().path(), &state.workers) {
+            return Ok(answer);
+        }
+    }
+    let Some(metrics) = state.metrics.clone() else {
+        return cors_and_handle(req, state, connection, &mut None).await;
+    };
+    let started = Instant::now();
+    let mut route = None;
+    let response = cors_and_handle(req, state, connection, &mut route).await?;
+    if response.extensions().get::<Uncounted>().is_some() {
+        return Ok(response);
+    }
+    metrics.record(
+        route,
+        response.status(),
+        started.elapsed(),
+        response.extensions().get::<Refusal>().copied(),
+    );
+    Ok(response)
+}
+
+async fn cors_and_handle(
+    req: hyper::Request<Incoming>,
+    state: Arc<State>,
+    connection: Option<ConnectionLoad>,
+    route: &mut Option<usize>,
+) -> Result<Response<Out>, Infallible> {
     let Some(cors) = state.cors.clone() else {
-        return handle(req, state, connection).await;
+        return handle(req, state, connection, route).await;
     };
     if Cors::is_preflight(req.method(), req.headers()) {
-        return Ok(match cors.preflight(req.headers()) {
+        let mut response = match cors.preflight(req.headers()) {
             Ok(headers) => {
                 let mut response = Response::builder()
                     .status(StatusCode::NO_CONTENT)
@@ -1130,10 +1206,12 @@ async fn serve_request(
                 cors.decorate(None, response.headers_mut());
                 response
             }
-        });
+        };
+        response.extensions_mut().insert(Uncounted);
+        return Ok(response);
     }
     let origin = req.headers().get(hyper::header::ORIGIN).cloned();
-    let mut response = handle(req, state, connection).await?;
+    let mut response = handle(req, state, connection, route).await?;
     // A socket upgrade is not subject to CORS; an authorizer checks `Origin`.
     if response.status() != StatusCode::SWITCHING_PROTOCOLS {
         cors.decorate(origin.as_ref(), response.headers_mut());
@@ -1175,6 +1253,7 @@ async fn handle(
     mut req: hyper::Request<Incoming>,
     state: Arc<State>,
     connection: Option<ConnectionLoad>,
+    route: &mut Option<usize>,
 ) -> Result<Response<Out>, Infallible> {
     // HTTP/2 carries the host in the request line's `:authority`, which hyper
     // puts in the URI and not in the headers. Copied across, so a handler
@@ -1192,14 +1271,6 @@ async fn handle(
     // HTTP requires HEAD wherever GET is allowed, so a miss on HEAD retries as
     // GET and the body is dropped from the reply below.
     let head = req.method() == Method::HEAD;
-    // Before routing and before any worker: liveness must answer when the
-    // loops cannot, and readiness must fail while draining whatever the
-    // routes say.
-    if let Some(health) = &state.health {
-        if let Some(answer) = health.answer(req.method(), req.uri().path(), &state.workers) {
-            return Ok(answer);
-        }
-    }
     // Read now: the headers are handed to Python whole further down.
     let accept_encoding = state
         .compression
@@ -1225,7 +1296,10 @@ async fn handle(
     };
 
     let matched = match found {
-        Ok(matched) => matched,
+        Ok(matched) => {
+            *route = Some(matched.route);
+            matched
+        }
         Err(RouteError::NotFound) => {
             return Ok(refuse(req, crate::problem::response(StatusCode::NOT_FOUND, None)).await)
         }
@@ -1233,7 +1307,8 @@ async fn handle(
             return Ok(refuse(req, method_not_allowed(allow)).await)
         }
         // Coercion runs here, so a bad path parameter never wakes a worker.
-        Err(RouteError::BadParam(err)) => {
+        Err(RouteError::BadParam(index, err)) => {
+            *route = Some(index);
             let answer = crate::problem::with_body(StatusCode::UNPROCESSABLE_ENTITY, err.to_json());
             return Ok(refuse(req, answer).await);
         }
@@ -1332,6 +1407,7 @@ async fn handle(
         handoff: None,
         connection: connection.clone(),
         cancel: cancel.clone(),
+        queued_at: None,
     };
 
     // No Python involvement on this thread: plain Rust data plus one byte
@@ -1371,10 +1447,12 @@ async fn handle(
         },
     };
     let Some(replied) = replied else {
-        return Ok(plain(
+        let mut response = plain(
             StatusCode::GATEWAY_TIMEOUT,
             "handler did not respond in time",
-        ));
+        );
+        response.extensions_mut().insert(Refusal::TimedOut);
+        return Ok(response);
     };
 
     match replied {

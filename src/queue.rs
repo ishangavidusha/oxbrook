@@ -57,6 +57,8 @@ pub struct Pending {
     pub connection: Option<ConnectionLoad>,
     /// Set for a route that is cancelled when its client leaves.
     pub cancel: Option<std::sync::Arc<crate::cancel::Cancel>>,
+    /// When it was queued, stamped by `try_push` only when metrics are on.
+    pub queued_at: Option<Instant>,
 }
 
 pub struct WorkerQueue {
@@ -93,6 +95,8 @@ pub struct WorkerQueue {
     /// every pending request is a connection held open with a client waiting
     /// on a reply that will arrive long after it stopped caring.
     limit: usize,
+    /// Time from push to pop, when the app asked for metrics (D-059).
+    wait: OnceLock<crate::metrics::Histogram>,
 }
 
 impl WorkerQueue {
@@ -106,7 +110,22 @@ impl WorkerQueue {
             waker,
             inflight: AtomicUsize::new(0),
             limit,
+            wait: OnceLock::new(),
         }
+    }
+
+    /// Start measuring queue wait. Before serving, once.
+    pub fn measure_wait(&self) {
+        let _ = self.wait.set(crate::metrics::wait_histogram());
+    }
+
+    pub fn wait(&self) -> Option<&crate::metrics::Histogram> {
+        self.wait.get()
+    }
+
+    /// Requests pushed and not yet taken by the loop.
+    pub fn queued(&self) -> usize {
+        self.queue.len()
     }
 
     pub fn load(&self) -> usize {
@@ -139,11 +158,14 @@ impl WorkerQueue {
     /// allocation is least welcome. The cost here is stack space in a function
     /// that already takes the same value by value.
     #[allow(clippy::result_large_err)]
-    pub fn try_push(&self, item: Pending) -> Result<(), Pending> {
+    pub fn try_push(&self, mut item: Pending) -> Result<(), Pending> {
         // Racy against other producers. Overshooting by a few under a burst is
         // fine; what matters is that the number cannot grow without bound.
         if !self.has_room() {
             return Err(item);
+        }
+        if self.wait.get().is_some() {
+            item.queued_at = Some(Instant::now());
         }
         self.queue.push(item);
         self.wake();
@@ -151,7 +173,11 @@ impl WorkerQueue {
     }
 
     pub fn pop(&self) -> Option<Pending> {
-        self.queue.pop()
+        let item = self.queue.pop()?;
+        if let (Some(wait), Some(at)) = (self.wait.get(), item.queued_at) {
+            wait.observe(at.elapsed());
+        }
+        Some(item)
     }
 
     /// Ask this worker's loop to call `callback`. Safe from a tokio thread:
