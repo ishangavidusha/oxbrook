@@ -45,6 +45,8 @@ pub enum Refusal {
     Shed,
     /// The handler did not answer within `request_timeout`: `504`.
     TimedOut,
+    /// The client was over a rate limit: `429`.
+    Limited,
 }
 
 /// A response the server gave on its own behalf before any routing, such as a
@@ -126,6 +128,7 @@ pub struct Metrics {
     unmatched: Route,
     shed: AtomicU64,
     timeouts: AtomicU64,
+    limited: AtomicU64,
     /// Set by the accept loop, which owns the semaphore.
     connections: OnceLock<(Arc<Semaphore>, usize)>,
 }
@@ -138,6 +141,7 @@ impl Metrics {
             unmatched: Route::new("", ""),
             shed: AtomicU64::new(0),
             timeouts: AtomicU64::new(0),
+            limited: AtomicU64::new(0),
             connections: OnceLock::new(),
         }
     }
@@ -169,6 +173,7 @@ impl Metrics {
         match refusal {
             Some(Refusal::Shed) => self.shed.fetch_add(1, Ordering::Relaxed),
             Some(Refusal::TimedOut) => self.timeouts.fetch_add(1, Ordering::Relaxed),
+            Some(Refusal::Limited) => self.limited.fetch_add(1, Ordering::Relaxed),
             None => 0,
         };
     }
@@ -327,6 +332,17 @@ impl Metrics {
             out,
             "oxbrook_request_timeouts_total {}",
             self.timeouts.load(Ordering::Relaxed)
+        );
+        header(
+            &mut out,
+            "oxbrook_requests_limited_total",
+            "counter",
+            "Requests answered 429 because the client was over a rate limit.",
+        );
+        let _ = writeln!(
+            out,
+            "oxbrook_requests_limited_total {}",
+            self.limited.load(Ordering::Relaxed)
         );
 
         if let Some(draining) = draining {

@@ -144,6 +144,7 @@ impl Drainer {
                     deferred: item.deferred,
                     filled: std::sync::OnceLock::new(),
                     handoff: item.handoff,
+                    client: item.client,
                 },
             )?;
             let responder = Py::new(
@@ -318,8 +319,18 @@ impl Worker {
     }
 
     pub fn stop(&self, py: Python<'_>) {
-        if let Ok(stop) = self.event_loop.getattr(py, "stop") {
-            let _ = self.call_soon_threadsafe.call1(py, (stop,));
+        let Ok(stop) = self.event_loop.getattr(py, "stop") else {
+            return;
+        };
+        // The Ctrl-C the server is stopping for reached Python's own handler
+        // too, which raises it at the next Python call: this one. Swallowed
+        // once, the loop was never told to stop and shutdown waited out the
+        // whole grace for it. Retried instead; a loop told twice stops once.
+        for _ in 0..3 {
+            match self.call_soon_threadsafe.call1(py, (stop.clone_ref(py),)) {
+                Err(e) if e.is_instance_of::<pyo3::exceptions::PyKeyboardInterrupt>(py) => {}
+                _ => return,
+            }
         }
     }
 

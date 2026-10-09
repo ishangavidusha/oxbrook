@@ -24,6 +24,18 @@ release does not; changes that break existing code are listed under
   template and status, time waiting for a worker loop, queue depth per loop,
   connections, and requests shed or timed out. Measured in Rust and answered
   without a worker loop.
+- **Rate limits.** `App(rate_limit=RateLimit("600/minute"))` limits every
+  client across the app, and `rate_limit=` on a route or router adds a budget
+  of its own; one `RateLimit` object is one budget. Counted by address (IPv6
+  by /64) or by a header such as an API key, refilled continuously, and
+  answered `429` with `Retry-After` in Rust before a worker loop sees the
+  request. A route's limit applies to agents calling it as a tool too.
+- **The client's address.** `request.client` is the caller's IP, and
+  `App(trusted_proxies=...)` says which peers' `X-Forwarded-For` to believe:
+  a list of networks, or how many proxies stand in front.
+- **Fixed:** Ctrl-C stopped a server with several worker loops only after the
+  whole `shutdown_grace`, and a Ctrl-C sent just as the server started was
+  ignored. Both now stop at once.
 
 ## 0.3.0 — 2026-10-06
 

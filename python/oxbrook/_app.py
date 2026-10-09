@@ -4,7 +4,7 @@ import os
 import sys
 from typing import Any
 
-from . import _auth, _openapi
+from . import _auth, _limits, _openapi
 from ._auth import UNSET
 from ._blocking import Pool as BlockingPool
 from ._compression import Compression
@@ -14,6 +14,7 @@ from ._errors import guard as guard_exceptions
 from ._files import StaticMount, build_mount
 from ._health import Health
 from ._lifecycle import Lifecycle, ServerHandle, State, check_hook
+from ._limits import RateLimit
 from ._metrics import Metrics
 from ._middleware import as_reply, make_gate
 from ._middleware import wrap as wrap_middleware
@@ -67,6 +68,8 @@ class App:
         compression: Compression | None = None,
         health: Health | None = None,
         metrics: Metrics | None = None,
+        rate_limit: RateLimit | None = None,
+        trusted_proxies: Any = None,
         websocket_origins: Any = None,
         auth: Any = None,
         mcp_auth: Any = _auth.UNSET,
@@ -107,6 +110,18 @@ class App:
         `metrics` serves the server's own counters and histograms for
         Prometheus at `/metrics`: requests by route and status, time waiting
         for a worker loop, queue depth, connections. See `Metrics`.
+
+        `rate_limit` limits every request a client makes, on any route, with
+        one `RateLimit`; routes can add their own on top. Health probes, the
+        metrics endpoint and CORS preflights are not limited. See `RateLimit`.
+
+        `trusted_proxies` says which peers are proxies whose `X-Forwarded-For`
+        to believe about the client's address, as `request.client` and rate
+        limits see it: a list of addresses and networks, such as
+        `["10.0.0.0/8"]`, or a number — how many proxies stand in front, for a
+        platform whose proxy addresses are not known in advance. Unset, the
+        client is whoever opened the connection, and the header is ignored:
+        anyone can send it.
 
         `websocket_origins` lists the other origins whose pages may open a
         WebSocket. Browsers do not apply CORS to sockets and send cookies with
@@ -174,6 +189,12 @@ class App:
         if metrics and health and metrics.path in (health.live, health.ready):
             raise ValueError(f"metrics and health both use {metrics.path!r}")
         self.metrics = metrics
+        if rate_limit is not None and not isinstance(rate_limit, RateLimit):
+            raise TypeError(
+                f"rate_limit must be a RateLimit(...), got {type(rate_limit).__name__}"
+            )
+        self.rate_limit = rate_limit
+        self.trusted_proxies = _limits.proxies(trusted_proxies)
         if websocket_origins is not None:
             if isinstance(websocket_origins, str):
                 raise TypeError("websocket_origins is a list of origins, not a single string")
@@ -201,11 +222,16 @@ class App:
         cancel_on_disconnect: bool = True,
         blocking: bool = False,
         auth: Any = UNSET,
+        rate_limit: Any = UNSET,
     ):
         """Register a route.
 
         `auth` declares who may call it, overriding its routers' and the app's;
         `auth=None` makes it public. See `oxbrook.auth`.
+
+        `rate_limit` is a `RateLimit` for this route, on top of the app's,
+        overriding its routers'; `rate_limit=None` exempts it from theirs. It
+        applies to agents calling the route as a tool too.
 
         `blocking=True` lets the handler be a plain `def` and runs it on a
         threadpool instead of its worker loop. A worker loop serves many
@@ -237,6 +263,7 @@ class App:
         """
         method = method.upper()
         auth = _auth.check(auth, f"{method} {path}")
+        rate_limit = _limits.check(rate_limit, f"{method} {path}")
 
         def decorator(fn):
             # Validates the handler against its path and fails here, at import
@@ -245,6 +272,7 @@ class App:
                                 cancel_on_disconnect=cancel_on_disconnect,
                                 blocking=blocking)
             route.auth = auth
+            route.rate_limit = None if rate_limit is UNSET else rate_limit
             self._add(route)
             return fn
 
@@ -293,22 +321,22 @@ class App:
         self.routes.append(route)
 
     def get(self, path: str, tool: bool = False, *, cancel_on_disconnect: bool = True,
-            blocking: bool = False, auth: Any = UNSET):
+            blocking: bool = False, auth: Any = UNSET, rate_limit: Any = UNSET):
         return self.route("GET", path, tool=tool,
                           cancel_on_disconnect=cancel_on_disconnect, blocking=blocking,
-                          auth=auth)
+                          auth=auth, rate_limit=rate_limit)
 
     def post(self, path: str, tool: bool = False, *, cancel_on_disconnect: bool = True,
-            blocking: bool = False, auth: Any = UNSET):
+            blocking: bool = False, auth: Any = UNSET, rate_limit: Any = UNSET):
         return self.route("POST", path, tool=tool,
                           cancel_on_disconnect=cancel_on_disconnect, blocking=blocking,
-                          auth=auth)
+                          auth=auth, rate_limit=rate_limit)
 
     def put(self, path: str, tool: bool = False, *, cancel_on_disconnect: bool = True,
-            blocking: bool = False, auth: Any = UNSET):
+            blocking: bool = False, auth: Any = UNSET, rate_limit: Any = UNSET):
         return self.route("PUT", path, tool=tool,
                           cancel_on_disconnect=cancel_on_disconnect, blocking=blocking,
-                          auth=auth)
+                          auth=auth, rate_limit=rate_limit)
 
     def static(
         self,
@@ -365,16 +393,16 @@ class App:
         self.mounts.append(mount)
 
     def patch(self, path: str, tool: bool = False, *, cancel_on_disconnect: bool = True,
-            blocking: bool = False, auth: Any = UNSET):
+            blocking: bool = False, auth: Any = UNSET, rate_limit: Any = UNSET):
         return self.route("PATCH", path, tool=tool,
                           cancel_on_disconnect=cancel_on_disconnect, blocking=blocking,
-                          auth=auth)
+                          auth=auth, rate_limit=rate_limit)
 
     def delete(self, path: str, tool: bool = False, *, cancel_on_disconnect: bool = True,
-            blocking: bool = False, auth: Any = UNSET):
+            blocking: bool = False, auth: Any = UNSET, rate_limit: Any = UNSET):
         return self.route("DELETE", path, tool=tool,
                           cancel_on_disconnect=cancel_on_disconnect, blocking=blocking,
-                          auth=auth)
+                          auth=auth, rate_limit=rate_limit)
 
     def include(self, router: Router, prefix: str = "") -> None:
         """Mount a router's routes, under `prefix` if given.
@@ -556,7 +584,7 @@ class App:
         return total // workers
 
     def websocket(self, path: str, authorize: Any = None, *, blocking: bool = False,
-                  auth: Any = UNSET):
+                  auth: Any = UNSET, rate_limit: Any = UNSET):
         """Register a WebSocket endpoint.
 
         `auth` is checked before the handshake, as for any route, so a caller
@@ -590,12 +618,14 @@ class App:
         """
 
         auth = _auth.check(auth, f"WEBSOCKET {path}")
+        rate_limit = _limits.check(rate_limit, f"WEBSOCKET {path}")
 
         def decorator(fn):
             route = build_route(fn, "GET", path, websocket=True, blocking=blocking)
             if authorize is not None:
                 route.authorizer = make_gate(authorize)
             route.auth = auth
+            route.rate_limit = None if rate_limit is UNSET else rate_limit
             self._add(route)
             return fn
 
@@ -925,8 +955,19 @@ class App:
             None if self.compression is None else self.compression.as_spec(),
             None if self.health is None else self.health.as_spec(),
             None if self.metrics is None else self.metrics.as_spec(),
+            self.trusted_proxies,
+            None if self.rate_limit is None else self.rate_limit._limiter,
+            [(None if r.rate_limit is None else r.rate_limit._limiter, self._unlimited(r))
+             for r in self.routes],
         )
         return ServerHandle(core, lifecycle)
+
+    def _unlimited(self, r: RouteInfo) -> bool:
+        """Exempt from the app's rate limit: the readiness route, which is a
+        probe like the ones the server answers itself, and is called at a rate
+        the orchestrator sets, not the client."""
+        health = self.health
+        return health is not None and r.method == "GET" and r.path == health.ready
 
     def _spec(self, r: RouteInfo) -> tuple:
         """The tuple the Rust server takes for one route."""

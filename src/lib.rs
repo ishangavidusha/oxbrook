@@ -15,6 +15,7 @@ mod cors;
 mod files;
 mod form;
 mod health;
+mod limit;
 mod metrics;
 mod origin;
 mod problem;
@@ -34,6 +35,7 @@ use pyo3::prelude::*;
 /// import without re-enabling the GIL. On a standard build it is a no-op.
 #[pymodule(gil_used = false)]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_class::<limit::Limiter>()?;
     m.add_class::<request::Request>()?;
     m.add_class::<responder::Responder>()?;
     m.add_class::<server::Server>()?;

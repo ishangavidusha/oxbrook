@@ -34,6 +34,9 @@ pub struct Request {
     pub filled: std::sync::OnceLock<Vec<u8>>,
     /// For a socket, the key its gate left the authenticated caller under.
     pub handoff: Option<String>,
+    /// The client's address, through any trusted proxies. None for a request
+    /// built by hand without one.
+    pub client: Option<std::net::IpAddr>,
 }
 
 impl Request {
@@ -66,7 +69,7 @@ impl Request {
     // Each argument is a keyword on the Python side, which is the interface
     // that matters; bundling them into a struct would only move the list.
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (method = "GET".to_string(), path = "/".to_string(), query = None, body = None, headers = None, context = None, locals = None))]
+    #[pyo3(signature = (method = "GET".to_string(), path = "/".to_string(), query = None, body = None, headers = None, context = None, locals = None, client = None))]
     fn py_new(
         py: Python<'_>,
         method: String,
@@ -76,7 +79,15 @@ impl Request {
         headers: Option<Vec<(String, String)>>,
         context: Option<Py<PyAny>>,
         locals: Option<Py<PyDict>>,
+        client: Option<String>,
     ) -> PyResult<Self> {
+        let client = client
+            .map(|c| {
+                c.parse().map_err(|_| {
+                    pyo3::exceptions::PyValueError::new_err(format!("bad client address {c:?}"))
+                })
+            })
+            .transpose()?;
         let mut map = HeaderMap::new();
         for (name, value) in headers.unwrap_or_default() {
             if let (Ok(name), Ok(value)) = (
@@ -107,6 +118,7 @@ impl Request {
             deferred: false,
             filled: std::sync::OnceLock::new(),
             handoff: None,
+            client,
         })
     }
 
@@ -148,6 +160,18 @@ impl Request {
     #[getter(_context)]
     fn context_handle(&self, py: Python<'_>) -> Option<Py<PyAny>> {
         self.context.as_ref().map(|context| context.clone_ref(py))
+    }
+
+    /// The client's IP address, as a string.
+    ///
+    /// The address of whoever opened the connection, unless the app trusts
+    /// it as a proxy (`App(trusted_proxies=...)`): then the nearest address in
+    /// `X-Forwarded-For` that no trusted proxy wrote. Everything further left
+    /// in that header is whatever the client chose to send, and is not
+    /// believed. None for a request built by hand without one.
+    #[getter]
+    fn client(&self) -> Option<String> {
+        self.client.map(|ip| ip.to_string())
     }
 
     /// The HTTP method, uppercase.

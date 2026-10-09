@@ -59,6 +59,8 @@ pub struct Pending {
     pub cancel: Option<std::sync::Arc<crate::cancel::Cancel>>,
     /// When it was queued, stamped by `try_push` only when metrics are on.
     pub queued_at: Option<Instant>,
+    /// The client's address, through any trusted proxies.
+    pub client: Option<std::net::IpAddr>,
 }
 
 pub struct WorkerQueue {

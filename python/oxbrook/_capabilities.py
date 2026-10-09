@@ -12,9 +12,11 @@ agent by default.
 """
 
 import json
+import math
 from typing import Any
 
 from ._core import Request
+from ._response import Response
 from ._routing import RouteInfo
 
 _SCALAR_SCHEMA: dict[str, dict[str, str]] = {
@@ -195,9 +197,26 @@ class Capability:
             None if parent is None else list(parent.headers.items()),
             None if parent is None else parent._context,
             None if parent is None else parent.locals,
+            None if parent is None else parent.client,
         )
+        # The route's limit, which over HTTP the server checks before a worker
+        # sees the request. A tool call arrives inside `/mcp`, past that
+        # check, so it is made here: an agent must not be able to call a
+        # limited route without limit by calling it as a tool.
+        if self.route.rate_limit is not None:
+            wait = self.route.rate_limit._limiter.take(request)
+            if wait is not None:
+                return _limited(wait)
         target = self.target if self.target is not None else self.route.target
         return await target(request, **params)
+
+
+def _limited(wait: float) -> Response:
+    """The tool-call twin of the server's `429`, rounded up the same way."""
+    from ._errors import PROBLEM, problem
+
+    return Response(problem(429, "rate limit exceeded"), status=429, content_type=PROBLEM,
+                    headers={"retry-after": str(max(1, math.ceil(wait)))})
 
 
 def build(routes: list[RouteInfo], compose: Any = None) -> dict[str, Capability]:

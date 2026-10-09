@@ -132,6 +132,9 @@ nothing.
 Lower it for slow handlers, where a deep backlog only adds latency before an
 inevitable client timeout. Raise it to absorb larger bursts of fast requests.
 
+This bounds the work in total, whoever sends it. To stop one client taking
+that capacity for itself, add a [rate limit](guide/rate-limits.md).
+
 `max_connections` is a separate limit, because an idle keep-alive connection
 costs a file descriptor without ever reaching a worker. An open WebSocket
 counts as the connection it was upgraded from, until it closes. At that limit the
@@ -208,7 +211,10 @@ development, `--reload-include '*.pem'` does that.
 
 A terminating proxy in front — nginx, Caddy, a cloud load balancer — is still
 the usual arrangement in production: it renews certificates, redirects plain
-HTTP, and holds slow clients. Oxbrook's own TLS suits a service with no proxy
+HTTP, and holds slow clients. Tell the app which peers are proxies with
+`App(trusted_proxies=...)`, or every request looks as if it came from the
+proxy, to [rate limits](guide/rate-limits.md#behind-a-proxy) and to
+`request.client` alike. Oxbrook's own TLS suits a service with no proxy
 at all, an internal service that must still be encrypted, and development
 against a browser feature that requires HTTPS.
 

@@ -22,6 +22,14 @@ And two found while building it:
   survived SIGTERM and Ctrl-C. Signals are now handled only when serving from
   the main thread, as Python does; the test client serves from another.
 
+* **Stopping took the whole shutdown grace, or never happened.** Ctrl-C
+  reached Python's own handler as well as the server's, and was raised at the
+  next Python call shutdown made — telling a worker loop to stop — so that
+  loop never stopped and the server waited out the grace for it. And a signal
+  that came before the accept loop first waited for one was lost, leaving a
+  server that could not be stopped. Each stop here must now be prompt, with
+  several worker loops, including one sent the moment the port opens.
+
 * **A reload served the previous edit** (GIL build, three runs in four).
   Python reuses a `.pyc` whose recorded source time, in whole seconds, and size
   match. `VERSION = 2` then `VERSION = 3`
@@ -201,29 +209,55 @@ def targets_fail_with_a_reason(directory: Path) -> None:
           "an import error inside the app was reported as a usage error, hiding its traceback")
 
 
+#: Well under the shutdown grace of 10 s, which is what a stop that waited for
+#: a worker loop never told to stop took.
+PROMPT = 5.0
+
+
+def listening(port: int) -> bool:
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=0.2):
+            return True
+    except OSError:
+        return False
+
+
 def run_stops_gracefully(directory: Path) -> None:
     """SIGTERM used to kill the server with no drain and no teardown."""
     for sig in STOP_SIGNALS:
-        port = free_port()
-        server = subprocess.Popen(
-            [str(BIN / f"oxb{EXE}"), "run", "main:app", "--port", str(port), "--workers", "1",
-             "--access-log"],
-            cwd=directory, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-            creationflags=NEW_GROUP,
-        )
-        try:
-            started = wait_for(lambda port=port: get(port) is not None, 20)
-            check(started, f"`oxb run` did not serve on port {port}")
-            server.send_signal(sig)
-            output, _ = server.communicate(timeout=20)
-        finally:
-            if server.poll() is None:
-                server.kill()
-                server.communicate()
-        name = signal.Signals(sig).name
-        check(server.returncode == 0, f"{name} made the server exit {server.returncode}")
-        check("lifespan teardown ran" in output, f"{name} skipped lifespan teardown:\n{output}")
-        check("GET / 200" in output, f"--access-log did not log the request:\n{output}")
+        # Twice: after a request, and the moment the port opens, before the
+        # server has necessarily got as far as waiting for a signal.
+        for served in (True, False):
+            port = free_port()
+            server = subprocess.Popen(
+                [str(BIN / f"oxb{EXE}"), "run", "main:app", "--port", str(port),
+                 "--workers", "3", "--access-log"],
+                cwd=directory, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                creationflags=NEW_GROUP,
+            )
+            name = signal.Signals(sig).name + ("" if served else " at once")
+            try:
+                ready = (lambda port=port: get(port) is not None) if served \
+                    else (lambda port=port: listening(port))
+                started = wait_for(ready, 20)
+                check(started, f"`oxb run` did not serve on port {port}")
+                sent = time.monotonic()
+                server.send_signal(sig)
+                output, _ = server.communicate(timeout=20)
+                took = time.monotonic() - sent
+                check(took < PROMPT, f"{name} took {took:.1f}s to stop the server")
+            except subprocess.TimeoutExpired:
+                check(False, f"{name} did not stop the server")
+                output = ""
+            finally:
+                if server.poll() is None:
+                    server.kill()
+                    server.communicate()
+            check(server.returncode == 0, f"{name} made the server exit {server.returncode}")
+            check("lifespan teardown ran" in output,
+                  f"{name} skipped lifespan teardown:\n{output}")
+            if served:
+                check("GET / 200" in output, f"--access-log did not log the request:\n{output}")
 
 
 SIGNALS_AFTER_CLIENT = '''

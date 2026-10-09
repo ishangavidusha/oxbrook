@@ -113,6 +113,9 @@ class RouteInfo:
     auth: Any = _UNSET
     """Who may call it: the nearest `auth=` of the route, its routers and the
     app, None for public. Unresolved (`_auth.UNSET`) until the app adds it."""
+    rate_limit: Any = None
+    """Its own `RateLimit`, the nearest of the route's and its routers'; None
+    for none. The app's applies on top, to every request."""
 
 
 #: Every `{name}` and `{*name}`, whatever it is called. Two routes conflict in

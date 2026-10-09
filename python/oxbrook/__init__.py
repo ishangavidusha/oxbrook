@@ -18,6 +18,7 @@ from ._depends import Depends
 from ._errors import HTTPError
 from ._forms import Form, FormData, UploadFile
 from ._health import Health
+from ._limits import RateLimit
 from ._logging import JsonFormatter, json_logging
 from ._metrics import Metrics
 from ._middleware import Reply
@@ -57,6 +58,7 @@ __all__ = [
     "JsonFormatter",
     "Message",
     "Metrics",
+    "RateLimit",
     "RedisBackend",
     "Reply",
     "Request",

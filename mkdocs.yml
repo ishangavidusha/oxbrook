@@ -108,6 +108,7 @@ nav:
       - guide/compression.md
       - guide/health.md
       - guide/metrics.md
+      - guide/rate-limits.md
       - guide/testing.md
   - Streams:
       - streams/topics.md

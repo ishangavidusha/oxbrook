@@ -31,7 +31,7 @@ different route here, as it is everywhere else.
 from dataclasses import dataclass
 from typing import Any
 
-from . import _auth
+from . import _auth, _limits
 from ._auth import UNSET
 from ._middleware import make_gate
 from ._routing import RouteInfo, build_route, route_shape
@@ -57,17 +57,24 @@ class _Declared:
     cancel_on_disconnect: bool = True
     blocking: bool = False
     auth: Any = UNSET
+    rate_limit: Any = UNSET
 
 
 class Router:
-    """A group of routes with a shared prefix, middleware and `auth=`."""
+    """A group of routes with a shared prefix, middleware, `auth=` and
+    `rate_limit=`."""
 
-    def __init__(self, prefix: str = "", *, auth: Any = UNSET) -> None:
+    def __init__(self, prefix: str = "", *, auth: Any = UNSET,
+                 rate_limit: Any = UNSET) -> None:
         """`auth` applies to every route on the router and on routers it
         includes, unless one declares its own; a route's `auth=None` makes it
-        public even here. See `oxbrook.auth`."""
+        public even here. See `oxbrook.auth`.
+
+        `rate_limit` is likewise the `RateLimit` of every route that does not
+        declare its own. It is one budget, shared by all of those routes."""
         self.prefix = check_prefix(prefix)
         self.auth = _auth.check(auth, f"Router({prefix!r})")
+        self.rate_limit = _limits.check(rate_limit, f"Router({prefix!r})")
         self._declared: list[_Declared] = []
         self._middleware: list[Any] = []
         self._children: list[tuple[Router, str]] = []
@@ -116,58 +123,62 @@ class Router:
         cancel_on_disconnect: bool = True,
         blocking: bool = False,
         auth: Any = UNSET,
+        rate_limit: Any = UNSET,
     ):
         """Register a route. See `App.route`."""
         method = method.upper()
         auth = _auth.check(auth, f"{method} {self.prefix}{path}")
+        rate_limit = _limits.check(rate_limit, f"{method} {self.prefix}{path}")
 
         def decorator(fn):
             self._declare(
                 _Declared(method, path, fn, tool, False, None, cancel_on_disconnect, blocking,
-                          auth)
+                          auth, rate_limit)
             )
             return fn
 
         return decorator
 
     def get(self, path: str, tool: bool = False, *, cancel_on_disconnect: bool = True,
-            blocking: bool = False, auth: Any = UNSET):
+            blocking: bool = False, auth: Any = UNSET, rate_limit: Any = UNSET):
         return self.route("GET", path, tool=tool,
                           cancel_on_disconnect=cancel_on_disconnect, blocking=blocking,
-                          auth=auth)
+                          auth=auth, rate_limit=rate_limit)
 
     def post(self, path: str, tool: bool = False, *, cancel_on_disconnect: bool = True,
-            blocking: bool = False, auth: Any = UNSET):
+            blocking: bool = False, auth: Any = UNSET, rate_limit: Any = UNSET):
         return self.route("POST", path, tool=tool,
                           cancel_on_disconnect=cancel_on_disconnect, blocking=blocking,
-                          auth=auth)
+                          auth=auth, rate_limit=rate_limit)
 
     def put(self, path: str, tool: bool = False, *, cancel_on_disconnect: bool = True,
-            blocking: bool = False, auth: Any = UNSET):
+            blocking: bool = False, auth: Any = UNSET, rate_limit: Any = UNSET):
         return self.route("PUT", path, tool=tool,
                           cancel_on_disconnect=cancel_on_disconnect, blocking=blocking,
-                          auth=auth)
+                          auth=auth, rate_limit=rate_limit)
 
     def patch(self, path: str, tool: bool = False, *, cancel_on_disconnect: bool = True,
-            blocking: bool = False, auth: Any = UNSET):
+            blocking: bool = False, auth: Any = UNSET, rate_limit: Any = UNSET):
         return self.route("PATCH", path, tool=tool,
                           cancel_on_disconnect=cancel_on_disconnect, blocking=blocking,
-                          auth=auth)
+                          auth=auth, rate_limit=rate_limit)
 
     def delete(self, path: str, tool: bool = False, *, cancel_on_disconnect: bool = True,
-            blocking: bool = False, auth: Any = UNSET):
+            blocking: bool = False, auth: Any = UNSET, rate_limit: Any = UNSET):
         return self.route("DELETE", path, tool=tool,
                           cancel_on_disconnect=cancel_on_disconnect, blocking=blocking,
-                          auth=auth)
+                          auth=auth, rate_limit=rate_limit)
 
     def websocket(self, path: str, authorize: Any = None, *, blocking: bool = False,
-                  auth: Any = UNSET):
+                  auth: Any = UNSET, rate_limit: Any = UNSET):
         """Register a WebSocket endpoint. See `App.websocket`."""
         auth = _auth.check(auth, f"WEBSOCKET {self.prefix}{path}")
+        rate_limit = _limits.check(rate_limit, f"WEBSOCKET {self.prefix}{path}")
 
         def decorator(fn):
             self._declare(
-                _Declared("GET", path, fn, False, True, authorize, True, blocking, auth)
+                _Declared("GET", path, fn, False, True, authorize, True, blocking, auth,
+                          rate_limit)
             )
             return fn
 
@@ -193,7 +204,8 @@ class Router:
     # ---- flattening ---------------------------------------------------------
 
     def _flatten(
-        self, outer: str, middleware: list[Any], seen: tuple = (), auth: Any = UNSET
+        self, outer: str, middleware: list[Any], seen: tuple = (), auth: Any = UNSET,
+        rate_limit: Any = UNSET,
     ) -> list[RouteInfo]:
         if self in seen:
             raise ValueError(f"{self!r} includes itself through another router")
@@ -202,6 +214,7 @@ class Router:
         chain = middleware + self._middleware
         # Nearest wins: this router's declaration over the one it inherited.
         auth = self.auth if self.auth is not UNSET else auth
+        rate_limit = self.rate_limit if self.rate_limit is not UNSET else rate_limit
 
         routes: list[RouteInfo] = []
         for declared in self._declared:
@@ -218,7 +231,10 @@ class Router:
                 route.authorizer = make_gate(declared.authorize)
             route.middleware = list(chain)
             route.auth = declared.auth if declared.auth is not UNSET else auth
+            limit = declared.rate_limit if declared.rate_limit is not UNSET else rate_limit
+            route.rate_limit = None if limit is UNSET else limit
             routes.append(route)
         for child, child_prefix in self._children:
-            routes.extend(child._flatten(base + child_prefix, chain, (*seen, self), auth))
+            routes.extend(child._flatten(base + child_prefix, chain, (*seen, self), auth,
+                                         rate_limit))
         return routes

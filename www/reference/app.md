@@ -8,6 +8,8 @@
 
 ::: oxbrook.Metrics
 
+::: oxbrook.RateLimit
+
 ::: oxbrook.HTTPError
 
 ::: oxbrook.RequestValidationError

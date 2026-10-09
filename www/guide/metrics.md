@@ -30,6 +30,7 @@ the loops are overwhelmed.
 | `oxbrook_connections_limit` | gauge | | `max_connections` |
 | `oxbrook_requests_shed_total` | counter | | `503` because every loop was at `max_concurrency` |
 | `oxbrook_request_timeouts_total` | counter | | `504` because a handler passed `request_timeout` |
+| `oxbrook_requests_limited_total` | counter | | `429` because a client was over a [rate limit](rate-limits.md) |
 | `oxbrook_draining` | gauge | | `1` while [draining](health.md#draining), with `Health` |
 
 `route` is the route's template — `/users/{user_id}` — never the path a client

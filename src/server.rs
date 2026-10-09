@@ -1,5 +1,5 @@
 use std::convert::Infallible;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -32,6 +32,7 @@ use crate::compress::{Compression, CompressionTuple, Plan, INLINE_LIMIT};
 use crate::cors::{Cors, CorsTuple};
 use crate::files::{Mount, MountTuple};
 use crate::health::{Health, HealthTuple};
+use crate::limit::{Limit, Limiter, Proxies, ProxiesTuple};
 use crate::metrics::{Metrics, MetricsTuple, Refusal, Uncounted};
 use crate::origin::{OriginsTuple, SocketOrigins};
 use crate::queue::{ConnectionLoad, Pending};
@@ -61,6 +62,13 @@ struct State {
     metrics: Option<Arc<Metrics>>,
     /// Checked on every upgrade, before the authorizer or handler.
     socket_origins: SocketOrigins,
+    /// Which peers' `X-Forwarded-For` to believe.
+    proxies: Proxies,
+    /// Every request's limit, and by route index each route's own and
+    /// whether the app's applies to it; a route beyond the end, such as a
+    /// static mount's, has none of its own and the app's applies.
+    app_limit: Option<Arc<Limit>>,
+    route_limits: Vec<RouteLimit>,
     /// Static mounts, indexed by `RouteSpec::mount`. Shared, because a file
     /// is resolved on a blocking thread that outlives the borrow.
     mounts: Vec<Arc<Mount>>,
@@ -95,7 +103,14 @@ pub struct Server {
     compression: Option<CompressionTuple>,
     health: Option<HealthTuple>,
     metrics: Option<MetricsTuple>,
+    proxies: ProxiesTuple,
+    app_limit: Option<Arc<Limit>>,
+    route_limits: Vec<RouteLimit>,
 }
+
+/// A route's own limit, and whether it is exempt from the app's: the
+/// readiness route is, like the probes the server answers itself.
+type RouteLimit = (Option<Arc<Limit>>, bool);
 
 /// (method, path, handler, params, is_websocket, authorizer, body mode,
 /// cancel_on_disconnect). The body mode is "collect", "stream" or "defer".
@@ -113,7 +128,7 @@ type Route = (
 #[pymethods]
 impl Server {
     #[new]
-    /// Twenty-one arguments, which clippy dislikes. This is the Python
+    /// Twenty-four arguments, which clippy dislikes. This is the Python
     /// constructor: the signature *is* the API, and collapsing it into a
     /// config object would move the same fields behind a dict that Python has
     /// to build on every server start.
@@ -140,7 +155,17 @@ impl Server {
         compression: Option<CompressionTuple>,
         health: Option<HealthTuple>,
         metrics: Option<MetricsTuple>,
+        proxies: ProxiesTuple,
+        app_limit: Option<PyRef<'_, Limiter>>,
+        route_limits: Vec<(Option<PyRef<'_, Limiter>>, bool)>,
     ) -> Self {
+        // The budgets themselves, taken here, on a thread attached to the
+        // interpreter: a tokio thread never touches the Python object.
+        let app_limit = app_limit.map(|l| l.inner.clone());
+        let route_limits = route_limits
+            .into_iter()
+            .map(|(l, exempt)| (l.map(|l| l.inner.clone()), exempt))
+            .collect();
         Self {
             host,
             port,
@@ -167,6 +192,9 @@ impl Server {
             compression,
             health,
             metrics,
+            proxies,
+            app_limit,
+            route_limits,
         }
     }
 
@@ -264,12 +292,26 @@ impl Server {
             .map_err(PyValueError::new_err)?
             .map(Arc::new);
 
+        let proxies = Proxies::build(self.proxies.clone()).map_err(PyValueError::new_err)?;
+
         // Built before the workers, because each Responder needs a handle to
         // spawn its disconnect watcher on.
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
             .map_err(|e| PyRuntimeError::new_err(format!("tokio runtime: {e}")))?;
+
+        // Installed now, before a worker starts or the port is bound, and
+        // kept for the server's life. A handler made only when the accept
+        // loop first waited on it missed a Ctrl-C that came sooner: Python's
+        // own handler took it, on a main thread detached until the server
+        // stopped, so the server never did.
+        let signals = if handle_signals {
+            let _context = runtime.enter();
+            Some(Terminate::install().map_err(PyRuntimeError::new_err)?)
+        } else {
+            None
+        };
 
         let mut workers: Vec<Worker> = Vec::with_capacity(self.worker_count);
         for i in 0..self.worker_count {
@@ -321,6 +363,9 @@ impl Server {
             compression,
             health: self.health.clone().map(Health::build),
             metrics,
+            proxies,
+            app_limit: self.app_limit.clone(),
+            route_limits: self.route_limits.clone(),
             socket_origins: SocketOrigins::build(self.socket_origins.clone()),
             mounts,
         });
@@ -335,7 +380,7 @@ impl Server {
             stop: self.stop.clone(),
             max_connections: self.max_connections,
             quiet: self.quiet,
-            handle_signals,
+            signals,
             tls,
             http2: self.http2,
         };
@@ -393,7 +438,8 @@ struct Listen {
     stop: Arc<Notify>,
     max_connections: usize,
     quiet: bool,
-    handle_signals: bool,
+    /// None when serving off the main thread, as the test client does.
+    signals: Option<Terminate>,
     tls: Option<tokio_rustls::TlsAcceptor>,
     http2: bool,
 }
@@ -496,8 +542,13 @@ impl Drop for Busy {
     }
 }
 
-async fn connection<S>(stream: S, protocols: &Protocols, state: Arc<State>, slot: ConnectionSlot)
-where
+async fn connection<S>(
+    stream: S,
+    protocols: &Protocols,
+    state: Arc<State>,
+    slot: ConnectionSlot,
+    peer: IpAddr,
+) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let io = TokioIo::new(stream);
@@ -505,7 +556,7 @@ where
         Protocols::Http1(builder) => {
             let svc = service_fn(move |mut req| {
                 lend_slot(&mut req, &slot);
-                serve_request(req, state.clone(), None)
+                serve_request(req, state.clone(), None, peer)
             });
             // `with_upgrades` is required for 101 responses to hand the
             // connection over instead of closing it.
@@ -531,7 +582,7 @@ where
         };
         let state = state.clone();
         async move {
-            let response = serve_request(req, state, running).await?;
+            let response = serve_request(req, state, running, peer).await?;
             let Some(busy) = busy else {
                 return Ok(response);
             };
@@ -585,33 +636,48 @@ where
     let _ = conn.await;
 }
 
-/// How the operating system asks this process to stop, besides Ctrl-C, which
-/// `tokio::signal::ctrl_c` handles on both platforms. Either way the server
-/// gets the same graceful drain rather than dying where it stands: unhandled,
-/// the default action killed the process outright, with in-flight requests cut
-/// off and lifespan teardown never run.
+/// How the operating system asks this process to stop: Ctrl-C, and besides
+/// it the signals a supervisor sends. Each gets the same graceful drain rather
+/// than dying where it stands: unhandled, the default action killed the
+/// process outright, with in-flight requests cut off and lifespan teardown
+/// never run.
 ///
 /// On Unix that is SIGTERM, what a container runtime, systemd or Kubernetes
 /// sends. Windows has no SIGTERM: a supervisor stops a child with Ctrl-Break,
 /// which is what `oxb run --reload` sends, and closing the console window
 /// arrives as its own event with a few seconds to drain before the process is
 /// killed regardless.
+///
+/// Streams rather than one-shot futures, so a signal that arrives while the
+/// accept loop is busy elsewhere is held until it looks, not lost.
 #[cfg(unix)]
-struct Terminate(tokio::signal::unix::Signal);
+struct Terminate(tokio::signal::unix::Signal, tokio::signal::unix::Signal);
 
 #[cfg(windows)]
 struct Terminate(
+    tokio::signal::windows::CtrlC,
     tokio::signal::windows::CtrlBreak,
     tokio::signal::windows::CtrlClose,
     tokio::signal::windows::CtrlShutdown,
 );
 
+async fn signalled(signals: &mut Option<Terminate>) {
+    match signals.as_mut() {
+        Some(signals) => signals.recv().await,
+        None => std::future::pending::<()>().await,
+    }
+}
+
 impl Terminate {
     #[cfg(unix)]
     fn install() -> Result<Self, String> {
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .map(Self)
-            .map_err(|e| format!("installing the SIGTERM handler: {e}"))
+        use tokio::signal::unix::{signal, SignalKind};
+        let describe =
+            |what: &str, e: std::io::Error| format!("installing the {what} handler: {e}");
+        Ok(Self(
+            signal(SignalKind::interrupt()).map_err(|e| describe("SIGINT", e))?,
+            signal(SignalKind::terminate()).map_err(|e| describe("SIGTERM", e))?,
+        ))
     }
 
     #[cfg(windows)]
@@ -619,6 +685,7 @@ impl Terminate {
         let describe =
             |what: &str, e: std::io::Error| format!("installing the {what} handler: {e}");
         Ok(Self(
+            tokio::signal::windows::ctrl_c().map_err(|e| describe("Ctrl-C", e))?,
             tokio::signal::windows::ctrl_break().map_err(|e| describe("Ctrl-Break", e))?,
             tokio::signal::windows::ctrl_close().map_err(|e| describe("console close", e))?,
             tokio::signal::windows::ctrl_shutdown().map_err(|e| describe("shutdown", e))?,
@@ -627,7 +694,10 @@ impl Terminate {
 
     #[cfg(unix)]
     async fn recv(&mut self) {
-        self.0.recv().await;
+        tokio::select! {
+            _ = self.0.recv() => {}
+            _ = self.1.recv() => {}
+        }
     }
 
     #[cfg(windows)]
@@ -636,6 +706,7 @@ impl Terminate {
             _ = self.0.recv() => {}
             _ = self.1.recv() => {}
             _ = self.2.recv() => {}
+            _ = self.3.recv() => {}
         }
     }
 }
@@ -646,7 +717,7 @@ async fn serve_loop(listen: Listen, state: Arc<State>) -> Result<(), String> {
         stop,
         max_connections,
         quiet,
-        handle_signals,
+        mut signals,
         tls,
         http2,
     } = listen;
@@ -658,12 +729,6 @@ async fn serve_loop(listen: Listen, state: Arc<State>) -> Result<(), String> {
         println!("Oxbrook listening on {scheme}://{addr}");
     }
     let protocols = Arc::new(Protocols::build(http2));
-
-    let mut terminate = if handle_signals {
-        Some(Terminate::install()?)
-    } else {
-        None
-    };
 
     // `max_concurrency` bounds requests handed to a worker, which is not the
     // same as sockets held open. An idle keep-alive connection costs a file
@@ -718,12 +783,16 @@ async fn serve_loop(listen: Listen, state: Arc<State>) -> Result<(), String> {
                 Err(_) => break,
             },
             _ = stop.notified() => if stopping(&mut draining) { break } else { continue },
+            // Waiting for a slot is no reason to ignore a signal: at
+            // `max_connections` with long-lived sockets that wait has no end.
+            _ = signalled(&mut signals) => if stopping(&mut draining) { break } else { continue },
             _ = &mut drained => break,
         };
 
         tokio::select! {
             accepted = listener.accept() => {
-                let Ok((stream, _)) = accepted else { continue };
+                let Ok((stream, peer)) = accepted else { continue };
+                let peer = peer.ip();
                 let _ = stream.set_nodelay(true);
                 let state = state.clone();
                 let protocols = protocols.clone();
@@ -733,32 +802,20 @@ async fn serve_loop(listen: Listen, state: Arc<State>) -> Result<(), String> {
                     // last socket upgraded from it closes, whichever is later.
                     let slot = ConnectionSlot(Arc::new(permit));
                     match tls {
-                        None => connection(stream, &protocols, state, slot).await,
+                        None => connection(stream, &protocols, state, slot, peer).await,
                         // Bounded like request headers: a client that connects
                         // and never finishes the handshake holds a slot too.
                         Some(acceptor) => {
                             if let Ok(Ok(stream)) =
                                 tokio::time::timeout(IDLE, acceptor.accept(stream)).await
                             {
-                                connection(stream, &protocols, state, slot).await;
+                                connection(stream, &protocols, state, slot, peer).await;
                             }
                         }
                     }
                 });
             }
-            _ = async {
-                if handle_signals {
-                    let _ = tokio::signal::ctrl_c().await;
-                } else {
-                    std::future::pending::<()>().await
-                }
-            } => if stopping(&mut draining) { break },
-            _ = async {
-                match terminate.as_mut() {
-                    Some(signals) => signals.recv().await,
-                    None => std::future::pending::<()>().await,
-                }
-            } => if stopping(&mut draining) { break },
+            _ = signalled(&mut signals) => if stopping(&mut draining) { break },
             _ = stop.notified() => if stopping(&mut draining) { break },
             _ = &mut drained => break,
         }
@@ -971,6 +1028,7 @@ async fn upgrade_websocket(
     mut req: hyper::Request<Incoming>,
     matched: crate::router::Matched,
     state: Arc<State>,
+    client: IpAddr,
 ) -> Response<Out> {
     let headers = req.headers();
     let upgrading = headers
@@ -1034,6 +1092,7 @@ async fn upgrade_websocket(
                 connection: None,
                 cancel: None,
                 queued_at: None,
+                client: Some(client),
             },
         );
         if queued.is_none() {
@@ -1112,6 +1171,7 @@ async fn upgrade_websocket(
             connection: None,
             cancel: None,
             queued_at: None,
+            client: Some(client),
         },
     );
     if queued.is_none() {
@@ -1148,6 +1208,7 @@ async fn serve_request(
     req: hyper::Request<Incoming>,
     state: Arc<State>,
     connection: Option<ConnectionLoad>,
+    peer: IpAddr,
 ) -> Result<Response<Out>, Infallible> {
     // Probes and scrapes first, before CORS and routing, and not counted:
     // they are the server describing itself, at a rate set by a scraper.
@@ -1163,11 +1224,11 @@ async fn serve_request(
         }
     }
     let Some(metrics) = state.metrics.clone() else {
-        return cors_and_handle(req, state, connection, &mut None).await;
+        return cors_and_handle(req, state, connection, peer, &mut None).await;
     };
     let started = Instant::now();
     let mut route = None;
-    let response = cors_and_handle(req, state, connection, &mut route).await?;
+    let response = cors_and_handle(req, state, connection, peer, &mut route).await?;
     if response.extensions().get::<Uncounted>().is_some() {
         return Ok(response);
     }
@@ -1184,10 +1245,11 @@ async fn cors_and_handle(
     req: hyper::Request<Incoming>,
     state: Arc<State>,
     connection: Option<ConnectionLoad>,
+    peer: IpAddr,
     route: &mut Option<usize>,
 ) -> Result<Response<Out>, Infallible> {
     let Some(cors) = state.cors.clone() else {
-        return handle(req, state, connection, route).await;
+        return handle(req, state, connection, peer, route).await;
     };
     if Cors::is_preflight(req.method(), req.headers()) {
         let mut response = match cors.preflight(req.headers()) {
@@ -1211,12 +1273,34 @@ async fn cors_and_handle(
         return Ok(response);
     }
     let origin = req.headers().get(hyper::header::ORIGIN).cloned();
-    let mut response = handle(req, state, connection, route).await?;
+    let mut response = handle(req, state, connection, peer, route).await?;
     // A socket upgrade is not subject to CORS; an authorizer checks `Origin`.
     if response.status() != StatusCode::SWITCHING_PROTOCOLS {
         cors.decorate(origin.as_ref(), response.headers_mut());
     }
     Ok(response)
+}
+
+impl State {
+    /// The app's limit, then the route's. A request the route refuses has
+    /// still spent from the app's budget: it was a request.
+    fn limited(
+        &self,
+        route: Option<usize>,
+        client: IpAddr,
+        headers: &hyper::HeaderMap,
+    ) -> Result<(), Duration> {
+        let (own, exempt) = route
+            .and_then(|i| self.route_limits.get(i))
+            .map_or((None, false), |(own, exempt)| (own.as_ref(), *exempt));
+        if let Some(limit) = self.app_limit.as_ref().filter(|_| !exempt) {
+            limit.take(Some(client), headers)?;
+        }
+        if let Some(limit) = own {
+            limit.take(Some(client), headers)?;
+        }
+        Ok(())
+    }
 }
 
 /// A place in an HTTP/2 connection's handler count, given back if the request
@@ -1253,6 +1337,7 @@ async fn handle(
     mut req: hyper::Request<Incoming>,
     state: Arc<State>,
     connection: Option<ConnectionLoad>,
+    peer: IpAddr,
     route: &mut Option<usize>,
 ) -> Result<Response<Out>, Infallible> {
     // HTTP/2 carries the host in the request line's `:authority`, which hyper
@@ -1295,6 +1380,22 @@ async fn handle(
         other => other,
     };
 
+    // Limited after routing, so a refusal is counted under its route, and
+    // before anything else: a client over its limit must not get as far as
+    // reading a body, opening a file or waking a worker. Requests that match
+    // nothing count against the app's limit too: a scanner walking paths is
+    // exactly the client it is for.
+    let client = state.proxies.client(peer, req.headers());
+    let index = match &found {
+        Ok(matched) => Some(matched.route),
+        Err(RouteError::BadParam(index, _)) => Some(*index),
+        Err(_) => None,
+    };
+    if let Err(wait) = state.limited(index, client, req.headers()) {
+        *route = index;
+        return Ok(refuse(req, crate::limit::refused(wait)).await);
+    }
+
     let matched = match found {
         Ok(matched) => {
             *route = Some(matched.route);
@@ -1329,7 +1430,7 @@ async fn handle(
     }
 
     if state.router.spec(matched.route).websocket {
-        return Ok(upgrade_websocket(req, matched, state).await);
+        return Ok(upgrade_websocket(req, matched, state, client).await);
     }
 
     // Refused before the body is read, since reading it is work too.
@@ -1408,6 +1509,7 @@ async fn handle(
         connection: connection.clone(),
         cancel: cancel.clone(),
         queued_at: None,
+        client: Some(client),
     };
 
     // No Python involvement on this thread: plain Rust data plus one byte
