@@ -23,6 +23,7 @@ async def me(request: Request):
 | `stream()` | the body as an async iterator of chunks; see [Forms and uploads](forms.md#streaming-a-body) |
 | `state` | what the app's lifespans yielded, read-only; see [Lifespan](lifespan.md) |
 | `app` | the `App` serving the request |
+| `after_response(fn, *args, **kwargs)` | run `fn` once the response is sent; see [Work after the response](after-response.md) |
 | `client` | the client's IP address, through [trusted proxies](rate-limits.md#behind-a-proxy) |
 
 ## Headers are lazy

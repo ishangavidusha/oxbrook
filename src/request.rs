@@ -37,6 +37,13 @@ pub struct Request {
     /// The client's address, through any trusted proxies. None for a request
     /// built by hand without one.
     pub client: Option<std::net::IpAddr>,
+    /// Work to run once the response is out, as (fn, args, kwargs), made on
+    /// first use like `locals`. Appended to from the handler's own loop.
+    pub after: PyOnceLock<Py<PyList>>,
+    /// Shared with the request's `Responder`: set here when work is added, so
+    /// a complete reply keeps its slot until that work has run. None for a
+    /// request built by hand, which has no responder.
+    pub kept: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl Request {
@@ -119,6 +126,8 @@ impl Request {
             filled: std::sync::OnceLock::new(),
             handoff: None,
             client,
+            after: PyOnceLock::new(),
+            kept: None,
         })
     }
 
@@ -138,6 +147,70 @@ impl Request {
             .as_ref()
             .map(|context| context.bind(py).getattr("state"))
             .transpose()
+    }
+
+    /// Run `fn(*args, **kwargs)` after the response has been sent.
+    ///
+    ///     request.after_response(send_welcome_email, user.email)
+    ///
+    /// For work the client should not wait for: an email, an audit row, a
+    /// cache to warm. It runs on the same worker loop as the handler, so what
+    /// `request.state` holds can be used, once the handler has returned and
+    /// its response has been handed to the server. An `async` function is
+    /// awaited; a plain function runs on the app's blocking threadpool, so it
+    /// does not hold up the loop.
+    ///
+    /// Several run one after another, in the order they were added. One that
+    /// raises is logged under `oxbrook.after` and the next still runs. If the
+    /// handler raises, nothing it added runs: that work belonged to a request
+    /// that failed. For a WebSocket, they run after the handler returns.
+    ///
+    /// Until they finish, the request still counts against `max_concurrency`,
+    /// so a burst of slow work sheds new requests instead of piling up
+    /// unbounded, and a graceful shutdown waits for it within
+    /// `shutdown_grace`. The client leaving does not cancel it: the response
+    /// was already sent. Work that must survive a restart belongs in a queue,
+    /// such as a durable topic, rather than here.
+    #[pyo3(signature = (r#fn, *args, **kwargs))]
+    fn after_response(
+        &self,
+        py: Python<'_>,
+        r#fn: Bound<'_, PyAny>,
+        args: Bound<'_, PyTuple>,
+        kwargs: Option<Bound<'_, PyDict>>,
+    ) -> PyResult<()> {
+        if !r#fn.is_callable() {
+            return Err(pyo3::exceptions::PyTypeError::new_err(format!(
+                "after_response needs a callable, got {}",
+                r#fn.get_type().name()?
+            )));
+        }
+        let kwargs = match kwargs {
+            Some(kwargs) => kwargs.into_any(),
+            None => PyDict::new(py).into_any(),
+        };
+        let entry = PyTuple::new(py, [r#fn, args.into_any(), kwargs])?;
+        // Before the reply can be sent: a complete reply otherwise frees the
+        // slot as it goes, and this work would no longer be counted.
+        if let Some(kept) = &self.kept {
+            kept.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        self.after
+            .get_or_init(py, || PyList::empty(py).unbind())
+            .bind(py)
+            .append(entry)
+    }
+
+    /// The work added by `after_response`, removed from the request: whoever
+    /// takes it is responsible for running it. Empty when there is none.
+    fn _take_after<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+        let Some(list) = self.after.get(py) else {
+            return Ok(PyList::empty(py));
+        };
+        let list = list.bind(py);
+        let taken = PyList::new(py, list.iter())?;
+        list.del_slice(0, list.len())?;
+        Ok(taken)
     }
 
     /// Scratch space for this request alone: a plain dict, empty until

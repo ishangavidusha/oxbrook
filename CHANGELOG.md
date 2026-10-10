@@ -40,6 +40,12 @@ release does not; changes that break existing code are listed under
   `--env-file` loads a `.env` for development and is re-read on reload.
   `oxbrook settings main:app` lists what an app needs and exits 1 if the
   environment does not provide it.
+- **Work after the response.** `request.after_response(fn, *args, **kwargs)`
+  runs `fn` on the handler's loop once the response is sent — awaited if
+  async, on the blocking threadpool if not — in order, with failures logged.
+  Nothing runs if the handler raised. The request keeps its place under
+  `max_concurrency` until the work is done, so it is bounded and a graceful
+  shutdown waits for it.
 - **Fixed:** Ctrl-C stopped a server with several worker loops only after the
   whole `shutdown_grace`, and a Ctrl-C sent just as the server started was
   ignored. Both now stop at once.

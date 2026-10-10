@@ -208,7 +208,14 @@ class Capability:
             if wait is not None:
                 return _limited(wait)
         target = self.target if self.target is not None else self.route.target
-        return await target(request, **params)
+        result = await target(request, **params)
+        # Work the tool set aside runs after the `/mcp` response, as it would
+        # after its own over HTTP: handed to the request that carried the call.
+        # Not reached when the tool raised, so a failed call's work is dropped.
+        if parent is not None:
+            for fn, args, kwargs in request._take_after():
+                parent.after_response(fn, *args, **kwargs)
+        return result
 
 
 def _limited(wait: float) -> Response:

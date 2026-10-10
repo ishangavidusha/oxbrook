@@ -98,6 +98,7 @@ nav:
       - guide/middleware.md
       - guide/dependencies.md
       - guide/blocking.md
+      - guide/after-response.md
       - guide/configuration.md
       - guide/lifespan.md
       - guide/database.md

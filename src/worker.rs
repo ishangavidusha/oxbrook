@@ -130,6 +130,7 @@ impl Drainer {
                 Some(dict)
             };
 
+            let kept = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
             let request = Py::new(
                 py,
                 Request {
@@ -145,6 +146,8 @@ impl Drainer {
                     filled: std::sync::OnceLock::new(),
                     handoff: item.handoff,
                     client: item.client,
+                    after: pyo3::sync::PyOnceLock::new(),
+                    kept: Some(kept.clone()),
                 },
             )?;
             let responder = Py::new(
@@ -155,6 +158,7 @@ impl Drainer {
                     self.runtime.clone(),
                     item.connection,
                     item.cancel.clone(),
+                    kept,
                 ),
             )?;
             let coro = match item.websocket {

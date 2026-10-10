@@ -184,6 +184,12 @@ def find(handlers: dict[type, Any], exc: BaseException) -> Any:
     return None
 
 
+def _drop_after(request: Any) -> None:
+    take = getattr(request, "_take_after", None)
+    if take is not None:
+        take()
+
+
 def guard(target: Any, handlers: dict[type, Any]) -> Any:
     """Wrap a handler so exceptions with a registered handler become replies.
 
@@ -199,6 +205,9 @@ def guard(target: Any, handlers: dict[type, Any]) -> Any:
             handler = find(handlers, exc)
             if handler is None:
                 raise
+            # The handler raised: what it set aside for after the response
+            # belonged to a request that failed, mapped to a reply or not.
+            _drop_after(request)
             try:
                 return await handler(request, exc)
             except HTTPError as answer:

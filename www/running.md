@@ -278,6 +278,8 @@ container's stop signal. Wrapped in a shell, the shell receives it instead.
 Ctrl-C (`SIGINT`) and `SIGTERM` both stop the server gracefully: it stops
 accepting, waits up to `shutdown_grace` for in-flight requests, runs the
 lifespan teardown, then exits with status 0. Streams and sockets are closed.
+[Work set aside for after a response](guide/after-response.md) counts as in
+flight, so the drain waits for it too.
 
 On Windows, which has no `SIGTERM`, the same drain runs on Ctrl-C, on
 Ctrl-Break — what `oxbrook run --reload` sends its server — and when the

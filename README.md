@@ -49,8 +49,8 @@ response bodies, forms and multipart uploads parsed in Rust, request bodies
 larger than memory with backpressure, static files, routers, middleware,
 exception handlers, dependency injection with teardown, lifespans, signed
 cookie sessions, CORS, response compression, health probes, Prometheus metrics,
-rate limits, typed settings from the environment, and OpenAPI 3.1 from the
-same route metadata the router uses. Authentication
+rate limits, typed settings from the environment, work after the response,
+and OpenAPI 3.1 from the same route metadata the router uses. Authentication
 with one `auth=` declaration — API keys, bearer tokens, JWT, OpenID Connect
 providers, Basic, sessions or a scheme of your own — enforced before the body
 is read, on HTTP, WebSockets and agent tool calls alike, and logging people in

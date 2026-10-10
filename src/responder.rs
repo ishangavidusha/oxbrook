@@ -77,6 +77,11 @@ pub struct Responder {
     cancel: Option<Arc<Cancel>>,
     /// Guards against releasing twice, since both `finish` and `Drop` release.
     released: AtomicBool,
+    /// Set by `Request.after_response`, through the flag both share: the
+    /// request is still busy once its reply is sent, and keeps its slot until
+    /// `finish`. Shared rather than set from Python before the reply, which
+    /// was a call on every request to learn what is almost always false.
+    kept: Arc<AtomicBool>,
 }
 
 impl Drop for Responder {
@@ -108,6 +113,7 @@ impl Responder {
         runtime: tokio::runtime::Handle,
         connection: Option<ConnectionLoad>,
         cancel: Option<Arc<Cancel>>,
+        kept: Arc<AtomicBool>,
     ) -> Self {
         Self {
             tx: Mutex::new(Some(tx)),
@@ -118,6 +124,7 @@ impl Responder {
             connection,
             cancel,
             released: AtomicBool::new(false),
+            kept,
         }
     }
 
@@ -141,7 +148,7 @@ impl Responder {
         if let Some(cancel) = &self.cancel {
             cancel.answer();
         }
-        if matches!(reply.body, Body::Full(_)) {
+        if matches!(reply.body, Body::Full(_)) && !self.kept.load(Ordering::Relaxed) {
             self.release_once();
         }
         // If the client went away the receiver is gone; that's not a Python error.
@@ -225,6 +232,18 @@ impl Responder {
     /// limit; it cannot be governed by garbage-collection timing.
     fn finish(&self) {
         self.release_once();
+    }
+
+    /// `finish`, unless work was left for after the response: then the slot
+    /// is kept and True returned, and the caller runs the work and calls
+    /// `finish` after it. One call either way, so a request with nothing left
+    /// to run pays nothing to find that out.
+    fn finish_or_keep(&self) -> bool {
+        if self.kept.load(Ordering::Relaxed) {
+            return true;
+        }
+        self.release_once();
+        false
     }
 
     /// Close a streaming response.

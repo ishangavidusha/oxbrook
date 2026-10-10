@@ -8,6 +8,8 @@ parameters already coerced to Python objects.
 
 import asyncio
 import datetime
+import inspect
+import logging
 import sys
 import uuid
 
@@ -18,6 +20,41 @@ from ._response import Response, header_pairs
 from ._schema import RequestValidationError, encode, is_model_instance, to_json
 from ._sse import CLOSED, FULL, SSE, SSE_HEADERS, format_event
 from ._websocket import WebSocket
+
+after_log = logging.getLogger("oxbrook.after")
+
+
+async def run_after(request) -> None:
+    """Run what the handler added with `request.after_response`, in order.
+
+    Awaited by the task that ran the handler, after its reply was handed over
+    and before its slot is released: the work counts as in flight, so it is
+    bounded by `max_concurrency` and a graceful shutdown waits for it.
+    """
+    for fn, args, kwargs in request._take_after():
+        try:
+            if _is_async(fn):
+                await fn(*args, **kwargs)
+            else:
+                # Off the loop: a plain function that sends an email over SMTP
+                # would otherwise freeze every request the loop is serving.
+                app = request.app
+                if app is not None:
+                    await app._blocking.run(fn, *args, **kwargs)
+                else:
+                    await asyncio.to_thread(fn, *args, **kwargs)
+        except Exception as exc:  # noqa: BLE001 - one failure must not stop the rest
+            after_log.exception(
+                "after-response work raised",
+                exc_info=exc,
+                extra={"method": request.method, "path": request.path,
+                       "work": getattr(fn, "__qualname__", repr(fn))},
+            )
+
+
+def _is_async(fn) -> bool:
+    """An `async def`, a partial of one, or an object whose `__call__` is one."""
+    return inspect.iscoroutinefunction(fn) or inspect.iscoroutinefunction(type(fn).__call__)
 
 
 async def run_websocket(handler, request, responder, core, params):
@@ -42,6 +79,7 @@ async def run_websocket(handler, request, responder, core, params):
     else:
         task = asyncio.ensure_future(handler(request, socket, **params))
 
+    failed = closed = False
     try:
         # Racing the handler against the close is what lets the common pattern
         # work: a handler blocked on `async for item in topic.subscribe()` has
@@ -54,9 +92,16 @@ async def run_websocket(handler, request, responder, core, params):
         else:
             exc = task.exception()
             if exc is not None:
+                failed = True
                 logger.exception("websocket handler raised", exc_info=exc)
-    finally:
         core.close()
+        closed = True
+        # A peer leaving is how a socket normally ends, not a failure.
+        if not failed:
+            await run_after(request)
+    finally:
+        if not closed:
+            core.close()
         responder.finish()
 
 
@@ -204,25 +249,37 @@ async def run_handler(handler, request, responder, params, debug):
     in one process cannot end up sharing one another's setting.
     """
     try:
-        await _respond(handler, request, responder, params, debug)
-    finally:
-        # Frees the worker's concurrency slot now rather than whenever Python
-        # happens to collect the responder.
+        answered = await _respond(handler, request, responder, params, debug)
+    except BaseException:
+        # Cancelled, most likely: the client left before the answer. Nothing
+        # set aside runs, and the slot is freed on the way out.
         responder.finish()
+        raise
+    # Frees the worker's concurrency slot now rather than whenever Python
+    # happens to collect the responder — unless the handler left work for
+    # after the response, which holds it until that work is done.
+    if responder.finish_or_keep():
+        try:
+            if answered:
+                await run_after(request)
+        finally:
+            responder.finish()
 
 
-async def _respond(handler, request, responder, params, debug):
+async def _respond(handler, request, responder, params, debug) -> bool:
+    """Answer the request; True when the handler returned rather than raised,
+    which is when the work it added for after the response should run."""
     try:
         result = await (handler(request) if params is None else handler(request, **params))
     except RequestValidationError as exc:
         responder.send(422, PROBLEM, exc.body)
-        return
+        return False
     except HTTPError as exc:
         # The default handling, for a route with no middleware and no
         # registered handlers, which is wrapped in nothing. Anything registered
         # was already applied by the time an exception reaches here.
         responder.send(exc.status, PROBLEM, http_error_body(exc), header_pairs(exc.headers))
-        return
+        return False
     except Exception as exc:  # noqa: BLE001 - a handler crash must still answer
         # The detail goes to the server's log. The client gets a status and
         # nothing else, unless the app was started with debug=True.
@@ -233,7 +290,7 @@ async def _respond(handler, request, responder, params, debug):
         )
         detail = f"{type(exc).__name__}: {exc}" if debug else None
         responder.send(500, PROBLEM, problem(500, detail))
-        return
+        return False
 
     # Everything below is the response, and it can fail on its own: a value
     # pydantic or serde cannot encode, a `Response` whose body is not bytes, a
@@ -302,3 +359,5 @@ async def _respond(handler, request, responder, params, debug):
         except Exception:  # noqa: BLE001
             # Already answered, or a stream that had started. Nothing to add.
             pass
+        return False
+    return True
