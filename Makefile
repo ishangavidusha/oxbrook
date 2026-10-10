@@ -148,7 +148,7 @@ coverage-rust:
 lint:
 	cargo fmt --check
 	cargo clippy --all-targets -- -D warnings
-	.venv-gil/bin/python -m ruff check python/oxbrook tests bench examples hooks
+	.venv-gil/bin/python -m ruff check python/oxbrook tests bench examples hooks eval
 
 # --- public documentation ---------------------------------------------------
 # Built from the GIL venv, which is where the docs tooling lives. mkdocstrings

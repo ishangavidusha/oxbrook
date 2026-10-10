@@ -85,6 +85,7 @@ ignore = [
 "tests/*" = ["BLE001"]
 "bench/*" = ["BLE001", "UP031", "E501"]
 "examples/*" = ["BLE001"]
+"eval/*" = ["BLE001"]
 # `oxbrook new` copies these into a project where `app` is first-party; here
 # it looks third-party, and the import order each wants is different.
 "python/oxbrook/_template/*" = ["I001"]

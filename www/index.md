@@ -82,9 +82,10 @@ a single worker loop.
 
 ## With a coding assistant
 
-Oxbrook is newer than most models' training data, so an assistant left to
-guess writes FastAPI with an Oxbrook import: synchronous handlers, a
-module-level connection pool, a handler without its request argument. Give it
+Oxbrook is newer than most models' training data. An assistant that has not
+read its documentation falls back on FastAPI habits — a handler without its
+request argument is the usual first one — or works the API out from the
+installed package's source, which takes it about twice as many steps. Give it
 the documentation instead:
 
 - [`llms.txt`](https://ishangavidusha.github.io/oxbrook/llms.txt) — an index of every page, with the rules that differ
