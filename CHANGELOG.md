@@ -52,6 +52,12 @@ release does not; changes that break existing code are listed under
   in one file. Every page is also served as Markdown beside its HTML, and has
   a **Copy page** button. All of it is generated from the same sources as the
   site at build time.
+- **`oxbrook new`.** Starts a project that passes its own tests from the
+  start: an API in a router, settings, health probes, a pytest suite against
+  the real server, and an `AGENTS.md` (imported by `CLAUDE.md`) that sends a
+  coding assistant to the documentation and lists the rules where Oxbrook
+  differs from FastAPI. The dependency is pinned to the installed minor
+  version.
 - **Fixed:** Ctrl-C stopped a server with several worker loops only after the
   whole `shutdown_grace`, and a Ctrl-C sent just as the server started was
   ignored. Both now stop at once.

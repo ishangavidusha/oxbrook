@@ -1,0 +1,3 @@
+# Copy to .env for development; `oxbrook run --env-file .env` reads it.
+# In production, set these in the environment instead.
+APP_DEBUG=true

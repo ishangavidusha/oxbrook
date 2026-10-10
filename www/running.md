@@ -75,6 +75,9 @@ oxbrook openapi main:app -o openapi.json
 oxbrook settings main:app        # the variables its Settings read, and what is missing
 ```
 
+`oxbrook new DIRECTORY` starts a project instead; see
+[Starting a project](install.md#starting-a-project).
+
 `routes` marks tools, WebSockets, streaming bodies, forms and router middleware,
 and lists `/openapi.json`, `/docs` and `/mcp` as the server would serve them.
 `openapi` writes the document without starting a server, for generating clients

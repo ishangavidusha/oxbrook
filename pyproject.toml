@@ -51,7 +51,7 @@ auth = ["pyjwt[crypto]>=2.10"]
 bench = ["uvicorn", "granian", "fastapi"]
 test = [
     "httpx[http2]", "cryptography", "openapi-spec-validator", "websockets", "redis>=5", "mcp",
-    "coverage", "asyncpg", "sqlalchemy[asyncio]>=2", "alembic", "pyjwt[crypto]>=2.10",
+    "coverage", "asyncpg", "sqlalchemy[asyncio]>=2", "alembic", "pyjwt[crypto]>=2.10", "pytest",
 ]
 docs = ["mkdocs-material>=9.5", "mkdocstrings[python]>=0.26", "ruff"]
 
@@ -85,6 +85,9 @@ ignore = [
 "tests/*" = ["BLE001"]
 "bench/*" = ["BLE001", "UP031", "E501"]
 "examples/*" = ["BLE001"]
+# `oxbrook new` copies these into a project where `app` is first-party; here
+# it looks third-party, and the import order each wants is different.
+"python/oxbrook/_template/*" = ["I001"]
 
 [tool.coverage.run]
 # The CLI suite drives real `oxbrook` processes, and the reload supervisor

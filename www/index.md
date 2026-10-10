@@ -94,3 +94,7 @@ the documentation instead:
 - Every page as Markdown: **Copy page** at the top of each page, or the page's
   path with `.md` in place of the trailing slash, such as
   [`guide/routing.md`](https://ishangavidusha.github.io/oxbrook/guide/routing.md).
+
+A project started with [`oxbrook new`](install.md#starting-a-project) carries
+an `AGENTS.md` that points an assistant at these and lists the rules it must
+not guess.

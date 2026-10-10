@@ -72,6 +72,29 @@ uv pip install --python .venv/Scripts/python.exe maturin
 Rebuild after any change to `src/`; the `make` targets that need it already
 do. The contributing guide covers the test suites and conventions.
 
+## Starting a project
+
+```bash
+oxbrook new notes-api
+cd notes-api
+uv sync
+uv run pytest
+uv run oxbrook run app.main:app --reload --env-file .env.example
+```
+
+`oxbrook new` writes a project that runs and passes its own tests from the
+start: a `/notes` API in a router, with pydantic models, configuration through
+[`Settings`](guide/configuration.md), [health probes](guide/health.md), a
+pytest suite against the real server, and a `.python-version` that has uv
+install the free-threaded build. The dependency is pinned to the installed
+minor version, since a `0.x` minor release may change the API.
+
+It also writes `AGENTS.md`, with `CLAUDE.md` importing it, for coding
+assistants: where the documentation is, and the rules where Oxbrook differs
+from what an assistant trained on FastAPI will assume. The directory must not
+exist, or be empty; `oxbrook new .` fills the current one. The project's name
+is the directory's, unless `--name` gives another.
+
 ## First app
 
 ```python

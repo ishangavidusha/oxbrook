@@ -5,6 +5,7 @@
     oxbrook routes main:app               list every route
     oxbrook openapi main:app              print the OpenAPI document
     oxbrook settings main:app             list the settings it reads, and what is missing
+    oxbrook new notes-api                 start a project: an app, its tests, AGENTS.md
 
 A target is `module:attribute`, imported with the working directory (or
 `--app-dir`) on the path. With no attribute, `app` is used. `--factory` calls
@@ -30,6 +31,7 @@ import importlib
 import json
 import logging
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -604,6 +606,89 @@ def settings(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+# a new project
+# ---------------------------------------------------------------------------
+TEMPLATE = Path(__file__).parent / "_template"
+
+#: A project name as pip and uv accept one (PEP 508), kept to what is also a
+#: sensible directory name.
+PROJECT_NAME = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?")
+
+
+def requirement() -> str:
+    """The dependency a new project declares: this minor version and its patches.
+
+    Nothing is API-stable while the version is 0.x, and a minor release may
+    break code, so a project made today should not pick up the next one
+    unasked.
+    """
+    from importlib.metadata import PackageNotFoundError
+    from importlib.metadata import version as installed
+
+    try:
+        number = installed("oxbrook")
+    except PackageNotFoundError:
+        return "oxbrook"
+    parts = number.split(".")
+    if len(parts) < 2 or not (parts[0].isdigit() and parts[1].isdigit()):
+        return "oxbrook"
+    major, minor = int(parts[0]), int(parts[1])
+    upper = f"{major}.{minor + 1}" if major == 0 else f"{major + 1}"
+    return f"oxbrook>={major}.{minor},<{upper}"
+
+
+def new(args: argparse.Namespace) -> int:
+    """Write a working project into a new directory: an app with one router,
+    settings, tests, and an AGENTS.md telling a coding assistant how Oxbrook
+    differs from what it will guess."""
+    target = Path(args.directory)
+    name = args.name or target.resolve().name
+    if not PROJECT_NAME.fullmatch(name):
+        raise UsageError(f"{name!r} is not a usable project name: use letters, digits, "
+                         "'-', '_' and '.', starting and ending with a letter or digit "
+                         "(or pass --name)")
+    if target.exists() and (not target.is_dir() or any(target.iterdir())):
+        raise UsageError(f"{target} already exists and is not empty")
+
+    values = {
+        "{{name}}": name.lower(),
+        "{{title}}": re.sub(r"[-_.]+", " ", name).strip().title(),
+        "{{oxbrook}}": requirement(),
+    }
+    written = []
+    for source in sorted(TEMPLATE.rglob("*")):
+        if source.is_dir() or "__pycache__" in source.parts:
+            continue
+        relative = source.relative_to(TEMPLATE)
+        # Stored under other names so that tools working on this repository
+        # leave them alone: git and packaging would obey a .gitignore, and
+        # linters and uv would read a pyproject.toml as this repository's.
+        if relative.name.startswith("dot-"):
+            relative = relative.with_name("." + relative.name.removeprefix("dot-"))
+        relative = relative.with_name(relative.name.removesuffix(".tmpl"))
+        text = source.read_text(encoding="utf-8")
+        for placeholder, value in values.items():
+            text = text.replace(placeholder, value)
+        destination = target / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(text, encoding="utf-8")
+        written.append(relative)
+
+    shown = os.path.relpath(target) if not target.is_absolute() else str(target)
+    print(f"Created {name} in {shown} ({len(written)} files).")
+    print()
+    print("Next:")
+    print(f"  cd {shown}")
+    print("  uv sync")
+    print("  uv run pytest")
+    print("  uv run oxbrook run app.main:app --reload --env-file .env.example")
+    print()
+    print("AGENTS.md tells a coding assistant where Oxbrook's documentation is "
+          "and what it must not guess.")
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # argument parsing
 # ---------------------------------------------------------------------------
 def version() -> str:
@@ -701,6 +786,12 @@ def parser() -> argparse.ArgumentParser:
     settings_cmd.add_argument("--env-file", **env_file)
     settings_cmd.add_argument("--json", action="store_true", help="print JSON instead of a table")
     settings_cmd.set_defaults(handler=settings)
+
+    new_cmd = commands.add_parser(
+        "new", help="start a project: an app, its tests, and AGENTS.md for coding assistants")
+    new_cmd.add_argument("directory", help="where to create it; must not exist or be empty")
+    new_cmd.add_argument("--name", help="the project's name (default: the directory's name)")
+    new_cmd.set_defaults(handler=new)
 
     return main
 
