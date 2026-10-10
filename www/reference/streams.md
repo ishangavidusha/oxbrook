@@ -1,3 +1,7 @@
+---
+description: API reference for Topic, Subscription and the backpressure policies, SSE, Event and WebSocket.
+---
+
 # Topics and streaming
 
 ::: oxbrook._streams.Topic

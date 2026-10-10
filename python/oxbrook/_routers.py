@@ -141,30 +141,35 @@ class Router:
 
     def get(self, path: str, tool: bool = False, *, cancel_on_disconnect: bool = True,
             blocking: bool = False, auth: Any = UNSET, rate_limit: Any = UNSET):
+        """Register a GET route. The arguments are `route`'s."""
         return self.route("GET", path, tool=tool,
                           cancel_on_disconnect=cancel_on_disconnect, blocking=blocking,
                           auth=auth, rate_limit=rate_limit)
 
     def post(self, path: str, tool: bool = False, *, cancel_on_disconnect: bool = True,
             blocking: bool = False, auth: Any = UNSET, rate_limit: Any = UNSET):
+        """Register a POST route. The arguments are `route`'s."""
         return self.route("POST", path, tool=tool,
                           cancel_on_disconnect=cancel_on_disconnect, blocking=blocking,
                           auth=auth, rate_limit=rate_limit)
 
     def put(self, path: str, tool: bool = False, *, cancel_on_disconnect: bool = True,
             blocking: bool = False, auth: Any = UNSET, rate_limit: Any = UNSET):
+        """Register a PUT route. The arguments are `route`'s."""
         return self.route("PUT", path, tool=tool,
                           cancel_on_disconnect=cancel_on_disconnect, blocking=blocking,
                           auth=auth, rate_limit=rate_limit)
 
     def patch(self, path: str, tool: bool = False, *, cancel_on_disconnect: bool = True,
             blocking: bool = False, auth: Any = UNSET, rate_limit: Any = UNSET):
+        """Register a PATCH route. The arguments are `route`'s."""
         return self.route("PATCH", path, tool=tool,
                           cancel_on_disconnect=cancel_on_disconnect, blocking=blocking,
                           auth=auth, rate_limit=rate_limit)
 
     def delete(self, path: str, tool: bool = False, *, cancel_on_disconnect: bool = True,
             blocking: bool = False, auth: Any = UNSET, rate_limit: Any = UNSET):
+        """Register a DELETE route. The arguments are `route`'s."""
         return self.route("DELETE", path, tool=tool,
                           cancel_on_disconnect=cancel_on_disconnect, blocking=blocking,
                           auth=auth, rate_limit=rate_limit)

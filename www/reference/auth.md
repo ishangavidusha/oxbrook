@@ -1,3 +1,7 @@
+---
+description: API reference for oxbrook.auth: the Bearer, APIKey, Basic, JWT, OIDC and session schemes, OAuthLogin, Principal, Tickets and the requirement helpers.
+---
+
 # Authentication
 
 ::: oxbrook.auth

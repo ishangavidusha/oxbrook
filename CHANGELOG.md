@@ -46,6 +46,12 @@ release does not; changes that break existing code are listed under
   Nothing runs if the handler raised. The request keeps its place under
   `max_concurrency` until the work is done, so it is bounded and a graceful
   shutdown waits for it.
+- **Documentation for coding assistants.** The site publishes `llms.txt`, an
+  index of every page that opens with the rules where Oxbrook differs from
+  FastAPI, and `llms-full.txt`, the whole documentation with the API reference
+  in one file. Every page is also served as Markdown beside its HTML, and has
+  a **Copy page** button. All of it is generated from the same sources as the
+  site at build time.
 - **Fixed:** Ctrl-C stopped a server with several worker loops only after the
   whole `shutdown_grace`, and a Ctrl-C sent just as the server started was
   ignored. Both now stop at once.

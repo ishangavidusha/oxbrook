@@ -1,3 +1,7 @@
+---
+description: Installing Oxbrook with pip or uv, the CPython 3.14 builds it needs, building from source, and a first app.
+---
+
 # Install
 
 ```bash

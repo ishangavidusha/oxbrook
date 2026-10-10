@@ -1,0 +1,28 @@
+.ox-page-actions {
+  float: right;
+  display: flex;
+  gap: 0.4rem;
+  margin: 0.3rem 0 0 1rem;
+}
+
+.ox-page-action {
+  font: inherit;
+  font-size: 0.65rem;
+  line-height: 1;
+  padding: 0.35rem 0.6rem;
+  border: 1px solid var(--md-default-fg-color--lighter);
+  border-radius: 0.2rem;
+  background: transparent;
+  color: var(--md-default-fg-color--light);
+  cursor: pointer;
+}
+
+.ox-page-action:hover,
+.ox-page-action:focus-visible {
+  color: var(--md-accent-fg-color);
+  border-color: var(--md-accent-fg-color);
+}
+
+@media screen and (max-width: 44.984375em) {
+  .ox-page-actions { float: none; margin: 0 0 0.6rem; }
+}

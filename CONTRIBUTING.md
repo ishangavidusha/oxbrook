@@ -205,6 +205,12 @@ make docs          # builds with --strict; a broken link or anchor fails it
 make docs-serve    # live reload
 ```
 
+The build also writes `llms.txt`, `llms-full.txt` and a Markdown copy of every
+page, through the hook in [`hooks/llms.py`](hooks/llms.py), from the same
+sources; the opening of `llms.txt` is [`hooks/llms-intro.md`](hooks/llms-intro.md).
+A page whose first paragraph does not summarise it sets `description:` in its
+front matter, which the index and the HTML meta description both use.
+
 Run it after changing a public docstring or a page. Write pages impersonally
 and address the reader as "you": state what the framework does and why, not the
 history of arriving at it.

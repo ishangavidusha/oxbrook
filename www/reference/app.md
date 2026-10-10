@@ -1,3 +1,7 @@
+---
+description: API reference for App, Router, Health, Metrics, RateLimit, Settings and the error types.
+---
+
 # App
 
 ::: oxbrook.App

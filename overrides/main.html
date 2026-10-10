@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+
+{#- Every page's source is published beside it as Markdown (hooks/llms.py);
+    these two controls hand it to a reader who wants to paste it into an
+    assistant. -#}
+{% block content %}
+  {% if page and page.file %}
+    {% set markdown = base_url ~ "/" ~ page.file.src_uri %}
+    <div class="ox-page-actions">
+      <button type="button" class="ox-page-action" data-copy-markdown="{{ markdown }}"
+              title="Copy this page as Markdown">Copy page</button>
+      <a class="ox-page-action" href="{{ markdown }}" title="This page as Markdown">Markdown</a>
+    </div>
+  {% endif %}
+  {{ super() }}
+{% endblock %}

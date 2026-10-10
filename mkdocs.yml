@@ -9,6 +9,7 @@ site_dir: site
 
 theme:
   name: material
+  custom_dir: overrides
   features:
     - navigation.sections
     - navigation.top
@@ -59,6 +60,15 @@ markdown_extensions:
   - pymdownx.superfences
   - pymdownx.tabbed:
       alternate_style: true
+
+extra_css:
+  - assets/page-actions.css
+extra_javascript:
+  - assets/page-actions.js
+
+# llms.txt, llms-full.txt and a .md beside every page, for coding agents.
+hooks:
+  - hooks/llms.py
 
 plugins:
   - search

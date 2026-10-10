@@ -79,3 +79,18 @@ a single worker loop.
 - [Topics](streams/topics.md) — fan-out, backpressure, cross-loop delivery.
 - [Agents](agents.md) — one handler, served to humans and to models.
 - [Why Oxbrook is built this way](design/why.md) — the design decisions and their cost.
+
+## With a coding assistant
+
+Oxbrook is newer than most models' training data, so an assistant left to
+guess writes FastAPI with an Oxbrook import: synchronous handlers, a
+module-level connection pool, a handler without its request argument. Give it
+the documentation instead:
+
+- [`llms.txt`](https://ishangavidusha.github.io/oxbrook/llms.txt) — an index of every page, with the rules that differ
+  from FastAPI at the top.
+- [`llms-full.txt`](https://ishangavidusha.github.io/oxbrook/llms-full.txt) — the whole documentation, API reference
+  included, in one file.
+- Every page as Markdown: **Copy page** at the top of each page, or the page's
+  path with `.md` in place of the trailing slash, such as
+  [`guide/routing.md`](https://ishangavidusha.github.io/oxbrook/guide/routing.md).
