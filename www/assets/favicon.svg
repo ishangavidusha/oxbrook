@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="72 68 368 368">
+  <title>Oxbrook</title>
+  <defs>
+    <path id="muzzle" d="M224 300 Q256 290 288 300 Q308 306 308 328 Q308 360 278 360 L234 360 Q204 360 204 328 Q204 306 224 300 Z"/>
+    <mask id="face">
+      <rect x="0" y="0" width="512" height="512" fill="#fff"/>
+      <use href="#muzzle" fill="#000" stroke="#000" stroke-width="16" stroke-linejoin="round"/>
+    </mask>
+    <mask id="brook">
+      <rect x="0" y="0" width="512" height="512" fill="#fff"/>
+      <path d="M216 328 q13.33 -11 26.67 0 t26.67 0 t26.67 0" fill="none" stroke="#000" stroke-width="9" stroke-linecap="round"/>
+    </mask>
+  </defs>
+  <g fill="#C2410C">
+    <path d="M162 212 L136 212 C100 212 84 176 94 144 C100 124 112 108 130 96 C120 116 118 136 124 150 C130 166 142 176 160 176 L162 176 Z"/>
+    <path d="M350 212 L376 212 C412 212 428 176 418 144 C412 124 400 108 382 96 C392 116 394 136 388 150 C382 166 370 176 352 176 L350 176 Z"/>
+    <path d="M162 224 L104 236 C118 256 142 262 162 256 Z"/>
+    <path d="M350 224 L408 236 C394 256 370 262 350 256 Z"/>
+    <path mask="url(#face)" d="M168 170 L256 140 L344 170 L344 296 Q344 316 330 332 L272 396 Q256 412 240 396 L182 332 Q168 316 168 296 Z"/>
+  </g>
+  <use href="#muzzle" fill="#0E7490"/>
+</svg>

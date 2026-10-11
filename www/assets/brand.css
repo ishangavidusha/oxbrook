@@ -1,0 +1,43 @@
+/* The logo's colours: rust for the Rust core, teal for the brook. The header
+   stays neutral so the mark reads against it in both schemes. */
+:root,
+[data-md-color-scheme="default"] {
+  --md-primary-fg-color: #ffffff;
+  --md-primary-fg-color--light: #ffffff;
+  --md-primary-fg-color--dark: #f4f1ee;
+  --md-primary-bg-color: #1f1a17;
+  --md-primary-bg-color--light: #1f1a17b3;
+  --md-accent-fg-color: #c2410c;
+  --md-accent-fg-color--transparent: #c2410c1a;
+  --md-typeset-a-color: #0e7490;
+}
+
+[data-md-color-scheme="slate"] {
+  --md-primary-fg-color: #16181d;
+  --md-primary-fg-color--light: #16181d;
+  --md-primary-fg-color--dark: #101215;
+  --md-primary-bg-color: #eceae7;
+  --md-primary-bg-color--light: #eceae7b3;
+  --md-accent-fg-color: #ea6a2c;
+  --md-accent-fg-color--transparent: #ea6a2c1a;
+  --md-typeset-a-color: #2bb0c6;
+}
+
+/* A white header needs an edge where the page begins. */
+.md-header {
+  border-bottom: 1px solid var(--md-default-fg-color--lightest);
+}
+
+.md-header__button.md-logo img,
+.md-header__button.md-logo svg {
+  height: 1.8rem;
+}
+
+/* The tabs and search sit in the header too, so they follow its colours. */
+.md-search__form {
+  background-color: var(--md-default-fg-color--lightest);
+}
+
+[data-md-color-scheme="slate"] .md-header__button.md-logo img {
+  content: url("logo-dark.svg");
+}
