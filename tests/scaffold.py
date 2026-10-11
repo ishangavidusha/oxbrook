@@ -59,10 +59,10 @@ def makes_a_project_that_passes_its_own_tests() -> None:
             if path.is_file():
                 text = path.read_text(encoding="utf-8")
                 check("{{" not in text, f"{path.name} kept a placeholder")
-        pyproject = (project / "pyproject.toml").read_text()
+        pyproject = (project / "pyproject.toml").read_text(encoding="utf-8")
         check('name = "notes-api"' in pyproject, "the project name was not filled in")
         check(f'"{_cli.requirement()}"' in pyproject, "the oxbrook requirement was not pinned")
-        check('title="Notes Api"' in (project / "app/main.py").read_text(),
+        check('title="Notes Api"' in (project / "app/main.py").read_text(encoding="utf-8"),
               "the title was not derived from the name")
 
         tests = subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider"],
@@ -92,13 +92,13 @@ def refuses_what_it_should() -> None:
 
         occupied = base / "occupied"
         occupied.mkdir()
-        (occupied / "mine.txt").write_text("keep me")
+        (occupied / "mine.txt").write_text("keep me", encoding="utf-8")
         result = oxbrook("new", "occupied", cwd=base)
         check(result.returncode != 0 and "not empty" in result.stderr,
               f"a non-empty directory was not refused: {result.returncode} {result.stderr}")
         check(files(occupied) == {"mine.txt"}, "a refused directory was written to")
 
-        (base / "a-file").write_text("")
+        (base / "a-file").write_text("", encoding="utf-8")
         result = oxbrook("new", "a-file", cwd=base)
         check(result.returncode != 0, "a path that is a file was not refused")
 
@@ -114,15 +114,15 @@ def refuses_what_it_should() -> None:
         result = oxbrook("new", ".", cwd=here)
         check(result.returncode == 0, f"oxbrook new . in an empty directory failed: "
                                       f"{result.stderr}")
-        check('name = "my_service.v2"' in (here / "pyproject.toml").read_text(),
+        check('name = "my_service.v2"' in (here / "pyproject.toml").read_text(encoding="utf-8"),
               "the name was not taken from the current directory")
-        check('title="My Service V2"' in (here / "app/main.py").read_text(),
+        check('title="My Service V2"' in (here / "app/main.py").read_text(encoding="utf-8"),
               "the title was not derived from the directory name")
 
         named = base / "dir"
         result = oxbrook("new", str(named), "--name", "billing", cwd=base)
         check(result.returncode == 0
-              and 'name = "billing"' in (named / "pyproject.toml").read_text(),
+              and 'name = "billing"' in (named / "pyproject.toml").read_text(encoding="utf-8"),
               "--name did not name the project")
 
 
@@ -145,8 +145,8 @@ def pins_this_minor_version() -> None:
 
 def agents_md_tells_the_truth() -> None:
     template = ROOT / "python" / "oxbrook" / "_template"
-    agents = (template / "AGENTS.md").read_text()
-    site = re.search(r"^site_url:\s*(\S+)", (ROOT / "mkdocs.yml").read_text(), re.M)
+    agents = (template / "AGENTS.md").read_text(encoding="utf-8")
+    site = re.search(r"^site_url:\s*(\S+)", (ROOT / "mkdocs.yml").read_text(encoding="utf-8"), re.M)
     if not site:
         check(False, "mkdocs.yml has no site_url")
         return
@@ -162,7 +162,7 @@ def agents_md_tells_the_truth() -> None:
     for page in sorted(pages):
         check((ROOT / "www" / page).is_file(), f"AGENTS.md sends an agent to {page}, "
                                                 "which is not a page of the site")
-    check((template / "CLAUDE.md").read_text().strip() == "@AGENTS.md",
+    check((template / "CLAUDE.md").read_text(encoding="utf-8").strip() == "@AGENTS.md",
           "CLAUDE.md does not import AGENTS.md")
 
 

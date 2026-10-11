@@ -12,6 +12,7 @@ that would be found if it leaked.
 """
 import json
 import os
+import signal
 import socket
 import subprocess
 import sys
@@ -27,7 +28,8 @@ from pydantic import BaseModel, Field, SecretStr
 
 failures: list[str] = []
 BIN = Path(sys.executable).parent
-EXE = ".exe" if sys.platform == "win32" else ""
+WINDOWS = sys.platform == "win32"
+EXE = ".exe" if WINDOWS else ""
 SENTINEL = "s3ntinel-value-7741"
 
 
@@ -342,10 +344,16 @@ def a_reload_rereads_the_env_file(directory: Path) -> None:
     port = free_port()
     env_file = directory / ".env"
     env_file.write_text(f"APP_DATABASE_URL=x\nAPP_GREETING=first\nOXBROOK_PORT={port}\n")
+    # Stopped as tests/cli.py stops a reloading server. Windows has no SIGTERM
+    # and its terminate() ends only the supervisor, leaving the server it
+    # started holding any pipe given to it, so the output goes to a file and
+    # the stop is Ctrl-Break to the supervisor's own process group.
+    log_path = directory / "reload.log"
+    log = log_path.open("w")
     server = subprocess.Popen(
         [str(BIN / f"oxb{EXE}"), "run", "main:app", "--env-file", ".env", "--reload"],
-        cwd=directory, env=clean_env(), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        text=True)
+        cwd=directory, env=clean_env(), stdout=log, stderr=subprocess.STDOUT, text=True,
+        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if WINDOWS else 0)
     try:
         first = wait_for(lambda: get(port), 20)
         check(first is not None and first["greeting"] == "first",
@@ -355,13 +363,17 @@ def a_reload_rereads_the_env_file(directory: Path) -> None:
         second = wait_for(lambda: (g := get(port)) and g["greeting"] == "second" and g, 20)
         check(second is not None,
               "an edit to the env file was not served after the reload it caused")
+        server.send_signal(signal.CTRL_BREAK_EVENT if WINDOWS else signal.SIGTERM)
+        server.wait(timeout=30)
+        check(get(port) is None, "the server outlived its supervisor")
     finally:
-        server.terminate()
-        try:
-            server.communicate(timeout=20)
-        except subprocess.TimeoutExpired:
+        if server.poll() is None:
             server.kill()
-            server.communicate()
+            server.wait()
+            failures.append("the reload supervisor had to be killed")
+        log.close()
+        if failures:
+            print("--- reload log ---\n" + log_path.read_text(), flush=True)
 
 
 def the_settings_command(directory: Path) -> None:

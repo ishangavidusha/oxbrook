@@ -75,6 +75,10 @@ def main() -> int:
             if probe.returncode != 0:
                 return probe.returncode
 
+    # Every suite runs even after one fails. Stopping at the first hid the rest:
+    # on a platform that is only tested in CI, each push then found one more
+    # failure instead of all of them.
+    failed: list[str] = []
     for name in chosen:
         # The name first: a suite that hangs before its own first print is
         # otherwise invisible in a CI log.
@@ -84,9 +88,14 @@ def main() -> int:
                                     cwd=HERE.parent, timeout=args.timeout)
         except subprocess.TimeoutExpired:
             print(f"\n{name} did not finish in {args.timeout}s", file=sys.stderr, flush=True)
-            return 1
+            failed.append(f"{name} (timed out)")
+            continue
         if result.returncode != 0:
-            return result.returncode
+            failed.append(name)
+    if failed:
+        print(f"\n{len(failed)} of {len(chosen)} suites failed: {', '.join(failed)}",
+              file=sys.stderr, flush=True)
+        return 1
     return 0
 
 
