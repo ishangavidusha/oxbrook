@@ -27,8 +27,10 @@ import concurrent.futures
 import importlib.util
 import logging
 import os
+import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -109,28 +111,54 @@ created: list[str] = []
 
 
 def alembic_env(name: str) -> dict[str, str]:
-    # Under `make coverage` this process is measured with COVERAGE_CORE=sysmon,
-    # and coverage follows it into alembic through COVERAGE_PROCESS_CONFIG. On
-    # Linux, CPython 3.14.8t with sys.monitoring active and greenlet loaded
-    # (SQLAlchemy's async layer) hangs at interpreter exit, after the migration
-    # has finished; 3.14.7t does not. Alembic never imports oxbrook, so there is
-    # nothing to measure there: leave it unmeasured.
+    # Under `make coverage` this process is measured, and coverage follows it
+    # into subprocesses through COVERAGE_PROCESS_CONFIG. Alembic never imports
+    # oxbrook, so there is nothing to measure there: leave it unmeasured. (This
+    # was first thought to cause the exit hang described at UPGRADE_THEN_EXIT;
+    # unmeasured children hang too.)
     env = {**os.environ, "DATABASE_URL": database_url(name)}
     env.pop("COVERAGE_PROCESS_CONFIG", None)
+    # So that a child which hangs can be made to say where (see `finish`).
+    env["PYTHONFAULTHANDLER"] = "1"
     return env
+
+
+def finish(run: subprocess.Popen, timeout: float) -> tuple[int | None, str]:
+    """Wait for an alembic child; if it hangs, its threads' stacks instead of a bare timeout.
+
+    SIGABRT makes faulthandler, enabled through the environment, write every
+    thread's Python stack to stderr before the process dies, which is the
+    only way to see from a CI log where a child was stuck.
+    """
+    try:
+        _, err = run.communicate(timeout=timeout)
+        return run.returncode, err
+    except subprocess.TimeoutExpired:
+        if sys.platform != "win32":
+            run.send_signal(signal.SIGABRT)
+        else:
+            run.kill()
+        try:
+            _, err = run.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            run.kill()
+            _, err = run.communicate()
+        return None, f"still running after {timeout:.0f}s; its stacks:\n{err[-4000:]}"
 
 
 def alembic(name: str, *args: str) -> subprocess.CompletedProcess:
     # The documented command, run the way a deploy step runs it: its own
     # process, in the example's directory, configured by DATABASE_URL.
-    return subprocess.run(
+    run = subprocess.Popen(
         [sys.executable, "-m", "alembic", *args],
         cwd=EXAMPLE,
         env=alembic_env(name),
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
-        timeout=60,
     )
+    code, err = finish(run, 60)
+    return subprocess.CompletedProcess(run.args, -1 if code is None else code, "", err)
 
 
 def tables(name: str) -> set[str]:
@@ -191,15 +219,57 @@ def migrations_apply_and_reverse() -> None:
     check(again.returncode == 0, "a second upgrade after a downgrade failed")
 
 
+#: `alembic upgrade head` through alembic's own entry point, for the replicas
+#: below, with two differences from the command.
+#:
+#: The children start together, not just at once. Importing takes most of a
+#: second and migrating a few milliseconds, so four processes started at once
+#: still reached the database one after another, and the test passed with the
+#: advisory lock removed. Each child imports what the migration needs, says it
+#: is ready, and waits for the others before migrating.
+#:
+#: And it exits without interpreter finalization. Free-threaded CPython 3.14.8
+#: on Linux x86-64 intermittently never finishes exiting here: after the
+#: migration has committed, a child spins at full CPU in the final garbage
+#: collection (`_Py_Finalize` -> `gc_collect_main` -> `gc_visit_heaps` ->
+#: `mi_heap_visit_blocks`), single-threaded, forever. Seen in up to half of CI
+#: runs, only among concurrent children, never on macOS, arm64 or emulated
+#: amd64 Linux. That is an interpreter bug, not a migration failure; the plain
+#: `alembic` command is still run, one at a time, by the other steps.
+UPGRADE_TOGETHER_THEN_EXIT = """\
+import os, sys, time
+from pathlib import Path
+import alembic.command, alembic.config, asyncpg, sqlalchemy.ext.asyncio
+from alembic.config import main
+gate = Path(os.environ["RACE_GATE"])
+(gate / f"ready-{os.getpid()}").touch()
+while not (gate / "go").exists():
+    time.sleep(0.001)
+code = 0
+try:
+    main(argv=["upgrade", "head"])
+except SystemExit as exc:
+    code = exc.code if isinstance(exc.code, int) else 1
+except BaseException:
+    import traceback
+    traceback.print_exc()
+    code = 1
+sys.stdout.flush()
+sys.stderr.flush()
+os._exit(code)
+"""
+
+
 def replicas_migrating_at_once_do_not_race() -> None:
-    # Two replicas that each migrate as they start. Without the advisory lock
-    # in env.py both see an empty database and one fails creating the table
-    # the other just created.
+    # Replicas that each migrate as they start. Without the advisory lock in
+    # env.py they all see an empty database and all but one fail creating the
+    # table another just created.
     name = fresh("race")
-    env = alembic_env(name)
+    gate = Path(tempfile.mkdtemp(prefix="oxbrook-race-"))
+    env = {**alembic_env(name), "RACE_GATE": str(gate)}
     runs = [
         subprocess.Popen(
-            [sys.executable, "-m", "alembic", "upgrade", "head"],
+            [sys.executable, "-c", UPGRADE_TOGETHER_THEN_EXIT],
             cwd=EXAMPLE,
             env=env,
             stdout=subprocess.PIPE,
@@ -208,9 +278,15 @@ def replicas_migrating_at_once_do_not_race() -> None:
         )
         for _ in range(4)
     ]
-    outcomes = [(run.wait(60), run.stderr.read()) for run in runs]
+    deadline = time.monotonic() + 60
+    while len(list(gate.glob("ready-*"))) < len(runs) and time.monotonic() < deadline:
+        if any(run.poll() is not None for run in runs):
+            break
+        time.sleep(0.01)
+    (gate / "go").touch()
+    outcomes = [finish(run, 60) for run in runs]
     for code, err in outcomes:
-        check(code == 0, f"one of four concurrent migrations failed:\n{err[-600:]}")
+        check(code == 0, f"one of four concurrent migrations failed:\n{err[-4000:]}")
     version = asyncio.run(query(name, "select version_num from alembic_version"))
     check(
         [row["version_num"] for row in version] == ["0001"],
