@@ -296,10 +296,12 @@ def draining_keeps_serving() -> None:
         client._thread.join(timeout=10)
         took = time.monotonic() - started
         check(took >= 1.4, f"the server stopped {took:.2f}s after shutdown, inside its delay")
+        # Windows retries a refused connect on loopback for about two seconds
+        # before reporting it, so a refusal can arrive as a connect timeout.
         try:
             httpx.get(f"{base}/items", timeout=1)
             failures.append("the server still accepted after the drain delay")
-        except httpx.ConnectError:
+        except (httpx.ConnectError, httpx.ConnectTimeout):
             pass
     finally:
         client._server = None
