@@ -10,6 +10,10 @@
 //! Accepted: no `Origin` at all (not a browser, and not the threat); an origin
 //! naming this server, compared with `Host` or `X-Forwarded-Host`, neither of
 //! which a page can set on a handshake; and the configured origins.
+//!
+//! The configured origins, here and for CORS, may hold one `*` in the first
+//! label of the host — `https://*.example.dev`, `https://app-*.example.dev` —
+//! which `Pattern` matches.
 
 use std::collections::HashSet;
 
@@ -21,6 +25,97 @@ pub type OriginsTuple = (bool, Vec<String>);
 pub struct SocketOrigins {
     any: bool,
     allowed: HashSet<String>,
+    patterns: Vec<Pattern>,
+}
+
+/// An origin with one `*` in the first label of its host.
+///
+/// The `*` stands for one or more letters, digits or hyphens: never a dot,
+/// so it covers exactly one label, and never nothing. Everything else is
+/// compared exactly: scheme, the rest of the host, and the port. That shuts
+/// the two classic holes in origin patterns, a match on
+/// `https://example.dev.attacker.com` and one on `https://attackerexample.dev`,
+/// since the host must end with exactly the pattern's remaining labels.
+#[derive(Debug, PartialEq)]
+pub struct Pattern {
+    scheme: String,
+    /// The first label's text before and after the `*`.
+    before: String,
+    after: String,
+    /// The labels after the first, with their leading dot: `.example.dev`.
+    rest: String,
+    port: Option<String>,
+}
+
+impl Pattern {
+    /// None for an origin with no `*`, or one this cannot read; Python has
+    /// already refused those with a reason.
+    pub fn parse(origin: &str) -> Option<Self> {
+        let origin = origin.trim().to_ascii_lowercase();
+        let (scheme, authority) = origin.split_once("://")?;
+        let authority = without_default_port(authority, Some(scheme));
+        let (host, port) = match authority.rsplit_once(':') {
+            Some((host, port)) => (host.to_owned(), Some(port.to_owned())),
+            None => (authority, None),
+        };
+        let (first, rest) = host.split_once('.')?;
+        let (before, after) = first.split_once('*')?;
+        if after.contains('*') || rest.contains('*') || !rest.contains('.') {
+            return None;
+        }
+        Some(Self {
+            scheme: scheme.to_owned(),
+            before: before.to_owned(),
+            after: after.to_owned(),
+            rest: format!(".{rest}"),
+            port,
+        })
+    }
+
+    /// `origin` must already be lowercased.
+    pub fn matches(&self, origin: &str) -> bool {
+        let Some((scheme, authority)) = origin.split_once("://") else {
+            return false;
+        };
+        if scheme != self.scheme {
+            return false;
+        }
+        let authority = without_default_port(authority, Some(scheme));
+        let (host, port) = match authority.rsplit_once(':') {
+            Some((host, port)) => (host, Some(port)),
+            None => (authority.as_str(), None),
+        };
+        if port != self.port.as_deref() {
+            return false;
+        }
+        let Some(first) = host.strip_suffix(self.rest.as_str()) else {
+            return false;
+        };
+        let Some(middle) = first
+            .strip_prefix(self.before.as_str())
+            .and_then(|f| f.strip_suffix(self.after.as_str()))
+        else {
+            return false;
+        };
+        !middle.is_empty()
+            && middle
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+    }
+}
+
+/// Split configured origins into exact ones and patterns.
+pub fn split(origins: Vec<String>) -> (HashSet<String>, Vec<Pattern>) {
+    let mut exact = HashSet::new();
+    let mut patterns = Vec::new();
+    for origin in origins {
+        if origin.contains('*') {
+            patterns.extend(Pattern::parse(&origin));
+        } else {
+            exact.insert(origin.to_ascii_lowercase());
+        }
+    }
+    (exact, patterns)
 }
 
 /// `https://example.com:443` and `example.com:443` both become `example.com`.
@@ -43,12 +138,11 @@ fn without_default_port(authority: &str, scheme: Option<&str>) -> String {
 impl SocketOrigins {
     pub fn build(spec: OriginsTuple) -> Self {
         let (any, allowed) = spec;
+        let (allowed, patterns) = split(allowed);
         Self {
             any,
-            allowed: allowed
-                .into_iter()
-                .map(|o| o.to_ascii_lowercase())
-                .collect(),
+            allowed,
+            patterns,
         }
     }
 
@@ -63,7 +157,7 @@ impl SocketOrigins {
             return false;
         };
         let origin = origin.trim().to_ascii_lowercase();
-        if self.allowed.contains(&origin) {
+        if self.allowed.contains(&origin) || self.patterns.iter().any(|p| p.matches(&origin)) {
             return true;
         }
         // `null`, from sandboxed frames and local files, has no authority to

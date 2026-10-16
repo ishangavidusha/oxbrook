@@ -170,6 +170,15 @@ def configuration_is_checked() -> None:
             pass
 
 
+def patterns_apply_to_sockets(client: TestClient) -> None:
+    """I-057: the same origin patterns as CORS, matched the same way."""
+    from cors import PATTERNED
+
+    for origin, allowed in PATTERNED:
+        expect(client.port, f"a handshake from {origin}", 101 if allowed else 403,
+               path="/open", origin=origin)
+
+
 def main() -> None:
     for step in (configuration_is_checked, authorizers_still_run_for_accepted_origins):
         try:
@@ -187,6 +196,9 @@ def main() -> None:
           "websocket_origins": ["https://sockets.example.com"]}, (explicit_list_replaces_cors,)),
         ({"websocket_origins": ["*"]}, (wildcard_opts_out,)),
         ({}, (no_cors_means_same_origin_only,)),
+        ({"websocket_origins": ["https://*.preview.example.dev",
+                                "https://app-*-team.example.com"]},
+         (patterns_apply_to_sockets,)),
     ]:
         with TestClient(make_app(**options), workers=1) as client:
             for step in steps:

@@ -63,6 +63,11 @@ def configuration_is_checked() -> None:
         ("an origin with no scheme", {"allow_origins": ["a.com"]}, ValueError),
         ("a single string", {"allow_origins": "https://a.com"}, TypeError),
         ("no origins", {"allow_origins": []}, ValueError),
+        ("a * on a top-level domain", {"allow_origins": ["https://*.dev"]}, ValueError),
+        ("a * past the first label", {"allow_origins": ["https://a.*.example.dev"]},
+         ValueError),
+        ("a * in the scheme", {"allow_origins": ["*://a.example.dev"]}, ValueError),
+        ("two * in one label", {"allow_origins": ["https://*a*.example.dev"]}, ValueError),
     ]:
         try:
             CORS(**kwargs)
@@ -169,6 +174,53 @@ def disabled(client: TestClient) -> None:
           f"an app with no CORS answered a preflight: {response.status_code}")
 
 
+#: (origin, allowed) against `https://*.preview.example.dev` and
+#: `https://app-*-team.example.com`. Each refusal is a way origin patterns
+#: are classically got wrong.
+PATTERNED = [
+    ("https://pr-12.preview.example.dev", True),
+    ("https://PR-12.Preview.Example.dev", True),
+    ("https://app-pr-12-team.example.com", True),
+    ("https://preview.example.dev", False),                    # nothing for the *
+    ("https://a.b.preview.example.dev", False),                # * is one label
+    ("https://pr-12.preview.example.dev.attacker.com", False), # a suffix after
+    ("https://attackerpreview.example.dev", False),            # a label glued on
+    ("http://pr-12.preview.example.dev", False),               # another scheme
+    ("https://pr-12.preview.example.dev:8443", False),         # another port
+    ("https://pr_12.preview.example.dev", False),              # not a host label
+    ("https://app--team.example.com", False),                  # empty middle
+    ("https://app-x-team.example.com.attacker.com", False),
+    ("https://evil-app-x-team.example.com", False),            # before the prefix
+]
+
+
+def patterns(client: TestClient) -> None:
+    """I-057: one `*` in the first label of an origin, for preview
+    deployments, and none of the ways such a pattern lets the wrong page in."""
+    for origin, allowed in PATTERNED:
+        r = client.get("/items", headers={"origin": origin})
+        got = acao(r)
+        if allowed:
+            check(got == origin, f"{origin} should be allowed, got {got!r}")
+        else:
+            check(got is None, f"{origin} should be refused, got {got!r}")
+        r = client.options("/items", headers={"origin": origin,
+                                               "access-control-request-method": "POST"})
+        check((acao(r) is not None) == allowed,
+              f"preflight from {origin}: {r.status_code} {acao(r)!r}")
+
+
+patterned = App(openapi_url=None, docs_url=None, mcp_url=None,
+                cors=CORS(allow_origins=["https://*.preview.example.dev",
+                                         "https://app-*-team.example.com"],
+                          allow_credentials=True))
+
+
+@patterned.get("/items")
+async def patterned_items(_: Request):
+    return [1]
+
+
 def main() -> None:
     try:
         configuration_is_checked()
@@ -181,6 +233,7 @@ def main() -> None:
          {"max_body": 1024}),
         (public, (wildcard,), {}),
         (plain, (disabled,), {}),
+        (patterned, (patterns,), {}),
     ]:
         with TestClient(target, workers=1, **options) as client:
             for step in steps:

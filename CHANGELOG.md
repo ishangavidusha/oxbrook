@@ -7,6 +7,9 @@ release does not; changes that break existing code are listed under
 
 ## Unreleased
 
+- **Origin patterns.** CORS and WebSocket origins may hold one `*` in the
+  first label of the host, such as `https://*.preview.example.com`, for
+  preview deployments. It matches one label and nothing else.
 - **Routers have tags and exception handlers.** `Router(tags=[...])` groups
   a router's operations in OpenAPI, and `@router.exception_handler(...)` maps
   exceptions for its routes, taking precedence over the app's.

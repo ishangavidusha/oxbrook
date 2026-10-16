@@ -76,6 +76,10 @@ than adding to them:
 app = App(websocket_origins=["https://app.example.com", "http://localhost:5173"])
 ```
 
+Patterns for preview deployments, such as `https://*.preview.example.com`,
+work here as they do for [CORS](../guide/cors.md#preview-deployments), with
+the same rules.
+
 A CORS policy of `["*"]` does not open sockets to every origin. `*` is the CORS
 setting that forbids credentials, and a socket handshake always carries them.
 To accept sockets from any origin deliberately — a public feed with no

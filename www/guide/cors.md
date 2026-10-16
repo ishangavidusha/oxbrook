@@ -13,7 +13,7 @@ app = App(cors=CORS(allow_origins=["https://app.example.com"]))
 
 | option | default | |
 |---|---|---|
-| `allow_origins` | required | exact origins, or `["*"]` for any |
+| `allow_origins` | required | origins, patterns like `https://*.example.dev`, or `["*"]` for any |
 | `allow_methods` | `["*"]` | methods a preflight may ask for |
 | `allow_headers` | `["*"]` | request headers a preflight may ask for |
 | `allow_credentials` | `False` | let the browser send cookies and `Authorization` |
@@ -23,6 +23,30 @@ app = App(cors=CORS(allow_origins=["https://app.example.com"]))
 An origin is a scheme, host and optional port with no path and no trailing
 slash — `https://app.example.com`, `http://localhost:5173` — exactly as the
 browser sends it in the `Origin` header.
+
+### Preview deployments
+
+An origin may hold one `*`, in the first label of its host, for the per-branch
+URLs a preview platform gives each deployment:
+
+```python
+CORS(allow_origins=["https://app.example.com", "https://*.preview.example.com"])
+CORS(allow_origins=["https://myapp-*-myteam.vercel.app"])
+```
+
+The `*` stands for one label's worth of letters, digits and hyphens: one or
+more, never a dot. Scheme, port and every other label must match exactly. So
+`https://*.preview.example.com` allows `https://pr-12.preview.example.com`, but
+not `https://preview.example.com`, `https://a.b.preview.example.com`,
+`https://pr-12.preview.example.com.attacker.com` or
+`https://attackerpreview.example.com`. At least two labels must follow the
+`*`, so `https://*.dev` is refused.
+
+On a domain shared by many customers, such as a hosting platform's, a pattern
+admits anyone who can get a matching name there. `https://*.vercel.app` would
+let every Vercel site make requests, with credentials if those are allowed.
+Keep the part of the name that only you control, as the second example does.
+[WebSocket origins](../streams/websockets.md) take the same patterns.
 
 `allow_origins` has no default because it is the decision that matters. Methods
 and headers default to any: once an origin is trusted, permitting a method or a

@@ -31,6 +31,7 @@ pub type CorsTuple = (
 pub struct Cors {
     any_origin: bool,
     origins: HashSet<String>,
+    patterns: Vec<crate::origin::Pattern>,
     any_method: bool,
     methods: HashSet<String>,
     methods_value: Option<HeaderValue>,
@@ -63,9 +64,12 @@ impl Cors {
         let methods: Vec<String> = methods.iter().map(|m| m.to_ascii_uppercase()).collect();
         let any_header = headers.iter().any(|h| h == "*");
         let headers: Vec<String> = headers.iter().map(|h| h.to_ascii_lowercase()).collect();
+        let (origins, patterns) =
+            crate::origin::split(origins.into_iter().filter(|o| o != "*").collect());
         Ok(Self {
             any_origin,
-            origins: origins.into_iter().filter(|o| o != "*").collect(),
+            origins,
+            patterns,
             any_method,
             methods_value: if any_method { None } else { joined(&methods) },
             methods: methods.into_iter().collect(),
@@ -79,7 +83,15 @@ impl Cors {
     }
 
     fn allows(&self, origin: &str) -> bool {
-        self.any_origin || self.origins.contains(origin)
+        if self.any_origin || self.origins.contains(origin) {
+            return true;
+        }
+        // Patterns compare lowercased, as browsers send origins; the exact
+        // set above is matched as given, which is what it always was.
+        !self.patterns.is_empty() && {
+            let lowered = origin.to_ascii_lowercase();
+            self.patterns.iter().any(|p| p.matches(&lowered))
+        }
     }
 
     /// Whether the allowed origin header is a literal `*` rather than the

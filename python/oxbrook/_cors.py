@@ -12,8 +12,12 @@ foreign site can do once its origin is allowed; the origin list and
 `allow_credentials` are the boundary.
 """
 
+import re
 from collections.abc import Iterable
 from dataclasses import dataclass, field
+
+#: A host label with one `*`: what a pattern's first label may be.
+_WILD_LABEL = re.compile(r"[a-z0-9-]*\*[a-z0-9-]*")
 
 
 def check_origin(value: str) -> str:
@@ -24,7 +28,27 @@ def check_origin(value: str) -> str:
             f"CORS origin {value!r} must be a scheme and host with no trailing "
             f"slash, like 'https://app.example.com', or '*'"
         )
+    if "*" in value:
+        _check_pattern(value)
     return value
+
+
+def _check_pattern(value: str) -> None:
+    """A `*` in an origin is allowed in one place: the first label of the
+    host, where it stands for one label's worth of letters, digits and
+    hyphens. Refused anywhere else, and with too little after it to say whose
+    domain it is."""
+    scheme, _, authority = value.partition("://")
+    host = authority.rsplit(":", 1)[0] if authority.count(":") == 1 else authority
+    labels = host.lower().split(".")
+    if (scheme.count("*") or not _WILD_LABEL.fullmatch(labels[0])
+            or any("*" in label for label in labels[1:]) or len(labels) < 3
+            or not all(labels[1:])):
+        raise ValueError(
+            f"origin pattern {value!r}: a '*' may stand only in the first label of the "
+            f"host, with at least two labels after it, like 'https://*.example.dev' or "
+            f"'https://app-*.example.dev'"
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,7 +56,13 @@ class CORS:
     """Which other origins may call this app from a browser.
 
     `allow_origins` lists exact origins — scheme, host and port as the browser
-    sends them — or `["*"]` for any.
+    sends them — or `["*"]` for any. An origin may hold one `*` in the first
+    label of its host, for preview deployments: `https://*.example.dev`
+    matches `https://pr-12.example.dev`, and `https://app-*.example.dev`
+    matches `https://app-pr-12.example.dev`. The `*` covers one label, never
+    a dot, so neither matches `https://example.dev.attacker.com`. On a
+    shared domain such as a hosting platform's, a pattern admits whoever can
+    get a matching name there: keep the part that is yours in it.
 
     `allow_credentials` lets the browser send cookies and `Authorization` on
     those requests. It cannot be combined with `"*"`: that would let every
