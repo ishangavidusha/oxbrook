@@ -127,6 +127,12 @@ async def buffered(request: Request):
     return [len(chunk) async for chunk in request.stream()]
 
 
+@app.post("/twice")
+async def twice(request: Request, body: BodyStream):
+    first, second = await asyncio.gather(request.read(), request.read())
+    return {"first": len(first), "second": len(second), "same": first == second}
+
+
 def chunks(total: int, size: int = 64 * 1024, pause: float = 0.0):
     sent = 0
     while sent < total:
@@ -332,6 +338,15 @@ def nothing_is_read_before_asked(client: TestClient) -> None:
     check(not seen.get("guarded read"), "the handler read a body it refused")
 
 
+def two_reads_at_once_both_finish(client: TestClient) -> None:
+    """I-115: two `request.read()` awaited together on one request. The second
+    used to replace the first's wakeup, and the first waited forever."""
+    total = 4 * 64 * 1024
+    r = client.post("/twice", content=chunks(total, pause=0.05), timeout=10)
+    check(r.status_code == 200 and r.json() == {"first": total, "second": total, "same": True},
+          f"two reads at once answered {r.status_code} {r.text[:200]}")
+
+
 def limits_hold_while_streaming() -> None:
     with TestClient(app, workers=1, max_body=1 * MB, timeout=30) as client:
         response = client.put("/upload", content=chunks(4 * MB))
@@ -387,7 +402,8 @@ def main() -> None:
     with TestClient(app, workers=2, max_body=256 * MB, timeout=60) as client:
         for step in (forms_parse, forms_bind, forms_refuse_what_they_cannot_read,
                      openapi_describes_bodies, streams_arrive_intact,
-                     slow_reader_is_backpressured, nothing_is_read_before_asked):
+                     slow_reader_is_backpressured, nothing_is_read_before_asked,
+                     two_reads_at_once_both_finish):
             try:
                 step(client)
                 print(f"  {step.__name__}: ok")

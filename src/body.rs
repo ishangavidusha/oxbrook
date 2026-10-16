@@ -56,7 +56,11 @@ pub struct BodyShared {
     /// Signalled by the handler when it wants more; the pump waits on it both
     /// before its first read and whenever the buffer is over the high water.
     demand: Notify,
-    waiter: Mutex<Option<Py<PyAny>>>,
+    /// Callbacks to run on the worker loop when there is something to take.
+    /// Several, because two `request.read()` awaited at once on one request
+    /// each wait here; a single slot let the second replace the first, which
+    /// then never woke (I-115).
+    waiters: Mutex<Vec<Py<PyAny>>>,
     queue: OnceLock<Arc<WorkerQueue>>,
     /// True once `End` or a failure has been queued.
     finished: AtomicBool,
@@ -83,7 +87,7 @@ impl BodyShared {
             chunks: Mutex::new(VecDeque::new()),
             buffered: AtomicUsize::new(0),
             demand: Notify::new(),
-            waiter: Mutex::new(None),
+            waiters: Mutex::new(Vec::new()),
             queue: OnceLock::new(),
             finished: AtomicBool::new(false),
             progress: AtomicU64::new(0),
@@ -142,11 +146,22 @@ impl BodyShared {
         if self.whole.load(Ordering::SeqCst) && !self.finished.load(Ordering::SeqCst) {
             return;
         }
-        // Called from the connection's future. Moving the callback into the
+        // Called from the connection's future. Moving the callbacks into the
         // worker queue touches no interpreter state.
-        let waiter = self.waiter.lock().ok().and_then(|mut w| w.take());
-        if let (Some(callback), Some(queue)) = (waiter, self.queue.get()) {
-            queue.push_wakeup(callback);
+        self.wake();
+    }
+
+    /// Hand every waiting callback to the worker queue.
+    fn wake(&self) {
+        let waiting = self
+            .waiters
+            .lock()
+            .map(|mut w| std::mem::take(&mut *w))
+            .unwrap_or_default();
+        if let Some(queue) = self.queue.get() {
+            for callback in waiting {
+                queue.push_wakeup(callback);
+            }
         }
     }
 
@@ -383,18 +398,15 @@ impl BodyReader {
     /// `take` then has it.
     fn collect(&self, callback: Py<PyAny>) {
         self.shared.whole.store(true, Ordering::SeqCst);
-        if let Ok(mut waiter) = self.shared.waiter.lock() {
-            *waiter = Some(callback);
+        if let Ok(mut waiters) = self.shared.waiters.lock() {
+            waiters.push(callback);
         }
         // Asks for the first read, or releases a pump held at the high water.
         self.shared.demand.notify_one();
         // Finished between the caller's `take` and installing the waiter:
         // without this re-check that wakeup would be lost.
         if self.shared.is_finished() {
-            let waiter = self.shared.waiter.lock().ok().and_then(|mut w| w.take());
-            if let (Some(callback), Some(queue)) = (waiter, self.shared.queue.get()) {
-                queue.push_wakeup(callback);
-            }
+            self.shared.wake();
         }
     }
 
@@ -436,8 +448,8 @@ impl BodyReader {
     /// Call `callback` on the worker loop when there is something to poll.
     /// Fires promptly if there already is.
     fn notify(&self, callback: Py<PyAny>) {
-        if let Ok(mut waiter) = self.shared.waiter.lock() {
-            *waiter = Some(callback);
+        if let Ok(mut waiters) = self.shared.waiters.lock() {
+            waiters.push(callback);
         }
         // Data may have arrived between the caller's poll and installing the
         // waiter; without this re-check that wakeup would be lost.
@@ -448,10 +460,7 @@ impl BodyReader {
             .map(|c| !c.is_empty())
             .unwrap_or(true);
         if ready {
-            let waiter = self.shared.waiter.lock().ok().and_then(|mut w| w.take());
-            if let (Some(callback), Some(queue)) = (waiter, self.shared.queue.get()) {
-                queue.push_wakeup(callback);
-            }
+            self.shared.wake();
         }
     }
 }

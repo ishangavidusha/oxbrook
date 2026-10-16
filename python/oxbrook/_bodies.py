@@ -105,6 +105,10 @@ async def read_body(request: Any) -> bytes:
         return request.body
     loop = asyncio.get_running_loop()
     while True:
+        # Another read of this request, awaited at the same time, may have
+        # taken the body while this one waited: what it kept is the answer.
+        if request._reader() is None:
+            return request.body
         state, value = reader.take()
         if state == _END:
             request._fill(value)
