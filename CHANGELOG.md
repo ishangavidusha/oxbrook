@@ -7,6 +7,9 @@ release does not; changes that break existing code are listed under
 
 ## Unreleased
 
+- **WebSocket authorizers are cancelled** when the handshake times out or the
+  client leaves, as handlers are. One that stalled used to keep running after
+  the `504`.
 - **Origin patterns.** CORS and WebSocket origins may hold one `*` in the
   first label of the host, such as `https://*.preview.example.com`, for
   preview deployments. It matches one label and nothing else.

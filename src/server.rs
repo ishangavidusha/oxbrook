@@ -1083,6 +1083,10 @@ async fn upgrade_websocket(
     let mut handoff = None;
     if state.router.spec(matched.route).gated {
         let (verdict_tx, verdict_rx) = oneshot::channel::<Reply>();
+        // An authorizer is cancelled like a handler: when the handshake times
+        // out, or its client leaves, before the verdict. Without this one that
+        // stalled kept running after the 504 (I-083).
+        let cancel = Cancel::new();
         let queued = enqueue(
             &state,
             Pending {
@@ -1100,14 +1104,17 @@ async fn upgrade_websocket(
                 deferred: false,
                 handoff: None,
                 connection: None,
-                cancel: None,
+                cancel: Some(cancel.clone()),
                 queued_at: None,
                 client: Some(client),
             },
         );
-        if queued.is_none() {
+        let Some(worker) = queued else {
             return overloaded();
-        }
+        };
+        // Dropped armed on any early return below, or when this future is
+        // dropped because the client went away: either cancels the task.
+        let abandon = Abandon::new(cancel, &state.workers[worker].queue);
 
         let verdict = match state.request_timeout {
             Some(limit) => match tokio::time::timeout(limit, verdict_rx).await {
@@ -1116,6 +1123,7 @@ async fn upgrade_websocket(
             },
             None => verdict_rx.await,
         };
+        abandon.answered();
 
         match verdict {
             // 101 from the authorizer means "go ahead"; the real handshake

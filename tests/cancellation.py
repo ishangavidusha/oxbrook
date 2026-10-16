@@ -206,6 +206,51 @@ def timeout(client: TestClient) -> None:
         check(wait_for("tk finished", 2), "a kept handler did not finish after its timeout")
 
 
+async def stalls(request: Request):
+    """An authorizer that never decides."""
+    tag = request.query or "?"
+    note(f"authorizer {tag} started")
+    try:
+        await asyncio.sleep(10)
+    except asyncio.CancelledError:
+        note(f"authorizer {tag} cancelled")
+        raise
+    note(f"authorizer {tag} finished")
+
+
+@app.websocket("/guarded", authorize=stalls)
+async def guarded(_: Request, ws):
+    await ws.close()
+
+
+def handshake(port: int, tag: str) -> socket.socket:
+    sock = socket.create_connection(("127.0.0.1", port))
+    sock.sendall((f"GET /guarded?{tag} HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\n"
+                  "Connection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+                  "Sec-WebSocket-Version: 13\r\n\r\n").encode())
+    return sock
+
+
+def authorizers(client: TestClient) -> None:
+    """I-083: an authorizer is cancelled when its handshake times out, and
+    when its client leaves. It kept running after the 504."""
+    with TestClient(app, request_timeout=0.3) as short:
+        sock = handshake(short.port, "late")
+        sock.settimeout(3)
+        status = sock.recv(64).split(b" ", 2)[1]
+        sock.close()
+        check(status == b"504", f"a stalled authorizer's handshake answered {status!r}")
+        check(wait_for("authorizer late cancelled", 2),
+              "a timed-out authorizer was not cancelled")
+    sock = handshake(client.port, "gone")
+    check(wait_for("authorizer gone started"), "the authorizer never started")
+    sock.close()
+    check(wait_for("authorizer gone cancelled", 2),
+          "an authorizer whose client left was not cancelled")
+    time.sleep(0.1)
+    check(not seen("authorizer gone finished"), "the authorizer finished anyway")
+
+
 def reset(client: TestClient) -> None:
     conn = h2.connection.H2Connection(h2.config.H2Configuration(client_side=True))
     sock = socket.create_connection(("127.0.0.1", client.port))
@@ -304,7 +349,7 @@ def capacity() -> None:
 
 def main() -> None:
     with TestClient(app, workers=1) as client:
-        steps = [disconnect, timeout, reset, opt_out, shield, after_answer, queued]
+        steps = [disconnect, timeout, authorizers, reset, opt_out, shield, after_answer, queued]
         for step in steps:
             try:
                 step(client)
