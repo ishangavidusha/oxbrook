@@ -345,7 +345,7 @@ def http_and_openapi_checks() -> None:
 
 
 def main() -> None:
-    app.topic("events")
+    app.topic("events", resource=True)
     threading.Thread(target=lambda: app.run(port=PORT), daemon=True).start()
     for _ in range(100):
         try:

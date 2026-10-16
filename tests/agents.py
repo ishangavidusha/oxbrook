@@ -37,7 +37,7 @@ def check(cond, msg):
 
 
 app = App(title="agents", version="1")
-orders = app.topic("orders")
+orders = app.topic("orders", resource=True)
 
 
 @app.get("/health")

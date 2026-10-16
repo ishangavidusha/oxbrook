@@ -7,6 +7,22 @@ release does not; changes that break existing code are listed under
 
 ## Unreleased
 
+- **Breaking: topics reach agents only with `resource=True`.**
+  `app.topic(name, resource=True)` lists the topic over MCP and lets agents
+  read and follow it, under the topic's own `auth=`, which defaults to the
+  app's. Before, every topic was readable by any agent that reached `/mcp`,
+  so `App(auth=..., mcp_auth=None)` exposed topics only protected routes
+  published to. `resources/list` now shows a caller only the topics it may
+  read. An MCP request that fails inside the server answers
+  `internal error` instead of the exception's text.
+- **Invalid statuses and headers are refused with a reason.** A status
+  outside 100–599, or a header name or value HTTP cannot carry, is a `500`
+  whose log names the status or header, instead of an unexplained `500` or,
+  for the status, a malformed status line.
+- **Two concurrent `request.read()` calls** on one request both finish.
+  The first used to wait forever.
+- **New projects get CI.** `oxbrook new` writes a GitHub Actions workflow
+  that runs the project's tests on free-threaded 3.14.
 - **Firebase.** A tested pattern for Firestore and the Realtime Database
   through the Admin SDK: one app per process from `lifespan`, routes
   `blocking=True`, transactions in both databases. Tested against the

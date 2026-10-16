@@ -308,7 +308,7 @@ def _tool_error(text: str) -> dict:
 class MCP:
     """Dispatch for one app's MCP endpoint."""
 
-    __slots__ = ("app", "capabilities", "gates", "sessions")
+    __slots__ = ("_topic_gates", "app", "capabilities", "gates", "sessions")
 
     def __init__(
         self,
@@ -328,6 +328,9 @@ class MCP:
             if capability.route.auth is not None
         }
         self.sessions = sessions if sessions is not None else Sessions()
+        #: Each resource topic's gate, made on first use: topics can be made
+        #: after the endpoint is.
+        self._topic_gates: dict[str, Any] = {}
 
     # ---- descriptions -----------------------------------------------------
 
@@ -357,9 +360,31 @@ class MCP:
             tools.append(described)
         return tools
 
-    def resource_list(self) -> list[dict]:
+    def _exposed(self, name: str) -> tuple[Any, Any] | None:
+        """The topic and its gate (None when public), if the topic was made a
+        resource; None when it was not, or does not exist."""
+        topic = self.app.topics.get(name)
+        if topic is None or name not in self.app._resources:
+            return None
+        if name not in self._topic_gates:
+            from ._auth import Gate, resolve
+
+            policy = resolve(self.app._resources[name], self.app.auth)
+            self._topic_gates[name] = None if policy is None else Gate(policy)
+        return topic, self._topic_gates[name]
+
+    async def resource_list(self, parent: Any = None) -> list[dict]:
+        """The topics the caller of `parent` may read, as `tools/list` shows
+        only the tools it may call. Only topics made with `resource=True`."""
         resources = []
-        for name, topic in self.app.topics.items():
+        memo: dict[int, Any] = {}
+        for name in list(self.app._resources):
+            exposed = self._exposed(name)
+            if exposed is None:
+                continue
+            topic, gate = exposed
+            if gate is not None and (parent is None or not await gate.permits(parent, memo)):
+                continue
             resources.append(
                 {
                     "uri": f"{TOPIC_SCHEME}{name}",
@@ -374,16 +399,24 @@ class MCP:
             )
         return resources
 
-    def _topic(self, uri: str) -> Any:
+    async def _topic(self, uri: str, parent: Any) -> Any:
+        """The topic at `uri`, if the caller of `parent` may read it.
+
+        A topic that is not a resource, and one this caller may not read, are
+        answered as one that does not exist: the list hides them, and an
+        error that confirmed them would undo that.
+        """
         if not uri.startswith(TOPIC_SCHEME):
             raise CapabilityError(f"unknown resource {uri!r}")
         name = uri[len(TOPIC_SCHEME):]
-        topic = self.app.topics.get(name)
-        if topic is None:
-            raise CapabilityError(f"no topic named {name!r}")
-        return topic
+        exposed = self._exposed(name)
+        if exposed is not None:
+            topic, gate = exposed
+            if gate is None or (parent is not None and await gate.permits(parent, {})):
+                return topic
+        raise CapabilityError(f"no topic named {name!r}")
 
-    async def subscribe(self, uri: str, session: "Session | None") -> dict:
+    async def subscribe(self, uri: str, session: "Session | None", parent: Any = None) -> dict:
         """Follow a topic, so the agent is told when it has something new.
 
         This is the point of the whole transport. The same topic that feeds a
@@ -393,7 +426,7 @@ class MCP:
         """
         if session is None:
             raise CapabilityError("subscribing needs a session")
-        topic = self._topic(uri)
+        topic = await self._topic(uri, parent)
         if uri in session.feeds:
             return {}
 
@@ -440,8 +473,10 @@ class MCP:
             # there is no caller to raise to, only the task's own death.
             logger.exception("mcp feed stopped", extra={"uri": feed.uri})
 
-    async def read_resource(self, uri: str, session: "Session | None" = None) -> list[dict]:
-        topic = self._topic(uri)
+    async def read_resource(
+        self, uri: str, session: "Session | None" = None, parent: Any = None
+    ) -> list[dict]:
+        topic = await self._topic(uri, parent)
         name = uri[len(TOPIC_SCHEME):]
 
         feed = session.feeds.get(uri) if session is not None else None
@@ -583,15 +618,17 @@ class MCP:
             elif method == "tools/call":
                 result = await self.call_tool(params, parent)
             elif method == "resources/list":
-                result = {"resources": self.resource_list()}
+                result = {"resources": await self.resource_list(parent)}
             elif method == "resources/templates/list":
                 result = {"resourceTemplates": []}
             elif method == "prompts/list":
                 result = {"prompts": []}
             elif method == "resources/read":
-                result = {"contents": await self.read_resource(params.get("uri", ""), session)}
+                result = {
+                    "contents": await self.read_resource(params.get("uri", ""), session, parent)
+                }
             elif method == "resources/subscribe":
-                result = await self.subscribe(params.get("uri", ""), session)
+                result = await self.subscribe(params.get("uri", ""), session, parent)
             elif method == "resources/unsubscribe":
                 result = await self.unsubscribe(params.get("uri", ""), session)
             else:
@@ -601,7 +638,12 @@ class MCP:
         except CapabilityError as exc:
             return None if notification else _err(request_id, INVALID_PARAMS, str(exc))
         except Exception as exc:  # noqa: BLE001 - must answer, not hang the client
-            return None if notification else _err(request_id, INTERNAL_ERROR, str(exc))
+            # The text stays in the log: an agent is a client, and a Redis
+            # outage while reading a topic would otherwise hand it the
+            # driver's message (invariant 9).
+            logger.exception("mcp request failed", exc_info=exc, extra={"method": method})
+            detail = f"{type(exc).__name__}: {exc}" if self.app.debug else "internal error"
+            return None if notification else _err(request_id, INTERNAL_ERROR, detail)
 
         return None if notification else _ok(request_id, result)
 
@@ -658,7 +700,7 @@ class MCP:
         uris = [u for u in (asked.get("resourceSubscriptions") or []) if isinstance(u, str)]
         return {"resourceSubscriptions": uris}
 
-    async def listen(self, message: dict) -> Any:
+    async def listen(self, message: dict, parent: Any = None) -> Any:
         """`subscriptions/listen`: the response to this request *is* the stream.
 
         No session, no GET, nothing to clean up afterwards — the stream's life
@@ -673,7 +715,7 @@ class MCP:
         honored = self._honored((message.get("params") or {}).get("notifications") or {})
         # Resolved before the stream opens, so an unknown topic is an error
         # answered with JSON rather than a stream that turns out to be empty.
-        topics = [(uri, self._topic(uri)) for uri in honored["resourceSubscriptions"]]
+        topics = [(uri, await self._topic(uri, parent)) for uri in honored["resourceSubscriptions"]]
         return SSE(self._listen_stream(request_id, honored, topics))
 
     async def _listen_stream(self, request_id: Any, honored: dict, topics: list) -> Any:
@@ -785,7 +827,7 @@ class MCP:
                 result: Any = self.discover()
             elif method == LISTEN:
                 # The only answer that is a stream rather than a value.
-                return await self.listen(message)
+                return await self.listen(message, request)
             else:
                 reply = await self.dispatch(message, request, None)
                 if reply is not None and "result" in reply:

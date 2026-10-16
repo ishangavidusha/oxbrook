@@ -1199,6 +1199,58 @@ def tools_are_listed_by_who_may_call_them(_: TestClient) -> None:
         check(c.get("/open").status_code == 200, "mcp_auth protected an ordinary route")
 
 
+def topics_are_resources_only_when_declared(_: TestClient) -> None:
+    """I-117: topics reach agents only with `resource=True`, under their own
+    `auth=`, which defaults to the app's. Before, every topic was listed and
+    readable by anyone through `/mcp`, so `App(auth=keys, mcp_auth=None)`,
+    a reasonable way to offer public tools, opened every topic to an
+    anonymous agent."""
+    app = App(auth=keys, mcp_auth=None)
+    app.topic("internal")
+    app.topic("orders", resource=True)
+    app.topic("news", resource=True, auth=None)
+
+    def listed(headers=None):
+        return sorted(r["uri"] for r in c.mcp("resources/list", headers=headers)["resources"])
+
+    def refused(method, uri, headers=None) -> bool:
+        try:
+            c.mcp(method, {"uri": uri}, headers=headers)
+        except Exception as exc:  # the client raises the JSON-RPC error
+            return "no topic named" in str(exc)
+        return False
+
+    with TestClient(app) as c:
+        check(listed() == ["topic://news"], f"an anonymous agent was shown {listed()}")
+        check(listed({"x-api-key": KEY}) == ["topic://news", "topic://orders"],
+              f"a keyed agent was shown {listed({'x-api-key': KEY})}")
+        for method in ("resources/read", "resources/subscribe"):
+            check(refused(method, "topic://orders"),
+                  f"{method}: an anonymous agent reached a topic the app's auth guards")
+            check(refused(method, "topic://internal", {"x-api-key": KEY}),
+                  f"{method}: a topic that is not a resource was reachable")
+        read = c.mcp("resources/read", {"uri": "topic://orders"}, headers={"x-api-key": KEY})
+        check(read["contents"][0]["uri"] == "topic://orders", f"a keyed read gave {read}")
+        check(c.mcp("resources/read", {"uri": "topic://news"})["contents"],
+              "a topic declared public was not readable anonymously")
+
+
+def mcp_failures_do_not_leak(_: TestClient) -> None:
+    """An MCP request that fails inside the server answers `internal error`,
+    not the exception's text: a durable topic read while Redis is down used
+    to hand the agent the driver's message, address and all (invariant 9)."""
+    app = App(redis_url="redis://127.0.0.1:1", mcp_auth=None)
+    app.topic("ledger", durable=True, resource=True, auth=None)
+    with TestClient(app) as c:
+        try:
+            c.mcp("resources/read", {"uri": "topic://ledger"})
+            failures.append("reading a durable topic with Redis down succeeded")
+        except Exception as exc:  # the client raises the JSON-RPC error
+            text = str(exc)
+            check("internal error" in text and "127.0.0.1" not in text,
+                  f"a failed resource read told the agent: {text!r}")
+
+
 def openapi_describes_it(c: TestClient) -> None:
     from openapi_spec_validator import validate
 
@@ -1406,6 +1458,8 @@ def main() -> None:
             websockets_are_guarded,
             tool_calls_are_guarded,
             tools_are_listed_by_who_may_call_them,
+            topics_are_resources_only_when_declared,
+            mcp_failures_do_not_leak,
             openapi_describes_it,
         ):
             try:

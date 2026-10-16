@@ -57,8 +57,8 @@ over HTTP. `tools/list` shows an agent only the tools its credentials would
 pass, so an agent that cannot delete is not offered a delete tool.
 
 `/mcp` itself follows the app's declaration unless `App(mcp_auth=...)` gives
-it one of its own. That declaration decides who may connect, list tools and
-read topics; each tool still answers to its route's. With an
+it one of its own. That declaration decides who may connect and list; each
+tool still answers to its route's, and each topic to its own. With an
 [OpenID Connect provider](guide/auth.md#openid-connect-providers), an agent can
 log in by itself — see [Agents that log in](#agents-that-log-in).
 
@@ -113,9 +113,22 @@ the server serves TLS or a proxy sends `X-Forwarded-Proto: https`.
 
 ## Topics as resources
 
-Topics show up as readable resources at `topic://<name>`. A durable one returns
-recent messages. They are read under `/mcp`'s declaration, so `mcp_auth=None`
-makes every topic readable by any agent.
+A topic made with `resource=True` is a readable resource at
+`topic://<name>`. A durable one returns recent messages.
+
+```python
+orders = app.topic("orders", resource=True)                  # the app's auth
+news = app.topic("news", resource=True, auth=None)           # anyone
+audit = app.topic("audit", resource=True, auth=admins)       # its own
+```
+
+Topics are off by default, as routes are until `tool=True`, because a topic
+carries whatever the routes that publish to it publish: a topic fed by
+protected routes must not become readable through `/mcp` just because it
+exists. `auth=` on the topic says who may read and follow it; left unset, it
+is the app's `auth`, as it would be for a route. `resources/list` shows an
+agent only the topics it may read, and one it may not read is answered as if
+it did not exist.
 
 An agent can also **follow** a topic instead of polling it. Subscribing to
 `topic://orders` means the server tells the agent when there is something new,

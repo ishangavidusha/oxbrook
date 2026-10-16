@@ -148,9 +148,9 @@ class App:
         if the API's shape is not for everyone.
 
         `mcp_auth` guards the MCP endpoint itself, apart from `auth`: who may
-        connect, list tools, and read topics as resources. Each tool is still
-        guarded by its own route's declaration, and the tool list shows a
-        caller only the tools it may call. Left unset, `/mcp` follows `auth`.
+        connect and list. Each tool is still guarded by its own route's
+        declaration and each topic by its own (see `topic`), and the lists
+        show a caller only what it may use. Left unset, `/mcp` follows `auth`.
         When either names an `OIDC` provider, the endpoint also serves OAuth
         protected-resource metadata, and a `401` from it points there, so an
         MCP client can find where to log in.
@@ -170,6 +170,8 @@ class App:
             # First registered, so it wraps everything and sees the final status.
             self._middleware.append(access_middleware)
         self._topics: dict[str, Topic] = {}
+        #: Topics offered to agents as resources, with their own `auth=`.
+        self._resources: dict[str, Any] = {}
         self.title = title
         self.version = version
         self.description = description
@@ -675,6 +677,9 @@ class App:
         maxsize: int | None = None,
         policy: str | None = None,
         durable: bool = False,
+        *,
+        resource: bool = False,
+        auth: Any = UNSET,
     ) -> Topic:
         """Get or create a named topic.
 
@@ -683,12 +688,21 @@ class App:
         additionally shares it across processes and records it in Redis, which
         needs `App(redis_url=...)`.
 
-        `maxsize`, `policy` and `durable` apply only when the topic is first
-        created.
+        `resource=True` offers the topic to agents over MCP, at
+        `topic://<name>`, to read and to follow. Off unless set, like
+        `tool=True` on a route: a topic fed by protected routes would
+        otherwise be readable by any agent that reaches `/mcp`. `auth` says
+        who may read it there; left unset it is the app's `auth`, as for a
+        route, and `None` makes it public. A caller it refuses is not shown
+        the topic at all.
+
+        `maxsize`, `policy`, `durable`, `resource` and `auth` apply only when
+        the topic is first created.
         """
         existing = self._topics.get(name)
         if existing is not None:
             return existing
+        auth = _auth.check(auth, f"app.topic({name!r}, auth=...)")
         created = Topic(
             name,
             maxsize=maxsize or 1024,
@@ -697,7 +711,10 @@ class App:
         )
         # Racing handlers could both create one; keep whichever landed first so
         # every worker sees the same object.
-        return self._topics.setdefault(name, created)
+        kept = self._topics.setdefault(name, created)
+        if kept is created and resource:
+            self._resources[name] = auth
+        return kept
 
     @property
     def topics(self) -> dict[str, Topic]:
