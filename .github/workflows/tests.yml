@@ -75,7 +75,10 @@ jobs:
           --health-timeout 3s
           --health-retries 10
 
-    timeout-minutes: 20
+    # Twenty minutes is the run; the rest is a cold cache. grpcio, which
+    # firebase-admin needs, publishes no free-threaded Linux wheel and builds
+    # from source, and uv's cache only keeps that build once a job succeeds.
+    timeout-minutes: 40
 
     env:
       OXBROOK_TEST_REDIS: redis://127.0.0.1:6379
@@ -128,7 +131,10 @@ jobs:
           cache-dependency-glob: pyproject.toml
 
       - name: Create the environment
+        timeout-minutes: 30
         run: |
+          # grpcio's source build is serial unless told otherwise.
+          export GRPC_PYTHON_BUILD_EXT_COMPILER_JOBS=$(nproc)
           uv venv --python ${{ matrix.python }} ${{ matrix.venv }}
           uv pip install --python ${{ matrix.venv }}/bin/python \
             maturin "httpx[http2]" cryptography openapi-spec-validator websockets redis mcp coverage pydantic \
