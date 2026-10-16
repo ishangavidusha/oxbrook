@@ -165,7 +165,7 @@
       "standardFlowEnabled": true,
       "directAccessGrantsEnabled": false,
       "redirectUris": ["http://127.0.0.1:*"],
-      "attributes": {"pkce.code.challenge.method": "S256"},
+      "attributes": {"pkce.code.challenge.method": "S256", "post.logout.redirect.uris": "+"},
       "defaultClientScopes": ["basic", "roles"],
       "optionalClientScopes": ["email", "profile"]
     }

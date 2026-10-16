@@ -163,7 +163,11 @@ class OAuthLogin:
     A link to `/auth/login?next=/notes` sends the person to the provider;
     the provider sends them back to `/auth/callback`, which finishes the login
     and redirects to `/notes`. `next` is followed only when it is a path on
-    this site. `POST /auth/logout` empties the session.
+    this site. `POST /auth/logout` empties the session; with
+    `provider_logout=True` it also sends the person to the provider's
+    `end_session_endpoint`, so the provider's own session ends too and the
+    next login asks for a password. Register `after_logout`, as a full URL,
+    with the provider as a post-logout redirect URI.
 
     `on_login(request, login)` is where the app decides who that is: it
     receives a `Login`, and returns the value to keep in the session under
@@ -209,6 +213,7 @@ class OAuthLogin:
         redirect_uri: str | None = None,
         after_login: str = "/",
         after_logout: str = "/",
+        provider_logout: bool = False,
         params: Mapping[str, str] | None = None,
         trusted_origins: Iterable[str] | None = None,
         discovery_url: str | None = None,
@@ -219,8 +224,8 @@ class OAuthLogin:
         self._setup(
             client_id=client_id, client_secret=client_secret, sessions=sessions, scopes=scopes,
             on_login=on_login, key=key, redirect_uri=redirect_uri, after_login=after_login,
-            after_logout=after_logout, params=params, trusted_origins=trusted_origins,
-            allow_http=allow_http, timeout=timeout, name=name,
+            after_logout=after_logout, provider_logout=provider_logout, params=params,
+            trusted_origins=trusted_origins, allow_http=allow_http, timeout=timeout, name=name,
         )
         self._openid(OIDC(
             issuer, audience=client_id, discovery_url=discovery_url, allow_http=allow_http,
@@ -239,6 +244,7 @@ class OAuthLogin:
         redirect_uri: str | None,
         after_login: str,
         after_logout: str,
+        provider_logout: bool,
         params: Mapping[str, str] | None,
         trusted_origins: Iterable[str] | None,
         allow_http: bool,
@@ -287,6 +293,9 @@ class OAuthLogin:
         self.redirect_uri = redirect_uri
         self.after_login = after_login
         self.after_logout = after_logout
+        if not isinstance(provider_logout, bool):
+            raise TypeError("provider_logout is True or False")
+        self.provider_logout = provider_logout
         self.params = params
         self.allow_http = allow_http
         self.timeout = timeout
@@ -333,6 +342,7 @@ class OAuthLogin:
         asks for a refresh token.
         """
         options.setdefault("name", "google")
+        _no_provider_logout("Google", options)
         flow = cls("https://accounts.google.com", client_id=client_id,
                    client_secret=client_secret, sessions=sessions, **options)
         # Google's ID tokens name their issuer in either form.
@@ -431,6 +441,7 @@ class OAuthLogin:
         and `api="https://github.example.com/api/v3"`.
         """
         options.setdefault("name", "github")
+        _no_provider_logout("GitHub", options)
         allow_http = options.get("allow_http", False)
         server = _bare(server, "server", scheme=True)
         api = _bare(api, "api", scheme=True)
@@ -715,22 +726,68 @@ class OAuthLogin:
                                extra={"scheme": self.name, "path": request.path})
                 raise Forbidden("cross-site request refused")
             self.sessions.load(request).clear()
+        location = self.after_logout
+        if self.provider_logout:
+            location = await self._provider_logout(request) or location
         return Response(status=303, content_type="text/plain",
-                        headers={"location": self.after_logout, "cache-control": "no-store"})
+                        headers={"location": location, "cache-control": "no-store"})
+
+    async def _provider_logout(self, request: Any) -> str | None:
+        """Where to send the person so the provider ends its session too:
+        OpenID Connect RP-initiated logout, by `client_id` rather than an ID
+        token hint, since the ID token is not kept. None when the provider
+        cannot be asked, and the logout stays this app's alone."""
+        if self.verifier is None:
+            return None
+        try:
+            document = await self.verifier.keys.discovered()
+        except _jwks.Unavailable as exc:
+            logger.warning("logout: provider unavailable, ending this app's session only: %s",
+                           exc, extra={"scheme": self.name})
+            return None
+        endpoint = document.get("end_session_endpoint")
+        if not isinstance(endpoint, str):
+            logger.warning("logout: the provider has no end_session_endpoint; ending this "
+                           "app's session only", extra={"scheme": self.name})
+            return None
+        try:
+            _jwks.check_url(endpoint, self.allow_http, "end_session_endpoint")
+        except ValueError as exc:
+            logger.warning("logout: %s", exc, extra={"scheme": self.name})
+            return None
+        from ._auth import public_base
+
+        base = public_base(request)
+        query = {"client_id": self.client_id}
+        if base is not None:
+            # Absolute, as the provider requires; registered with it, as the
+            # callback is.
+            query["post_logout_redirect_uri"] = base + self.after_logout
+        joiner = "&" if "?" in endpoint else "?"
+        return endpoint + joiner + urllib.parse.urlencode(query)
+
+
+def _no_provider_logout(provider: str, options: dict[str, Any]) -> None:
+    if options.get("provider_logout"):
+        raise ValueError(
+            f"{provider} offers apps no way to end a person's session with it, so "
+            f"provider_logout=True cannot be honoured; logging out ends this app's "
+            f"session only"
+        )
 
 
 def _common(options: dict[str, Any]) -> dict[str, Any]:
     """The options every provider takes, from a preset's keyword arguments."""
     allowed = {
         "scopes", "on_login", "key", "redirect_uri", "after_login", "after_logout", "params",
-        "trusted_origins", "allow_http", "timeout", "name",
+        "trusted_origins", "allow_http", "timeout", "name", "provider_logout",
     }
     unknown = sorted(set(options) - allowed)
     if unknown:
         raise TypeError(f"unexpected keyword argument(s) {unknown}")
     defaults = {"on_login": None, "key": "user_id", "redirect_uri": None, "after_login": "/",
-                "after_logout": "/", "params": None, "trusted_origins": None,
-                "allow_http": False, "timeout": 10}
+                "after_logout": "/", "provider_logout": False, "params": None,
+                "trusted_origins": None, "allow_http": False, "timeout": 10}
     return {**defaults, **options}
 
 

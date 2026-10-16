@@ -7,6 +7,9 @@ release does not; changes that break existing code are listed under
 
 ## Unreleased
 
+- **Logging out at the provider.** `OAuthLogin(provider_logout=True)` sends
+  the person to the provider's `end_session_endpoint` on logout, so the next
+  login asks for a password instead of going straight through.
 - **WebSocket authorizers are cancelled** when the handshake times out or the
   client leaves, as handlers are. One that stalled used to keep running after
   the `504`.

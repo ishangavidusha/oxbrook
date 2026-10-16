@@ -607,8 +607,21 @@ form on your own pages works and another site's cannot log your visitors out:
 <form method="post" action="/auth/logout"><button>Log out</button></form>
 ```
 
-It ends the session with this app, not the person's session with the
-provider.
+By default it ends the session with this app, not the person's session with
+the provider: the next login there goes straight through, without a
+password. On a shared computer that logs the next person in as the last.
+`provider_logout=True` ends both:
+
+```python
+login = OAuthLogin.keycloak(url, realm, ..., provider_logout=True)
+```
+
+Logging out then sends the person to the provider's `end_session_endpoint`,
+which sends them back to `after_logout`. Register that address with the
+provider as a post-logout redirect URI, as the callback is registered. The
+provider may ask the person to confirm. Keycloak, Microsoft and most OpenID
+Connect providers support it. Google and GitHub have no such endpoint, so
+their presets refuse the option.
 
 ## Writing a scheme
 

@@ -178,6 +178,8 @@ class Provider:
             "jwks_uri": f"{self.url}/jwks",
             "id_token_signing_alg_values_supported": ["RS256"],
         }
+        if not base:
+            document["end_session_endpoint"] = f"{self.url}/logout"
         if not base and self.promise_iss:
             document["authorization_response_iss_parameter_supported"] = True
         return document
@@ -306,6 +308,12 @@ organizations = OAuthLogin.microsoft(client_id="web", client_secret="web-secret"
                                      tenant="organizations", name="org")
 unreachable = OAuthLogin("http://127.0.0.1:9", client_id="web", client_secret="web-secret",
                          sessions=sessions, name="down", timeout=2)
+everywhere = OAuthLogin(provider.url, client_id="web", client_secret="web-secret",
+                        sessions=sessions, name="everywhere", provider_logout=True,
+                        after_logout="/bye")
+ms_everywhere = OAuthLogin.microsoft(client_id="web", client_secret="web-secret",
+                                     sessions=sessions, authority=provider.url + "/ms",
+                                     name="mseverywhere", provider_logout=True)
 
 # Every route is the session's unless it says otherwise: the login routes
 # must be reachable without one anyway.
@@ -318,6 +326,8 @@ app.include(github.routes(prefix="/auth/github"))
 app.include(microsoft.routes(prefix="/auth/ms"))
 app.include(organizations.routes(prefix="/auth/org"))
 app.include(unreachable.routes(prefix="/auth/down"))
+app.include(everywhere.routes(prefix="/auth/everywhere"))
+app.include(ms_everywhere.routes(prefix="/auth/mseverywhere"))
 
 
 @app.get("/me")
@@ -670,6 +680,36 @@ def logout_ends_the_session(c: TestClient) -> None:
     check(r.status_code == 303, f"logging out with no session gave {r.status_code}")
 
 
+def logout_can_end_the_provider_session(c: TestClient) -> None:
+    """I-120: with `provider_logout=True` logging out also sends the person to
+    the provider's end_session_endpoint, so the next login there asks for a
+    password again. Keycloak checks that end to end; here, the redirect."""
+    provider.reset()
+    b = Browser()
+    log_in(b, "/auth/everywhere")
+    check(b.go("GET", f"{BASE}/me").status_code == 200, "not logged in before logout")
+    r = b.go("POST", f"{BASE}/auth/everywhere/logout", headers={"sec-fetch-site": "same-origin"})
+    location = r.headers.get("location", "")
+    parts = urllib.parse.urlsplit(location)
+    query = urllib.parse.parse_qs(parts.query)
+    check(r.status_code == 303 and location.startswith(f"{provider.url}/logout?"),
+          f"logout with provider_logout went to {r.status_code} {location!r}")
+    check(query.get("client_id") == ["web"]
+          and query.get("post_logout_redirect_uri") == [f"{BASE}/bye"],
+          f"the provider was not told who and where to return: {query}")
+    check(b.go("GET", f"{BASE}/me").status_code == 401, "the app's session survived logout")
+    # A provider with no end_session_endpoint: the app's session still ends.
+    r = Browser().go("POST", f"{BASE}/auth/mseverywhere/logout")
+    check(r.status_code == 303 and r.headers.get("location") == "/",
+          f"with no end_session_endpoint logout went to {r.headers.get('location')!r}")
+    for preset in (OAuthLogin.google, OAuthLogin.github):
+        try:
+            preset(client_id="a", client_secret="b", sessions=sessions, provider_logout=True)
+            failures.append(f"{preset.__name__} accepted provider_logout, which it cannot do")
+        except ValueError:
+            pass
+
+
 def github_logs_in_without_an_id_token(c: TestClient) -> None:
     provider.reset()
     b = Browser()
@@ -786,8 +826,14 @@ kc_login = OAuthLogin.keycloak(
     sessions=kc_sessions,
     on_login=lambda _, who: kc_seen.append(who) or who.claims["preferred_username"],
 )
+kc_everywhere = OAuthLogin.keycloak(
+    KEYCLOAK, REALM, client_id="notes-login", client_secret="notes-login-secret",
+    sessions=kc_sessions, name="kceverywhere", provider_logout=True,
+    on_login=lambda _, who: who.claims["preferred_username"],
+)
 kc_app = App(auth=SessionAuth(kc_sessions))
 kc_app.include(kc_login.routes(prefix="/auth"))
+kc_app.include(kc_everywhere.routes(prefix="/everywhere"))
 
 
 @kc_app.get("/me")
@@ -829,6 +875,41 @@ def keycloak_logs_a_person_in(c: TestClient) -> None:
     back = b.go("GET", r.headers["location"])
     check(back.status_code == 302, f"keycloak's single sign-on answered {back.status_code}")
     check(b.go("GET", back.headers["location"]).status_code == 303, "the second login failed")
+
+
+def keycloak_logout_ends_its_session(c: TestClient) -> None:
+    """I-120, end to end: after a logout with `provider_logout=True`, logging
+    in again asks Keycloak for the password. Without it, Keycloak's own session
+    let the next person straight back in as the last one."""
+    b = Browser()
+    r = b.go("GET", f"{c.base_url}/everywhere/login")
+    back = keycloak_form(b, r.headers["location"], "ada", "ada-password")
+    check(b.go("GET", back.headers["location"]).status_code == 303, "the login failed")
+    r = b.go("GET", f"{c.base_url}/everywhere/login")
+    check(b.go("GET", r.headers["location"]).status_code == 302,
+          "keycloak's session was not alive before logout")
+
+    r = b.go("POST", f"{c.base_url}/everywhere/logout", headers={"sec-fetch-site": "same-origin"})
+    location = r.headers.get("location", "")
+    check(r.status_code == 303 and location.startswith(f"{KEYCLOAK}/realms/{REALM}/"),
+          f"logout did not go to keycloak: {r.status_code} {location!r}")
+    page = b.go("GET", location)
+    if page.status_code == 200:
+        # Without an ID token hint Keycloak asks the person to confirm.
+        form = re.search(r'<form[^>]*action="([^"]+)"', page.text)
+        check(form is not None, f"keycloak's logout page had no form: {page.text[:300]}")
+        fields = dict(re.findall(r'<input[^>]*name="([^"]+)"[^>]*value="([^"]*)"', page.text))
+        action = urllib.parse.urljoin(location, form.group(1).replace("&amp;", "&"))
+        page = b.go("POST", action, data={**fields, "confirmLogout": "Logout"})
+    check(page.status_code == 302 and page.headers.get("location") == f"{c.base_url}/",
+          f"keycloak did not send the person back: {page.status_code} "
+          f"{page.headers.get('location')!r}")
+
+    r = b.go("GET", f"{c.base_url}/everywhere/login")
+    again = b.go("GET", r.headers["location"])
+    check(again.status_code == 200 and "kc-form-login" in again.text,
+          f"after logout keycloak let the person back in without a password: "
+          f"{again.status_code}")
 
 
 def keycloak_refuses_a_stolen_code(c: TestClient) -> None:
@@ -927,13 +1008,15 @@ def main() -> None:
         run([a_person_logs_in, state_is_checked, a_stolen_code_is_useless,
              the_id_token_is_checked, the_callback_names_its_issuer, the_provider_can_fail,
              next_stays_on_this_site, the_session_starts_fresh, logout_ends_the_session,
+             logout_can_end_the_provider_session,
              github_logs_in_without_an_id_token, microsoft_checks_the_tenant,
              the_routes_are_documented_as_public], c)
 
     if reachable:
         print("keycloak")
         with TestClient(kc_app) as c:
-            run([keycloak_logs_a_person_in, keycloak_refuses_a_stolen_code,
+            run([keycloak_logs_a_person_in, keycloak_logout_ends_its_session,
+                 keycloak_refuses_a_stolen_code,
                  the_example_works], c)
     else:
         print("keycloak: SKIP")
