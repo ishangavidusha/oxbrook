@@ -29,7 +29,8 @@ SUITES = [
     "workers", "routing", "query", "bodies", "encoding", "blocking", "openapi", "capabilities",
     "agents", "streams", "sse",
     "websocket", "hardening", "escaping", "wire", "failures", "plumbing", "injection",
-    "durable", "database", "mongo", "backpressure", "assignment", "composition", "lifespan", "cors",
+    "durable", "database", "mongo", "firebase", "backpressure", "assignment", "composition",
+    "lifespan", "cors",
     "uploads", "origins", "auth", "oidc", "login", "cli", "files", "compressed", "health",
     "metrics", "telemetry", "limits", "settings", "after", "scaffold", "protocols", "cancellation",
     "verify",
@@ -39,7 +40,7 @@ SUITES = [
 #: because this runs once per wheel on a CI runner: the dispatch path, the
 #: request path, the protections, the static mounts, cancellation, TLS and
 #: HTTP/2, and the end-to-end pass. Redis, PostgreSQL and Keycloak are not
-#: there, so `durable`, `database`, `mongo`, `oidc` and `login` are out.
+#: there, so `durable`, `database`, `mongo`, `firebase`, `oidc` and `login` are out.
 WHEEL = ["routing", "bodies", "hardening", "files", "cancellation", "protocols", "verify"]
 
 
@@ -67,9 +68,9 @@ def main() -> int:
     # tested none of it (I-019). Ask first: when Redis is required, this is
     # the difference between finding out now and finding out fifteen suites
     # in, and when it is not, the warning still reaches the top of the log.
-    # `database` is the same shape for PostgreSQL, `mongo` for MongoDB, `oidc`
-    # and `login` for Keycloak.
-    for gated in ("durable", "database", "mongo", "oidc", "login"):
+    # `database` is the same shape for PostgreSQL, `mongo` for MongoDB,
+    # `firebase` for its emulators, `oidc` and `login` for Keycloak.
+    for gated in ("durable", "database", "mongo", "firebase", "oidc", "login"):
         if gated in chosen:
             probe = subprocess.run([sys.executable, str(HERE / f"{gated}.py"), "--check"],
                                    cwd=HERE.parent)

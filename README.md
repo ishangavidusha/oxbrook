@@ -83,8 +83,8 @@ oxbrook new my-api
   Rust, request bodies larger than memory with backpressure, static files.
 - Routers, middleware, exception handlers, dependency injection with teardown,
   lifespans, signed cookie sessions, CORS, response compression.
-- PostgreSQL and MongoDB as tested patterns, a client per worker loop and a
-  transaction per request.
+- PostgreSQL, MongoDB and Firebase as tested patterns, with a transaction per
+  request.
 - Health probes, Prometheus metrics, OpenTelemetry tracing (opt-in, free
   when off), rate limits, typed settings from the environment, work after the
   response.

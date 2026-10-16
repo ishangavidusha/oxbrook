@@ -9,8 +9,8 @@ GIL_PY := $(shell test -x /opt/homebrew/bin/python3.14 && echo /opt/homebrew/bin
 venvs:
 	uv venv --python $(FT_PY) .venv
 	uv venv --python $(GIL_PY) .venv-gil
-	uv pip install --python .venv/bin/python maturin uvicorn granian fastapi "httpx[http2]" cryptography openapi-spec-validator websockets redis mcp coverage asyncpg "sqlalchemy[asyncio]" alembic "pyjwt[crypto]" brotlicffi prometheus-client pytest opentelemetry-sdk pymongo
-	uv pip install --python .venv-gil/bin/python maturin uvicorn granian fastapi "httpx[http2]" cryptography openapi-spec-validator websockets redis mcp coverage asyncpg "sqlalchemy[asyncio]" alembic "pyjwt[crypto]" brotlicffi prometheus-client pytest opentelemetry-sdk pymongo
+	uv pip install --python .venv/bin/python maturin uvicorn granian fastapi "httpx[http2]" cryptography openapi-spec-validator websockets redis mcp coverage asyncpg "sqlalchemy[asyncio]" alembic "pyjwt[crypto]" brotlicffi prometheus-client pytest opentelemetry-sdk pymongo firebase-admin
+	uv pip install --python .venv-gil/bin/python maturin uvicorn granian fastapi "httpx[http2]" cryptography openapi-spec-validator websockets redis mcp coverage asyncpg "sqlalchemy[asyncio]" alembic "pyjwt[crypto]" brotlicffi prometheus-client pytest opentelemetry-sdk pymongo firebase-admin
 	# Docs tooling only in the GIL venv: mkdocs has no reason to run twice.
 	uv pip install --python .venv-gil/bin/python mkdocs-material 'mkdocstrings[python]' ruff
 
@@ -74,6 +74,13 @@ ifeq ($(MONGO),require)
 export OXBROOK_REQUIRE_MONGO := 1
 endif
 
+# The same for tests/firebase.py and the Firebase emulators; `make verify
+# FIREBASE=` accepts that gap.
+FIREBASE ?= require
+ifeq ($(FIREBASE),require)
+export OXBROOK_REQUIRE_FIREBASE := 1
+endif
+
 # And for the second halves of tests/oidc.py and tests/login.py, which run
 # against a real Keycloak: real tokens, a key rotated through its admin API, and
 # a person logging in through its login form. `make verify KEYCLOAK=` accepts
@@ -87,6 +94,7 @@ verify: build-ft
 	@.venv/bin/python tests/durable.py --check
 	@.venv/bin/python tests/database.py --check
 	@.venv/bin/python tests/mongo.py --check
+	@.venv/bin/python tests/firebase.py --check
 	@.venv/bin/python tests/oidc.py --check
 	@for s in $(SUITES); do echo "== $$s"; $(SUITE_TIMEOUT) .venv/bin/python tests/$$s.py || exit 1; done
 
@@ -94,6 +102,7 @@ verify-gil: build-gil
 	@.venv-gil/bin/python tests/durable.py --check
 	@.venv-gil/bin/python tests/database.py --check
 	@.venv-gil/bin/python tests/mongo.py --check
+	@.venv-gil/bin/python tests/firebase.py --check
 	@.venv-gil/bin/python tests/oidc.py --check
 	@for s in $(SUITES); do echo "== $$s"; $(SUITE_TIMEOUT) .venv-gil/bin/python tests/$$s.py || exit 1; done
 
@@ -108,6 +117,7 @@ coverage: build-ft
 	@.venv/bin/python tests/durable.py --check
 	@.venv/bin/python tests/database.py --check
 	@.venv/bin/python tests/mongo.py --check
+	@.venv/bin/python tests/firebase.py --check
 	@.venv/bin/python tests/oidc.py --check
 	@rm -f .coverage .coverage.* 2>/dev/null || true
 	@for s in $(SUITES); do echo "== $$s"; \

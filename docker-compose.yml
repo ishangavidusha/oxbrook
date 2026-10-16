@@ -7,10 +7,12 @@
 #   postgres  the database the database suite and example run against
 #   keycloak  a real OpenID Connect provider, for tests/oidc.py
 #   mongo     a one-member replica set, for tests/mongo.py and examples/mongo
+#   firebase  the Firestore and Realtime Database emulators, for
+#             tests/firebase.py and examples/firebase; built from tests/firebase
 #
-# Ports are deliberately non-default (6399, 5499, 8199 and 27099, not 6379,
-# 5432, 8080 and 27017) so this never collides with anything already running on
-# the machine.
+# Ports are deliberately non-default (6399, 5499, 8199, 27099, 8299 and 9099,
+# not 6379, 5432, 8080, 27017, 8080 and 9000) so this never collides with
+# anything already running on the machine.
 
 name: oxbrook-dev
 
@@ -113,3 +115,18 @@ services:
     tmpfs:
       # Same reasoning as redis: every run starts from an empty database.
       - /data/db
+
+  firebase:
+    build: ./tests/firebase
+    image: oxbrook-firebase-emulators
+    container_name: oxbrook-firebase
+    ports:
+      - "127.0.0.1:8299:8080"
+      - "127.0.0.1:9099:9000"
+    healthcheck:
+      # Both emulators answer plain HTTP on their ports once they are up.
+      test: ["CMD-SHELL", "node -e \"Promise.all([8080, 9000].map(p => fetch('http://127.0.0.1:' + p + '/'))).then(() => process.exit(0), () => process.exit(1))\""]
+      interval: 2s
+      timeout: 3s
+      retries: 60
+      start_period: 10s

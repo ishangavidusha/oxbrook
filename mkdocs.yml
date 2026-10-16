@@ -116,6 +116,7 @@ nav:
       - guide/lifespan.md
       - guide/database.md
       - guide/mongodb.md
+      - guide/firebase.md
       - guide/sessions.md
       - guide/auth.md
       - guide/logging.md

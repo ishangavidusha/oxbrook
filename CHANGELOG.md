@@ -7,6 +7,12 @@ release does not; changes that break existing code are listed under
 
 ## Unreleased
 
+- **Firebase.** A tested pattern for Firestore and the Realtime Database
+  through the Admin SDK: one app per process from `lifespan`, routes
+  `blocking=True`, transactions in both databases. Tested against the
+  emulators. On the free-threaded build, Firestore's grpcio turns the GIL back
+  on; the Realtime Database does not. See the Firebase guide and
+  `examples/firebase/`.
 - **MongoDB.** A tested pattern on PyMongo's async client: a client per
   worker loop, a transaction per request, documents returned as they are or
   read into pydantic models. MongoDB's `ObjectId` encodes as its hex string

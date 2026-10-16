@@ -63,6 +63,7 @@ whole process when it is imported, with a `RuntimeWarning`.
 | MySQL | `asyncmy` | yes |
 | SQLite | `aiosqlite` | pure Python |
 | MongoDB | `pymongo` (its async API); see [MongoDB](mongodb.md) | yes |
+| Firestore, Realtime Database | `firebase-admin`, synchronous; see [Firebase](firebase.md) | Realtime Database yes; Firestore turns the GIL on (grpcio) |
 | any of the above | `sqlalchemy[asyncio]` | yes, including `greenlet` |
 
 The picture changes as projects publish wheels. For PostgreSQL today, use
