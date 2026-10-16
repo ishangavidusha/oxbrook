@@ -44,6 +44,9 @@ pub struct Request {
     /// a complete reply keeps its slot until that work has run. None for a
     /// request built by hand, which has no responder.
     pub kept: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// How long it waited in the queue for its worker loop, when the queue
+    /// stamped arrivals (metrics or telemetry on). None otherwise.
+    pub waited: Option<std::time::Duration>,
 }
 
 impl Request {
@@ -128,6 +131,7 @@ impl Request {
             client,
             after: PyOnceLock::new(),
             kept: None,
+            waited: None,
         })
     }
 
@@ -245,6 +249,14 @@ impl Request {
     #[getter]
     fn client(&self) -> Option<String> {
         self.client.map(|ip| ip.to_string())
+    }
+
+    /// Seconds this request waited for its worker loop, or None when the
+    /// server was not timing that. Telemetry reads it to start a span at
+    /// the request's arrival rather than when a loop got to it.
+    #[getter]
+    fn _queue_wait(&self) -> Option<f64> {
+        self.waited.map(|d| d.as_secs_f64())
     }
 
     /// The HTTP method, uppercase.

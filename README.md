@@ -69,7 +69,8 @@ oxbrook new my-api
 - **Agent-native.** `tool=True` exposes a route to AI agents over the Model
   Context Protocol, guarded exactly as it is over HTTP.
 - **Production pieces included.** Authentication, health probes, Prometheus
-  metrics, rate limits, compression and graceful shutdown, without plugins.
+  metrics, OpenTelemetry tracing, rate limits, compression and graceful
+  shutdown, without plugins.
 
 ## What it does
 
@@ -82,8 +83,9 @@ oxbrook new my-api
   Rust, request bodies larger than memory with backpressure, static files.
 - Routers, middleware, exception handlers, dependency injection with teardown,
   lifespans, signed cookie sessions, CORS, response compression.
-- Health probes, Prometheus metrics, rate limits, typed settings from the
-  environment, work after the response.
+- Health probes, Prometheus metrics, OpenTelemetry tracing (opt-in, free
+  when off), rate limits, typed settings from the environment, work after the
+  response.
 - OpenAPI 3.1 from the same route metadata the router uses.
 
 **Authentication**

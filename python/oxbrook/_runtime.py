@@ -52,6 +52,18 @@ async def run_after(request) -> None:
             )
 
 
+def _note(responder, exc) -> None:
+    """Tell a traced request's span about an exception the log is getting.
+
+    Only the telemetry adapter's responder listens; on an untraced request
+    this is a failed attribute lookup, and only on a path that is already
+    logging a traceback.
+    """
+    note = getattr(responder, "note_exception", None)
+    if note is not None:
+        note(exc)
+
+
 def _is_async(fn) -> bool:
     """An `async def`, a partial of one, or an object whose `__call__` is one."""
     return inspect.iscoroutinefunction(fn) or inspect.iscoroutinefunction(type(fn).__call__)
@@ -94,6 +106,7 @@ async def run_websocket(handler, request, responder, core, params):
             if exc is not None:
                 failed = True
                 logger.exception("websocket handler raised", exc_info=exc)
+                _note(responder, exc)
         core.close()
         closed = True
         # A peer leaving is how a socket normally ends, not a failure.
@@ -169,6 +182,7 @@ async def pump_sse(sse, responder):
                 except Exception as exc:  # noqa: BLE001
                     # A source that raises mid-stream ends it, and says so.
                     logger.exception("sse source raised", exc_info=exc)
+                    _note(responder, exc)
                     pending = None
                     break
                 pending = None
@@ -180,6 +194,7 @@ async def pump_sse(sse, responder):
                     # this runs after the handler returned, so the wrapper's
                     # own except clause has already been left behind.
                     logger.exception("sse source produced an unsendable event", exc_info=exc)
+                    _note(responder, exc)
                     break
                 # `send_chunk` never blocks, because it runs on a worker
                 # loop shared with every other request. When the buffer is
@@ -288,6 +303,7 @@ async def _respond(handler, request, responder, params, debug) -> bool:
             exc_info=exc,
             extra={"method": request.method, "path": request.path},
         )
+        _note(responder, exc)
         detail = f"{type(exc).__name__}: {exc}" if debug else None
         responder.send(500, PROBLEM, problem(500, detail))
         return False
@@ -353,6 +369,7 @@ async def _respond(handler, request, responder, params, debug) -> bool:
             exc_info=exc,
             extra={"method": request.method, "path": request.path},
         )
+        _note(responder, exc)
         detail = f"{type(exc).__name__}: {exc}" if debug else None
         try:
             responder.send(500, PROBLEM, problem(500, detail))

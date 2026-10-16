@@ -22,6 +22,7 @@ from ._response import Response
 from ._routers import Router, check_prefix
 from ._routing import RouteInfo, build_route, route_shape
 from ._streams import DROP_OLDEST, Topic
+from ._telemetry import Telemetry
 from ._workers import default_workers, gil_enabled
 
 # Requests a single worker loop will accept at once, queued plus in-flight,
@@ -80,6 +81,7 @@ class App:
         websocket_origins: Any = None,
         auth: Any = None,
         mcp_auth: Any = _auth.UNSET,
+        telemetry: Telemetry | None = None,
     ) -> None:
         """`openapi_url` and `docs_url` can each be set to None to disable them.
 
@@ -152,6 +154,11 @@ class App:
         When either names an `OIDC` provider, the endpoint also serves OAuth
         protected-resource metadata, and a `401` from it points there, so an
         MCP client can find where to log in.
+
+        `telemetry` traces requests with OpenTelemetry: a span per request,
+        joined to the caller's trace through `traceparent`. Off unless set,
+        and free when off: OpenTelemetry is not imported and requests run
+        exactly as they would without it. See `Telemetry`.
         """
         self.routes: list[RouteInfo] = []
         self.mounts: list[StaticMount] = []
@@ -196,6 +203,13 @@ class App:
         if metrics and health and metrics.path in (health.live, health.ready):
             raise ValueError(f"metrics and health both use {metrics.path!r}")
         self.metrics = metrics
+        if telemetry is not None and not isinstance(telemetry, Telemetry):
+            raise TypeError(
+                f"telemetry must be a Telemetry(...), got {type(telemetry).__name__}"
+            )
+        self.telemetry = telemetry
+        #: The running server's tracing, when `telemetry` is set; MCP reads it.
+        self._tracing: Any = None
         if rate_limit is not None and not isinstance(rate_limit, RateLimit):
             raise TypeError(
                 f"rate_limit must be a RateLimit(...), got {type(rate_limit).__name__}"
@@ -944,7 +958,19 @@ class App:
         self._register_health()
         self._register_mcp()
         specs = [self._spec(r) for r in self.routes]
-        lifecycle = Lifecycle(self)
+        tracing = None
+        if self.telemetry is not None:
+            from ._telemetry import Tracing
+
+            tracing = Tracing(
+                self.telemetry,
+                tls=tls is not None,
+                request_timeout=request_timeout,
+                never=() if self.health is None else (self.health.ready,),
+            )
+            specs = tracing.adopt(specs)
+        self._tracing = tracing
+        lifecycle = Lifecycle(self, tracing)
         core = Server(
             host,
             port,
@@ -971,6 +997,7 @@ class App:
             None if self.rate_limit is None else self.rate_limit._limiter,
             [(None if r.rate_limit is None else r.rate_limit._limiter, self._unlimited(r))
              for r in self.routes],
+            tracing is not None,
         )
         return ServerHandle(core, lifecycle)
 

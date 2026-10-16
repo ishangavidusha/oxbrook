@@ -123,6 +123,7 @@ nav:
       - guide/compression.md
       - guide/health.md
       - guide/metrics.md
+      - guide/telemetry.md
       - guide/rate-limits.md
       - guide/testing.md
   - Streams:

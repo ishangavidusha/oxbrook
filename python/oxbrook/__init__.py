@@ -30,6 +30,7 @@ from ._sessions import Session, Sessions
 from ._settings import Settings, SettingsError
 from ._sse import SSE, Event
 from ._streams import BLOCK, DROP_NEWEST, DROP_OLDEST, ERROR, Subscription, Topic, TopicFull
+from ._telemetry import Telemetry
 from ._websocket import WebSocket, WebSocketClosed
 
 try:
@@ -71,6 +72,7 @@ __all__ = [
     "Settings",
     "SettingsError",
     "Subscription",
+    "Telemetry",
     "Topic",
     "TopicFull",
     "UploadFile",

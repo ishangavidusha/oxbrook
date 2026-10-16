@@ -1,5 +1,5 @@
 ---
-description: API reference for App, Router, Health, Metrics, RateLimit, Settings and the error types.
+description: API reference for App, Router, Health, Metrics, Telemetry, RateLimit, Settings and the error types.
 ---
 
 # App
@@ -11,6 +11,8 @@ description: API reference for App, Router, Health, Metrics, RateLimit, Settings
 ::: oxbrook.Health
 
 ::: oxbrook.Metrics
+
+::: oxbrook.Telemetry
 
 ::: oxbrook.RateLimit
 

@@ -22,9 +22,11 @@ struct Drainer {
     routes: Arc<Vec<Py<PyAny>>>,
     gates: Arc<Vec<Option<Py<PyAny>>>>,
     router: Arc<Router>,
-    /// `oxbrook._runtime.run_handler`, an async function.
+    /// `oxbrook._runtime.run_handler`, an async function, or its traced
+    /// counterpart when the app has telemetry: chosen once per server, so a
+    /// server without telemetry runs exactly what it would otherwise.
     run_handler: Py<PyAny>,
-    /// `oxbrook._runtime.run_websocket`, for upgraded connections.
+    /// `oxbrook._runtime.run_websocket` (or traced), for upgraded connections.
     run_websocket: Py<PyAny>,
     /// Constructors for parameter types Rust validated but cannot build.
     make_uuid: Py<PyAny>,
@@ -148,6 +150,7 @@ impl Drainer {
                     client: item.client,
                     after: pyo3::sync::PyOnceLock::new(),
                     kept: Some(kept.clone()),
+                    waited: item.queued_at.map(|at| at.elapsed()),
                 },
             )?;
             let responder = Py::new(
@@ -250,8 +253,8 @@ impl Worker {
                             routes,
                             gates,
                             router,
-                            run_handler: runtime.getattr("run_handler")?.unbind(),
-                            run_websocket: runtime.getattr("run_websocket")?.unbind(),
+                            run_handler: lifecycle.getattr("run_handler")?.unbind(),
+                            run_websocket: lifecycle.getattr("run_websocket")?.unbind(),
                             make_uuid: runtime.getattr("make_uuid")?.unbind(),
                             make_date: runtime.getattr("make_date")?.unbind(),
                             make_datetime: runtime.getattr("make_datetime")?.unbind(),

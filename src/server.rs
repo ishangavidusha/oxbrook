@@ -106,6 +106,9 @@ pub struct Server {
     proxies: ProxiesTuple,
     app_limit: Option<Arc<Limit>>,
     route_limits: Vec<RouteLimit>,
+    /// The app traces requests: queues stamp arrivals so a span can start
+    /// when the request arrived. The tracing itself is Python's.
+    telemetry: bool,
 }
 
 /// A route's own limit, and whether it is exempt from the app's: the
@@ -128,7 +131,7 @@ type Route = (
 #[pymethods]
 impl Server {
     #[new]
-    /// Twenty-four arguments, which clippy dislikes. This is the Python
+    /// Twenty-five arguments, which clippy dislikes. This is the Python
     /// constructor: the signature *is* the API, and collapsing it into a
     /// config object would move the same fields behind a dict that Python has
     /// to build on every server start.
@@ -158,6 +161,7 @@ impl Server {
         proxies: ProxiesTuple,
         app_limit: Option<PyRef<'_, Limiter>>,
         route_limits: Vec<(Option<PyRef<'_, Limiter>>, bool)>,
+        telemetry: bool,
     ) -> Self {
         // The budgets themselves, taken here, on a thread attached to the
         // interpreter: a tokio thread never touches the Python object.
@@ -195,6 +199,7 @@ impl Server {
             proxies,
             app_limit,
             route_limits,
+            telemetry,
         }
     }
 
@@ -349,6 +354,11 @@ impl Server {
         if metrics.is_some() {
             for worker in &workers {
                 worker.queue.measure_wait();
+            }
+        }
+        if self.telemetry {
+            for worker in &workers {
+                worker.queue.stamp_arrivals();
             }
         }
 

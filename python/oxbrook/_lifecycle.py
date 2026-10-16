@@ -51,6 +51,8 @@ import inspect
 from collections.abc import Iterator, Mapping
 from typing import Any
 
+from . import _runtime
+
 
 class State(Mapping):
     """Read-only values yielded by the lifespans. `state.db` or `state["db"]`."""
@@ -135,8 +137,14 @@ def _as_mapping(value: Any, name: str) -> dict:
 class Lifecycle:
     """Runs one app's lifespans for one server. Per server, never module state."""
 
-    def __init__(self, app: Any) -> None:
+    def __init__(self, app: Any, tracing: Any = None) -> None:
         self.app = app
+        # What each worker loop's drain callback runs a request with, read by
+        # Rust once per loop. The traced runners only when the app has
+        # telemetry, so a server without it runs the plain ones directly.
+        runner = _runtime if tracing is None else tracing
+        self.run_handler = runner.run_handler
+        self.run_websocket = runner.run_websocket
         self._process_manager: Any = None
         #: (loop, WorkerContext) for every loop started, so readiness checks
         #: can run on each of them. Appended from the loops' own threads, which

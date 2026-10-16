@@ -498,6 +498,8 @@ class MCP:
             # It used to: any raising tool returned `TypeName: message`, the
             # same leak an HTTP 500 is built to prevent.
             logger.exception("tool raised", exc_info=exc, extra={"tool": name})
+            if self.app._tracing is not None:
+                self.app._tracing.record(exc)
             detail = f"{type(exc).__name__}: {exc}" if self.app.debug else "internal error"
             return _tool_error(detail)
 
@@ -531,8 +533,25 @@ class MCP:
         """Handle one JSON-RPC message. None means it was a notification.
 
         `session` is None only for `initialize`, which is the message that
-        creates one.
+        creates one. With telemetry on, a request is a span of its own.
         """
+        tracing = self.app._tracing
+        method = message.get("method")
+        if tracing is None or not isinstance(method, str) or method.startswith("notifications/"):
+            return await self._dispatch(message, parent, session)
+        params = message.get("params")
+        meta = params.get(META) if isinstance(params, dict) else None
+        if session is not None:
+            version = session.version
+        else:
+            version = meta.get(PROTOCOL_META) if isinstance(meta, dict) else None
+        return await tracing.mcp(
+            message, session and session.id, version, self._dispatch(message, parent, session)
+        )
+
+    async def _dispatch(
+        self, message: dict, parent: Any = None, session: "Session | None" = None
+    ) -> dict | None:
         if message.get("jsonrpc") != "2.0" or "method" not in message:
             return _err(message.get("id"), INVALID_REQUEST, "not a JSON-RPC 2.0 request")
 

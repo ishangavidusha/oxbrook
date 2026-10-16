@@ -17,6 +17,7 @@ need it.
 """
 
 import asyncio
+import importlib.util
 import json
 import os
 import threading
@@ -27,19 +28,12 @@ from typing import Any
 
 from ._schema import encode
 
-try:
-    import redis.asyncio as aioredis
-    from redis.backoff import ExponentialBackoff
-    from redis.exceptions import ConnectionError as RedisConnectionError
-    from redis.exceptions import ResponseError
-    from redis.exceptions import TimeoutError as RedisTimeoutError
-    from redis.retry import Retry
-
-    HAVE_REDIS = True
-except ModuleNotFoundError:  # pragma: no cover - depends on the environment
-    aioredis = None
-    ResponseError = None
-    HAVE_REDIS = False
+#: Whether redis-py is installed. Only looked up here: the package itself is
+#: imported when the first durable topic connects. `import oxbrook` used to
+#: import it eagerly, which was a third of the import time for apps that
+#: never use Redis, and redis-py 8 imports OpenTelemetry's SDK when that is
+#: installed — loading telemetry into apps that had not asked for it.
+HAVE_REDIS = importlib.util.find_spec("redis") is not None
 
 
 DEFAULT_URL = "redis://127.0.0.1:6379"
@@ -259,6 +253,12 @@ class RedisBackend:
         with self._lock:
             existing = self._clients.get(loop)
             if existing is None:
+                import redis.asyncio as aioredis
+                from redis.backoff import ExponentialBackoff
+                from redis.exceptions import ConnectionError as RedisConnectionError
+                from redis.exceptions import TimeoutError as RedisTimeoutError
+                from redis.retry import Retry
+
                 existing = aioredis.Redis.from_url(
                     self.url,
                     decode_responses=False,
@@ -272,6 +272,8 @@ class RedisBackend:
         """Create the group if it does not exist. `start` of "0" means a new
         group sees everything still in the stream; "$" means only new messages.
         """
+        from redis.exceptions import ResponseError
+
         try:
             await self.client().xgroup_create(
                 self.key(topic), group, id=start, mkstream=True
@@ -323,6 +325,8 @@ class RedisBackend:
         A group-level question, so it needs no consumer. Creating one just to
         ask would add a member to the group that never reads anything.
         """
+        from redis.exceptions import ResponseError
+
         try:
             info = await self.client().xpending(self.key(topic), group)
         except ResponseError:

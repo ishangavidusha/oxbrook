@@ -25,6 +25,8 @@ pip install oxbrook
     connections, mostly — rather than the connections the server accepts.
 - **Redis**, only for durable topics: `pip install oxbrook redis`.
 - **PyJWT**, only for [`JWT`](guide/auth.md#jwt): `pip install 'oxbrook[auth]'`.
+- **OpenTelemetry's API**, only for [tracing](guide/telemetry.md):
+  `pip install 'oxbrook[otel]'`.
 
 With [uv](https://docs.astral.sh/uv/), a free-threaded environment is one
 command:

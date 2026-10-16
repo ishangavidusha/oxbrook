@@ -57,7 +57,8 @@ pub struct Pending {
     pub connection: Option<ConnectionLoad>,
     /// Set for a route that is cancelled when its client leaves.
     pub cancel: Option<std::sync::Arc<crate::cancel::Cancel>>,
-    /// When it was queued, stamped by `try_push` only when metrics are on.
+    /// When it was queued, stamped by `try_push` only when metrics or
+    /// telemetry are on.
     pub queued_at: Option<Instant>,
     /// The client's address, through any trusted proxies.
     pub client: Option<std::net::IpAddr>,
@@ -99,6 +100,9 @@ pub struct WorkerQueue {
     limit: usize,
     /// Time from push to pop, when the app asked for metrics (D-059).
     wait: OnceLock<crate::metrics::Histogram>,
+    /// Stamp each request as it is queued. Set before serving when metrics
+    /// or telemetry want the wait; otherwise no request pays for a clock read.
+    stamp: AtomicBool,
 }
 
 impl WorkerQueue {
@@ -113,12 +117,20 @@ impl WorkerQueue {
             inflight: AtomicUsize::new(0),
             limit,
             wait: OnceLock::new(),
+            stamp: AtomicBool::new(false),
         }
     }
 
     /// Start measuring queue wait. Before serving, once.
     pub fn measure_wait(&self) {
         let _ = self.wait.set(crate::metrics::wait_histogram());
+        self.stamp_arrivals();
+    }
+
+    /// Stamp requests as they are queued, so the worker can tell how long
+    /// each waited: telemetry starts a request's span at its arrival.
+    pub fn stamp_arrivals(&self) {
+        self.stamp.store(true, Ordering::Relaxed);
     }
 
     pub fn wait(&self) -> Option<&crate::metrics::Histogram> {
@@ -166,7 +178,7 @@ impl WorkerQueue {
         if !self.has_room() {
             return Err(item);
         }
-        if self.wait.get().is_some() {
+        if self.stamp.load(Ordering::Relaxed) {
             item.queued_at = Some(Instant::now());
         }
         self.queue.push(item);

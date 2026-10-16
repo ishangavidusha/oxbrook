@@ -7,6 +7,16 @@ release does not; changes that break existing code are listed under
 
 ## Unreleased
 
+- **Tracing.** `App(telemetry=Telemetry())` makes every request a handler
+  answers an OpenTelemetry server span, named after its route, joined to the
+  caller's trace through `traceparent`, and current while the handler runs so
+  instrumented clients continue the trace. Spans start at the request's
+  arrival and record the time it waited for a worker loop. MCP requests are
+  spans of their own, after OpenTelemetry's MCP conventions. Needs only
+  `opentelemetry-api` (`oxbrook[otel]`); an app without `telemetry=` never
+  imports it and runs exactly as before.
+- **Faster import.** `import oxbrook` no longer imports redis-py; durable
+  topics import it when they first connect.
 - **Response compression.** `App(compression=Compression())` compresses
   whole replies with brotli or gzip, as the client's `Accept-Encoding` asks,
   in Rust after the handler has answered. Streams, static files, images and
