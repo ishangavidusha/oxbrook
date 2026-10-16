@@ -87,6 +87,33 @@ outermost router inwards, then the handler. An `HTTPError` raised by an inner
 router's middleware reaches the app's middleware as a reply with its status, not
 as an exception, so an access log records the status the client received.
 
+## Exception handlers
+
+A router can map exceptions for its own routes, and those of routers it
+includes:
+
+```python
+@billing.exception_handler(PaymentDeclined)
+async def declined(request, exc):
+    raise HTTPError(402, "the card was declined")
+```
+
+For those routes a router's handler takes precedence over the app's for the
+same class, and an included router's over the one that includes it: the
+nearest declaration wins, as with `auth=`. Routes elsewhere are untouched.
+Tool calls over MCP use the same handlers. See
+[exception handlers](errors.md#exception-handlers) for how a handler answers.
+
+## Tags
+
+`Router(tags=[...])` groups the router's operations in the OpenAPI document
+and on the docs page. A nested router's tags add to those of the router
+including it:
+
+```python
+billing = Router("/billing", tags=["billing"])
+```
+
 ## When mistakes are caught
 
 A handler is checked when it is decorated, against the router's own path, and

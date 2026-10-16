@@ -151,6 +151,8 @@ def _operation(route: RouteInfo, components: dict[str, Any], operation_id: str) 
         "operationId": operation_id,
         "responses": {},
     }
+    if route.tags:
+        op["tags"] = list(route.tags)
     if route.summary:
         op["summary"] = route.summary
     if route.description:

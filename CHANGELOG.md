@@ -7,6 +7,9 @@ release does not; changes that break existing code are listed under
 
 ## Unreleased
 
+- **Routers have tags and exception handlers.** `Router(tags=[...])` groups
+  a router's operations in OpenAPI, and `@router.exception_handler(...)` maps
+  exceptions for its routes, taking precedence over the app's.
 - **`Router.static`.** A router can mount static files, carried through the
   prefixes it is included under. Refused on a router with an `auth=`
   declaration, since files are served before authentication.

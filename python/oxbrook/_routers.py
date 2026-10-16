@@ -33,6 +33,7 @@ from typing import Any
 
 from . import _auth, _limits
 from ._auth import UNSET
+from ._errors import register
 from ._files import build_mount
 from ._middleware import make_gate
 from ._routing import RouteInfo, build_route, route_shape
@@ -69,20 +70,31 @@ def _join(base: str, prefix: str) -> str:
 
 
 class Router:
-    """A group of routes with a shared prefix, middleware, `auth=` and
-    `rate_limit=`."""
+    """A group of routes with a shared prefix, middleware, exception handlers,
+    tags, `auth=` and `rate_limit=`."""
 
     def __init__(self, prefix: str = "", *, auth: Any = UNSET,
-                 rate_limit: Any = UNSET) -> None:
+                 rate_limit: Any = UNSET, tags: Any = None) -> None:
         """`auth` applies to every route on the router and on routers it
         includes, unless one declares its own; a route's `auth=None` makes it
         public even here. See `oxbrook.auth`.
 
         `rate_limit` is likewise the `RateLimit` of every route that does not
-        declare its own. It is one budget, shared by all of those routes."""
+        declare its own. It is one budget, shared by all of those routes.
+
+        `tags` group the router's operations in the OpenAPI document and the
+        docs page, and add to those of a router that includes this one."""
         self.prefix = check_prefix(prefix)
         self.auth = _auth.check(auth, f"Router({prefix!r})")
         self.rate_limit = _limits.check(rate_limit, f"Router({prefix!r})")
+        if isinstance(tags, str):
+            raise TypeError(f"Router({prefix!r}): tags is a list of names, not a string")
+        self.tags: list[str] = list(tags or ())
+        for tag in self.tags:
+            if not isinstance(tag, str) or not tag:
+                raise TypeError(f"Router({prefix!r}): each tag is a non-empty string, "
+                                f"not {tag!r}")
+        self._handlers: dict[type, Any] = {}
         self._declared: list[_Declared] = []
         self._middleware: list[Any] = []
         self._children: list[tuple[Router, str]] = []
@@ -226,6 +238,17 @@ class Router:
         build_mount(_join(self.prefix, prefix), directory, **options)
         self._statics.append((prefix, directory, options))
 
+    def exception_handler(self, exc_class: type):
+        """Map an exception to a response for this router's routes, and the
+        routes of routers it includes. See `App.exception_handler`.
+
+        For those routes it takes precedence over the app's handler for the
+        same class, and an included router's over this one's: the nearest
+        declaration wins, as for `auth=`.
+        """
+        self._mutable(f"an exception handler for {getattr(exc_class, '__name__', exc_class)}")
+        return register(self._handlers, exc_class, "Router.exception_handler()")
+
     def middleware(self, fn):
         """Middleware for this router's routes only, inside the app's own.
 
@@ -268,7 +291,7 @@ class Router:
 
     def _flatten(
         self, outer: str, middleware: list[Any], seen: tuple = (), auth: Any = UNSET,
-        rate_limit: Any = UNSET,
+        rate_limit: Any = UNSET, tags: tuple = (), handlers: dict | None = None,
     ) -> list[RouteInfo]:
         if self in seen:
             raise ValueError(f"{self!r} includes itself through another router")
@@ -278,6 +301,8 @@ class Router:
         # Nearest wins: this router's declaration over the one it inherited.
         auth = self.auth if self.auth is not UNSET else auth
         rate_limit = self.rate_limit if self.rate_limit is not UNSET else rate_limit
+        tags = (*tags, *(t for t in self.tags if t not in tags))
+        handlers = {**(handlers or {}), **self._handlers}
 
         routes: list[RouteInfo] = []
         for declared in self._declared:
@@ -296,8 +321,10 @@ class Router:
             route.auth = declared.auth if declared.auth is not UNSET else auth
             limit = declared.rate_limit if declared.rate_limit is not UNSET else rate_limit
             route.rate_limit = None if limit is UNSET else limit
+            route.tags = list(tags)
+            route.handlers = dict(handlers)
             routes.append(route)
         for child, child_prefix in self._children:
             routes.extend(child._flatten(base + child_prefix, chain, (*seen, self), auth,
-                                         rate_limit))
+                                         rate_limit, tags, handlers))
         return routes

@@ -116,6 +116,10 @@ class RouteInfo:
     rate_limit: Any = None
     """Its own `RateLimit`, the nearest of the route's and its routers'; None
     for none. The app's applies on top, to every request."""
+    tags: list[str] = field(default_factory=list)
+    """OpenAPI tags from the routers it was included through, outermost first."""
+    handlers: dict[type, Any] = field(default_factory=dict)
+    """Exception handlers from its routers, the nearest router's winning."""
 
 
 #: Every `{name}` and `{*name}`, whatever it is called. Two routes conflict in

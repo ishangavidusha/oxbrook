@@ -1,4 +1,3 @@
-import inspect
 import json
 import os
 import sys
@@ -11,6 +10,7 @@ from ._compression import Compression
 from ._cors import CORS, check_origin
 from ._errors import DEFAULT_HANDLERS, HTTPError
 from ._errors import guard as guard_exceptions
+from ._errors import register as register_handler
 from ._files import StaticMount, build_mount
 from ._health import Health
 from ._lifecycle import Lifecycle, ServerHandle, State, check_hook
@@ -481,32 +481,17 @@ class App:
         sees the result, so the access log records the real status.
 
         Registering `HTTPError` or `RequestValidationError` replaces the
-        built-in response for it. See `oxbrook.HTTPError`.
+        built-in response for it. See `oxbrook.HTTPError`. A router's own
+        handlers, from `Router.exception_handler`, take precedence for its
+        routes.
         """
-        if not (isinstance(exc_class, type) and issubclass(exc_class, Exception)):
-            raise TypeError(
-                f"exception_handler() needs an Exception subclass, got {exc_class!r}"
-            )
+        return register_handler(self._exception_handlers, exc_class, "exception_handler()")
 
-        def decorator(fn):
-            if not inspect.iscoroutinefunction(fn):
-                raise TypeError(
-                    f"exception handler {getattr(fn, '__qualname__', fn)} for "
-                    f"{exc_class.__name__} must be `async def`"
-                )
-            existing = self._exception_handlers.get(exc_class)
-            if existing is not None:
-                raise ValueError(
-                    f"{exc_class.__name__} already has a handler, "
-                    f"{getattr(existing, '__qualname__', existing)}"
-                )
-            self._exception_handlers[exc_class] = fn
-            return fn
-
-        return decorator
-
-    def _handlers(self) -> dict[type, Any]:
-        return {**DEFAULT_HANDLERS, **self._exception_handlers}
+    def _handlers(self, route: RouteInfo | None = None) -> dict[type, Any]:
+        """The handlers that apply to `route`: the built-in ones, the app's,
+        then its routers', nearest last so it wins."""
+        routed = route.handlers if route is not None else {}
+        return {**DEFAULT_HANDLERS, **self._exception_handlers, **routed}
 
     def _layer(self, target: Any, chain: list[Any], handlers: dict[type, Any]) -> Any:
         """Exception mapping around the handler and around every middleware link,
@@ -542,21 +527,22 @@ class App:
         """
         inner = list(route.middleware)
         chain = self._middleware + inner
+        mapped = bool(self._exception_handlers or route.handlers)
         if route.auth is None:
-            if not chain and not self._exception_handlers:
+            if not chain and not mapped:
                 return target
-            return self._layer(target, chain, self._handlers())
+            return self._layer(target, chain, self._handlers(route))
         if self._resource_metadata is not None and route.path == self.mcp_url:
             gate = _auth.ResourceGate(route.auth, self._resource_metadata)
         else:
             gate = _auth.Gate(route.auth)
         if socket:
             link = gate.socket_middleware()
-        elif not chain and not self._exception_handlers:
+        elif not chain and not mapped:
             return gate.wrap(target)
         else:
             link = gate.middleware()
-        return self._layer(target, [*self._middleware, link, *inner], self._handlers())
+        return self._layer(target, [*self._middleware, link, *inner], self._handlers(route))
 
     def _tool_target(self, route: RouteInfo) -> Any:
         """What runs when a route is called as an MCP tool.
@@ -570,7 +556,7 @@ class App:
         it.
         """
         link = _auth.forget if route.auth is None else _auth.Gate(route.auth).middleware()
-        return self._layer(route.target, [link, *route.middleware], self._handlers())
+        return self._layer(route.target, [link, *route.middleware], self._handlers(route))
 
     def per_worker(self, total: int) -> int:
         """One worker loop's share of a process-wide budget.

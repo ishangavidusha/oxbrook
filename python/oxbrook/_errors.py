@@ -184,6 +184,32 @@ def find(handlers: dict[type, Any], exc: BaseException) -> Any:
     return None
 
 
+def register(handlers: dict[type, Any], exc_class: type, where: str) -> Any:
+    """The decorator behind `App.exception_handler` and
+    `Router.exception_handler`: checked when written, one handler per class."""
+    if not (isinstance(exc_class, type) and issubclass(exc_class, Exception)):
+        raise TypeError(f"{where} needs an Exception subclass, got {exc_class!r}")
+
+    def decorator(fn):
+        import inspect
+
+        if not inspect.iscoroutinefunction(fn):
+            raise TypeError(
+                f"exception handler {getattr(fn, '__qualname__', fn)} for "
+                f"{exc_class.__name__} must be `async def`"
+            )
+        existing = handlers.get(exc_class)
+        if existing is not None:
+            raise ValueError(
+                f"{exc_class.__name__} already has a handler, "
+                f"{getattr(existing, '__qualname__', existing)}"
+            )
+        handlers[exc_class] = fn
+        return fn
+
+    return decorator
+
+
 def _drop_after(request: Any) -> None:
     take = getattr(request, "_take_after", None)
     if take is not None:
@@ -227,5 +253,5 @@ def guard(target: Any, handlers: dict[type, Any]) -> Any:
 
 __all__ = [
     "DEFAULT_HANDLERS", "PROBLEM", "HTTPError", "Reply", "find", "guard", "http_error_body",
-    "problem", "status_title",
+    "problem", "register", "status_title",
 ]

@@ -507,8 +507,75 @@ def bare_app_answers_http_error_inline() -> None:
         check(response.headers.get("x-why") == "none", "bare HTTPError dropped its headers")
 
 
+def routers_have_tags_and_handlers() -> None:
+    """I-050: a router's tags group its operations in OpenAPI, nested ones
+    adding to the outer; its exception handlers map its routes' exceptions,
+    the nearest router's winning over an outer one's and the app's, and do
+    not reach routes outside it. Tool calls through MCP use the same."""
+    from oxbrook import HTTPError, Reply, Router
+
+    app = App()
+
+    @app.exception_handler(LookupError)
+    async def app_level(_req, _exc):
+        return Reply({"by": "app"}, status=404)
+
+    outer = Router("/outer", tags=["outer"])
+    inner = Router("/inner", tags=["inner", "outer"])
+
+    @outer.exception_handler(LookupError)
+    async def outer_level(_req, _exc):
+        return Reply({"by": "outer"}, status=410)
+
+    @inner.exception_handler(KeyError)
+    async def inner_level(_req, _exc):
+        raise HTTPError(409, "by inner")
+
+    @outer.get("/key", tool=True)
+    async def outer_key(_: Request):
+        raise KeyError("x")
+
+    @inner.get("/key")
+    async def inner_key(_: Request):
+        raise KeyError("x")
+
+    @inner.get("/index")
+    async def inner_index(_: Request):
+        raise IndexError("x")
+
+    @app.get("/plain")
+    async def plain(_: Request):
+        raise KeyError("x")
+
+    outer.include(inner)
+    app.include(outer)
+    for kind, build in (("a string", lambda: Router(tags="x")),
+                        ("an empty tag", lambda: Router(tags=[""]))):
+        check(raises(build, TypeError) is not None, f"tags as {kind} was accepted")
+
+    doc = app.openapi()["paths"]
+    check(doc["/outer/key"]["get"].get("tags") == ["outer"],
+          f"outer tags: {doc['/outer/key']['get'].get('tags')}")
+    check(doc["/outer/inner/key"]["get"].get("tags") == ["outer", "inner"],
+          f"nested tags: {doc['/outer/inner/key']['get'].get('tags')}")
+    check("tags" not in doc["/plain"]["get"], "an app route was tagged")
+
+    with TestClient(app, workers=1) as client:
+        for path, status, by in (("/outer/key", 410, "outer"), ("/outer/inner/key", 409, None),
+                                 ("/outer/inner/index", 410, "outer"), ("/plain", 404, "app")):
+            r = client.get(path)
+            check(r.status_code == status, f"{path} answered {r.status_code}, not {status}")
+            if by is not None:
+                check(r.json().get("by") == by, f"{path} was mapped by {r.text}")
+        result = call_tool_raw(client, "outer_key", {})
+        text = result.get("content", [{}])[0].get("text", "")
+        check('"outer"' in text and result.get("isError"),
+              f"a tool call was not mapped by its router's handler: {result}")
+
+
 def main() -> None:
-    steps = [registration_mistakes_fail_where_they_are_made, bare_app_answers_http_error_inline]
+    steps = [registration_mistakes_fail_where_they_are_made, bare_app_answers_http_error_inline,
+             routers_have_tags_and_handlers]
     for step in steps:
         try:
             step()
