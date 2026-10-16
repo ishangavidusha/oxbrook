@@ -70,14 +70,18 @@ impl Mount {
         })
     }
 
-    /// Router patterns for this mount: the prefix itself and everything under
-    /// it, captured as `file`.
+    /// Router patterns for this mount: the prefix itself, the prefix with its
+    /// trailing slash, and everything under it, captured as `file`. The second
+    /// is separate because a catch-all needs at least one character, so
+    /// without it `/assets/` (where `/assets` redirects to) matched nothing
+    /// and its index was a 404.
     pub fn patterns(&self) -> Vec<(String, bool)> {
         if self.prefix == "/" {
             vec![("/".to_owned(), false), ("/{*file}".to_owned(), true)]
         } else {
             vec![
                 (self.prefix.clone(), false),
+                (format!("{}/", self.prefix), false),
                 (format!("{}/{{*file}}", self.prefix), true),
             ]
         }

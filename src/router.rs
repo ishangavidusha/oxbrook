@@ -325,10 +325,18 @@ impl Router {
         let spec = &self.specs[route];
 
         if spec.mount.is_some() {
+            // A path ending in `/` with nothing after the prefix is the mount's
+            // own directory: an empty file path, which serves its index. Only
+            // the bare prefix, with no slash, has no file and is redirected.
+            let file = match found.params.get("file") {
+                Some(file) => Some(file.to_owned()),
+                None if path.ends_with('/') => Some(String::new()),
+                None => None,
+            };
             return Ok(Matched {
                 route,
                 params: Vec::new(),
-                file: found.params.get("file").map(str::to_owned),
+                file,
             });
         }
 

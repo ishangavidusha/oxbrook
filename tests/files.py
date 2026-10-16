@@ -321,6 +321,21 @@ def registration(site: Path) -> None:
     beside.static("/assets", site)  # a static route beside the mount is fine
 
 
+def a_prefixed_mount_serves_its_index(site: Path) -> None:
+    """`/docs` redirects to `/docs/`, which serves the directory's index.
+    It answered 404: the router's catch-all needs at least one character
+    after the slash, so the redirect led nowhere. Every mount these suites
+    made was at `/`, which has a pattern of its own."""
+    app = App(openapi_url=None, docs_url=None, mcp_url=None)
+    app.static("/docs", site / "docs")
+    with TestClient(app, workers=1) as client:
+        r = client.get("/docs", follow_redirects=False)
+        check(r.status_code == 308 and r.headers.get("location") == "/docs/",
+              f"/docs gave {r.status_code} {r.headers.get('location')}")
+        r = client.get("/docs/")
+        check(r.status_code == 200 and "docs" in r.text, f"/docs/ gave {r.status_code}")
+
+
 def main() -> None:
     base, site = make_site()
     app = App(openapi_url=None, docs_url=None, mcp_url=None)
@@ -347,7 +362,8 @@ def main() -> None:
                 failures.append(f"{step.__name__} raised {type(exc).__name__}: {exc}")
                 print(f"  {step.__name__}: ERROR")
 
-    for step in (cors_and_dotfiles, workers_are_not_needed, nested_mounts_keep_their_policies):
+    for step in (cors_and_dotfiles, workers_are_not_needed, nested_mounts_keep_their_policies,
+                 a_prefixed_mount_serves_its_index):
         try:
             step(site)
             print(f"  {step.__name__}: ok")

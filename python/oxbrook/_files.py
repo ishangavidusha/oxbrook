@@ -30,7 +30,7 @@ class StaticMount:
         """Route shapes this mount occupies, for conflict checks against routes."""
         if self.prefix == "/":
             return ["/", "/{}"]
-        return [self.prefix, f"{self.prefix}/{{}}"]
+        return [self.prefix, f"{self.prefix}/", f"{self.prefix}/{{}}"]
 
 
 def _plain_name(value: str, what: str) -> str:

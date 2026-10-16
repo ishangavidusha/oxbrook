@@ -7,6 +7,10 @@ release does not; changes that break existing code are listed under
 
 ## Unreleased
 
+- **Fixed: a static mount at a prefix served 404 for its own index.**
+  `app.static("/docs", ...)` redirected `/docs` to `/docs/`, which then
+  answered 404 instead of the directory's `index.html`. Mounts at `/` were
+  not affected.
 - **Breaking: topics reach agents only with `resource=True`.**
   `app.topic(name, resource=True)` lists the topic over MCP and lets agents
   read and follow it, under the topic's own `auth=`, which defaults to the
