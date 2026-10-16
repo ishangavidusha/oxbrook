@@ -33,6 +33,7 @@ from typing import Any
 
 from . import _auth, _limits
 from ._auth import UNSET
+from ._files import build_mount
 from ._middleware import make_gate
 from ._routing import RouteInfo, build_route, route_shape
 
@@ -60,6 +61,13 @@ class _Declared:
     rate_limit: Any = UNSET
 
 
+def _join(base: str, prefix: str) -> str:
+    """A mount's prefix under a router's: `"/"` is the router's prefix itself."""
+    if prefix == "/":
+        return base or "/"
+    return base + prefix
+
+
 class Router:
     """A group of routes with a shared prefix, middleware, `auth=` and
     `rate_limit=`."""
@@ -78,6 +86,8 @@ class Router:
         self._declared: list[_Declared] = []
         self._middleware: list[Any] = []
         self._children: list[tuple[Router, str]] = []
+        #: Static mounts, as (prefix on this router, directory, options).
+        self._statics: list[tuple[str, Any, dict[str, Any]]] = []
         self._included = False
 
     def __repr__(self) -> str:
@@ -189,6 +199,33 @@ class Router:
 
         return decorator
 
+    def static(
+        self,
+        prefix: str,
+        directory: Any,
+        *,
+        index: str | None = "index.html",
+        fallback: str | None = None,
+        dotfiles: bool = False,
+        cache_control: str | None = None,
+    ) -> None:
+        """Serve the files in `directory` under `prefix` on this router. See
+        `App.static`; `prefix` is joined to the router's own, and `"/"` means
+        the router's prefix itself.
+
+        Files are served before middleware and authentication, here as on the
+        app. So a router with an `auth=` declaration, its own or one inherited
+        from a router that includes it, cannot mount files: `include` refuses
+        it rather than serve publicly what looks protected. Mount public files
+        on a router without one, and serve protected files from a route.
+        """
+        self._mutable(f"static files at {prefix}")
+        options = {"index": index, "fallback": fallback, "dotfiles": dotfiles,
+                   "cache_control": cache_control}
+        # Checked here, at the call that is wrong, rather than at `include`.
+        build_mount(_join(self.prefix, prefix), directory, **options)
+        self._statics.append((prefix, directory, options))
+
     def middleware(self, fn):
         """Middleware for this router's routes only, inside the app's own.
 
@@ -207,6 +244,27 @@ class Router:
         self._children.append((router, check_prefix(prefix)))
 
     # ---- flattening ---------------------------------------------------------
+
+    def _mounts(self, outer: str, seen: tuple = (), auth: Any = UNSET) -> list[tuple]:
+        """Every static mount on this router and the ones it includes, as
+        (full prefix, directory, options), refusing one that `auth=` covers."""
+        if self in seen:
+            raise ValueError(f"{self!r} includes itself through another router")
+        base = outer + self.prefix
+        auth = self.auth if self.auth is not UNSET else auth
+        mounts = []
+        for prefix, directory, options in self._statics:
+            full = _join(base, prefix)
+            if auth is not UNSET and auth is not None:
+                raise ValueError(
+                    f"static files at {full} are on a router with auth=, but files are "
+                    f"served before authentication and would be public. Mount them on a "
+                    f"router without auth=, or serve them from a route"
+                )
+            mounts.append((full, directory, options))
+        for child, child_prefix in self._children:
+            mounts.extend(child._mounts(base + child_prefix, (*seen, self), auth))
+        return mounts
 
     def _flatten(
         self, outer: str, middleware: list[Any], seen: tuple = (), auth: Any = UNSET,

@@ -336,6 +336,61 @@ def a_prefixed_mount_serves_its_index(site: Path) -> None:
         check(r.status_code == 200 and "docs" in r.text, f"/docs/ gave {r.status_code}")
 
 
+def routers_mount_files(site: Path) -> None:
+    """I-073: a router declares its own mount, carried through every prefix it
+    is included under, and refused where `auth=` would look like it applies."""
+    from oxbrook import Router
+    from oxbrook.auth import APIKey
+
+    ui = Router("/ui")
+    ui.static("/", site / "docs")
+    assets = Router()
+    assets.static("/assets", site / "nested")
+    ui.include(assets, prefix="/v2")
+
+    app = App(openapi_url=None, docs_url=None, mcp_url=None)
+    app.include(ui, prefix="/app")
+    check(sorted(m.prefix for m in app.mounts) == ["/app/ui", "/app/ui/v2/assets"],
+          f"router mounts landed at {sorted(m.prefix for m in app.mounts)}")
+    with TestClient(app, workers=1) as client:
+        r = client.get("/app/ui/")
+        check(r.status_code == 200 and "docs" in r.text, f"/app/ui/ gave {r.status_code}")
+        r = client.get("/app/ui/v2/assets/deep/file.txt")
+        check(r.status_code == 200 and r.text == "deep",
+              f"a nested router's mount gave {r.status_code}")
+
+    keys = APIKey(header="x-api-key", verify=lambda key: None)
+    for label, build in (
+        ("on a router with auth=", lambda: Router(auth=keys)),
+        ("under a router with auth=", lambda: Router()),
+    ):
+        inner = build()
+        inner.static("/files", site)
+        outer = Router(auth=keys) if label.startswith("under") else Router()
+        outer.include(inner)
+        try:
+            App().include(outer)
+            failures.append(f"static files {label} were accepted, and would be public")
+        except ValueError as exc:
+            check("auth=" in str(exc), f"the refusal did not say why: {exc}")
+
+    public = Router(auth=keys)
+    open_files = Router(auth=None)
+    open_files.static("/public", site)
+    public.include(open_files)
+    App().include(public)  # auth=None says the files are meant to be public
+
+    taken = Router()
+    taken.static("/", site)
+    app = App()
+    app.static("/", site)
+    try:
+        app.include(taken)
+        failures.append("a router's mount on a taken prefix was accepted")
+    except ValueError:
+        pass
+
+
 def main() -> None:
     base, site = make_site()
     app = App(openapi_url=None, docs_url=None, mcp_url=None)
@@ -363,7 +418,7 @@ def main() -> None:
                 print(f"  {step.__name__}: ERROR")
 
     for step in (cors_and_dotfiles, workers_are_not_needed, nested_mounts_keep_their_policies,
-                 a_prefixed_mount_serves_its_index):
+                 a_prefixed_mount_serves_its_index, routers_mount_files):
         try:
             step(site)
             print(f"  {step.__name__}: ok")

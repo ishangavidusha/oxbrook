@@ -7,6 +7,9 @@ release does not; changes that break existing code are listed under
 
 ## Unreleased
 
+- **`Router.static`.** A router can mount static files, carried through the
+  prefixes it is included under. Refused on a router with an `auth=`
+  declaration, since files are served before authentication.
 - **Fixed: a static mount at a prefix served 404 for its own index.**
   `app.static("/docs", ...)` redirected `/docs` to `/docs/`, which then
   answered 404 instead of the directory's `index.html`. Mounts at `/` were

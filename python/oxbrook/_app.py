@@ -444,8 +444,13 @@ class App:
         """
         if not isinstance(router, Router):
             raise TypeError(f"include() needs a Router, got {type(router).__name__}")
-        for route in router._flatten(check_prefix(prefix), []):
+        prefix = check_prefix(prefix)
+        # Mounts first: refusing one under auth= leaves nothing half-added.
+        mounts = router._mounts(prefix)
+        for route in router._flatten(prefix, []):
             self._add(route)
+        for full, directory, options in mounts:
+            self.static(full, directory, **options)
 
     def middleware(self, fn):
         """Register middleware, which runs around every HTTP handler.

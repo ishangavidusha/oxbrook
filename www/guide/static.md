@@ -101,6 +101,26 @@ forever; `index.html` must not be, or visitors keep loading an old build. Mounti
 the hashed assets separately, with their own policy, gives each the right one.
 Routes and more specific mounts take precedence over a mount at `/`.
 
+## On a router
+
+A [router](routers.md) can declare its own mount, so a module that owns a
+frontend carries it with its routes:
+
+```python
+admin = Router("/admin")
+admin.static("/", Path(__file__).parent / "admin-ui")   # served at /admin/
+app.include(admin)
+```
+
+The mount's prefix joins the router's, and the prefixes it is included under,
+as a route's does; `"/"` is the router's prefix itself.
+
+Files are served before authentication, so a router with an `auth=`
+declaration, its own or one from a router that includes it, cannot mount
+them: `include` refuses, rather than serve publicly what sits on a protected
+router. Mount public files on a router with no declaration, or with
+`auth=None`, and serve protected files from a route.
+
 ## Middleware does not run
 
 Static files are answered before middleware, so neither authentication
