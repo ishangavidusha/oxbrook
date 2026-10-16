@@ -44,12 +44,15 @@ class UploadFile:
 
     @property
     def size(self) -> int:
+        """Length of the file in bytes."""
         return len(self.data)
 
     def read(self) -> bytes:
+        """The file's contents. Held in memory already: this does not touch the network."""
         return self.data
 
     def text(self, encoding: str = "utf-8") -> str:
+        """The contents decoded as text, UTF-8 unless told otherwise."""
         return self.data.decode(encoding)
 
     def __repr__(self) -> str:
@@ -84,6 +87,9 @@ class FormData(Mapping):
 
     @classmethod
     def from_parts(cls, parts: list[tuple]) -> "FormData":
+        """Build one from the server's parsed parts: `(name, value)` for a field,
+        `(name, filename, content_type, data)` for a file. Called by the
+        server; handlers receive the result."""
         items: list[tuple[str, Any]] = []
         for part in parts:
             if len(part) == 2:
@@ -109,6 +115,7 @@ class FormData(Mapping):
         return len({key for key, _ in self._items})
 
     def getlist(self, name: str) -> list[Any]:
+        """Every value sent under `name`, in order; an empty list when there is none."""
         return [value for key, value in self._items if key == name]
 
     def multi_items(self) -> list[tuple[str, Any]]:
@@ -117,6 +124,7 @@ class FormData(Mapping):
 
     @property
     def files(self) -> list[UploadFile]:
+        """Every uploaded file, whatever field it came in."""
         return [value for _, value in self._items if isinstance(value, UploadFile)]
 
     def __repr__(self) -> str:

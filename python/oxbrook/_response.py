@@ -42,7 +42,10 @@ class Response:
     headers: dict[str, Any] = field(default_factory=dict)
 
     def encoded(self) -> bytes:
+        """The body as bytes: a `str` body is encoded as UTF-8."""
         return self.body.encode() if isinstance(self.body, str) else bytes(self.body)
 
     def header_list(self) -> list[tuple[str, str]] | None:
+        """The headers as (name, value) pairs, a list value becoming one pair per
+        item; None when there are none."""
         return header_pairs(self.headers)

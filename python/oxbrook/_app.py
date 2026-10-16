@@ -701,6 +701,7 @@ class App:
 
     @property
     def topics(self) -> dict[str, Topic]:
+        """Every topic made with `topic()`, by name. A copy: adding to it adds nothing."""
         return dict(self._topics)
 
     def capabilities(self) -> dict[str, Any]:

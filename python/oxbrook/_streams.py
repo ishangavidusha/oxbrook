@@ -33,16 +33,19 @@ from typing import Any
 
 from ._logging import logger
 
-#: Drop the oldest buffered message. A slow subscriber loses history rather
-#: than stalling every producer. The default.
 DROP_OLDEST = "drop_oldest"
-#: Drop the message being emitted.
+"""Overflow policy: drop the oldest buffered message. A slow subscriber loses
+history rather than stalling every producer. The default."""
+
 DROP_NEWEST = "drop_newest"
-#: Wait until the subscriber has room. Guarantees delivery, at the cost of one
-#: slow subscriber holding up the producer.
+"""Overflow policy: drop the message being emitted, for that subscriber only."""
+
 BLOCK = "block"
-#: Raise `TopicFull` at the producer.
+"""Overflow policy: wait until the subscriber has room. Guarantees delivery, at
+the cost of one slow subscriber holding up the producer."""
+
 ERROR = "error"
+"""Overflow policy: raise `TopicFull` at the producer."""
 
 POLICIES = frozenset({DROP_OLDEST, DROP_NEWEST, BLOCK, ERROR})
 
@@ -92,10 +95,12 @@ class Subscription:
 
     @property
     def closed(self) -> bool:
+        """True once the subscription has ended: closed by the reader, or by its topic."""
         return self._closed
 
     @property
     def pending(self) -> int:
+        """Messages delivered to this subscription and not yet read from it."""
         return len(self._buffer)
 
     def _try_offer(self, item: Any) -> bool:
@@ -234,6 +239,7 @@ class Topic:
 
     @property
     def durable(self) -> bool:
+        """True when the topic is backed by Redis, False for an in-memory topic."""
         return self.backend is not None
 
     def _fan_out(self, item: Any) -> int:
@@ -389,6 +395,8 @@ class Topic:
         return delivered
 
     def close(self) -> None:
+        """End every local subscription and stop following Redis. Messages
+        emitted afterwards reach no one here."""
         with self._lock:
             tail, self._tail = self._tail, None
         if tail is not None:

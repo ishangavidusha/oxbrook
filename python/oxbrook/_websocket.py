@@ -43,6 +43,7 @@ class WebSocket:
 
     @property
     def closed(self) -> bool:
+        """True once either side has closed the connection."""
         return self._core.closed
 
     async def receive(self) -> str | bytes | None:
@@ -64,6 +65,8 @@ class WebSocket:
             await waiter
 
     async def receive_json(self) -> Any:
+        """Next message, parsed as JSON. Raises `WebSocketClosed` if the peer
+        closed first, and `ValueError` if the message is not JSON."""
         message = await self.receive()
         if message is None:
             raise WebSocketClosed("connection closed while waiting for a message")
@@ -90,6 +93,8 @@ class WebSocket:
             raise WebSocketClosed("socket is closed or its send buffer is full")
 
     async def send_json(self, data: Any) -> None:
+        """Send `data` as a JSON text message. The same as `send` for anything that
+        is not already `str` or `bytes`."""
         await self.send(data)
 
     async def close(self) -> None:

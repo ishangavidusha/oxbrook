@@ -53,14 +53,17 @@ class Session(dict):
         self.modified = True
 
     def clear(self) -> None:
+        """Remove everything; the cookie is rewritten empty."""
         super().clear()
         self.modified = True
 
     def pop(self, *args: Any) -> Any:
+        """Remove a key and return its value, as `dict.pop` does."""
         self.modified = True
         return super().pop(*args)
 
     def update(self, *args: Any, **kwargs: Any) -> None:
+        """Set several keys at once, as `dict.update` does."""
         super().update(*args, **kwargs)
         self.modified = True
 
@@ -104,6 +107,7 @@ class Sessions:
         return _b64encode(digest)
 
     def encode(self, data: dict) -> str:
+        """The signed cookie value for `data`, stamped with the time it was issued."""
         payload = _b64encode(
             json.dumps({"d": data, "t": int(time.time())}, separators=(",", ":")).encode()
         )
@@ -138,6 +142,8 @@ class Sessions:
         return session
 
     def cookie_header(self, session: Session) -> str:
+        """A complete `Set-Cookie` value for the session, with this object's
+        path, lifetime and flags."""
         parts = [
             f"{self.cookie}={self.encode(dict(session))}",
             f"Path={self.path}",
@@ -150,6 +156,8 @@ class Sessions:
         return "; ".join(parts)
 
     async def middleware(self, request: Any, call_next: Any) -> Any:
+        """Writes the cookie back when the handler changed the session, and only
+        then. Register it with `app.middleware(sessions.middleware)`."""
         token = _current.set(None)
         try:
             reply = await call_next(request)

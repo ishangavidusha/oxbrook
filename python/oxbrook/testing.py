@@ -84,6 +84,8 @@ class TestClient:
             self._failure = exc
 
     def start(self) -> "TestClient":
+        """Start the server on a background thread and wait until it accepts.
+        Using the client as a context manager calls this and `stop`."""
         self._server = self.app.build_server(
             self.host, self.port, **self._options
         )
@@ -145,32 +147,42 @@ class TestClient:
 
     @property
     def http(self) -> httpx.Client:
+        """The underlying `httpx.Client`, for anything the shortcuts do not cover."""
         if self._client is None:
             raise RuntimeError("TestClient is not started; use it as a context manager")
         return self._client
 
     def request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
+        """Send a request with any method. `kwargs` are `httpx`'s: `json=`,
+        `params=`, `headers=`, `content=` and the rest."""
         return self.http.request(method, path, **kwargs)
 
     def get(self, path: str, **kwargs: Any) -> httpx.Response:
+        """`GET path`. `kwargs` go to `httpx`."""
         return self.http.get(path, **kwargs)
 
     def post(self, path: str, **kwargs: Any) -> httpx.Response:
+        """`POST path`. `kwargs` go to `httpx`: `json=` for a body."""
         return self.http.post(path, **kwargs)
 
     def put(self, path: str, **kwargs: Any) -> httpx.Response:
+        """`PUT path`. `kwargs` go to `httpx`."""
         return self.http.put(path, **kwargs)
 
     def patch(self, path: str, **kwargs: Any) -> httpx.Response:
+        """`PATCH path`. `kwargs` go to `httpx`."""
         return self.http.patch(path, **kwargs)
 
     def delete(self, path: str, **kwargs: Any) -> httpx.Response:
+        """`DELETE path`. `kwargs` go to `httpx`."""
         return self.http.delete(path, **kwargs)
 
     def head(self, path: str, **kwargs: Any) -> httpx.Response:
+        """`HEAD path`. `kwargs` go to `httpx`."""
         return self.http.head(path, **kwargs)
 
     def options(self, path: str, **kwargs: Any) -> httpx.Response:
+        """`OPTIONS path`. `kwargs` go to `httpx`."""
         return self.http.options(path, **kwargs)
 
     # ---- other transports -------------------------------------------------

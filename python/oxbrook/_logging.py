@@ -38,6 +38,8 @@ class JsonFormatter(logging.Formatter):
     """One JSON object per line, with any extra fields included."""
 
     def format(self, record: logging.LogRecord) -> str:
+        """One line of JSON: time, level, logger, message, any `extra=` fields,
+        and the traceback when there is one."""
         payload: dict[str, Any] = {
             "time": self.formatTime(record, "%Y-%m-%dT%H:%M:%S%z"),
             "level": record.levelname.lower(),

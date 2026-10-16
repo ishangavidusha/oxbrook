@@ -132,10 +132,12 @@ class Consumer:
         self._closed = False
 
     async def start(self) -> "Consumer":
+        """Create the consumer group if it does not exist yet, and return self."""
         await self.backend.ensure_group(self.topic, self.group)
         return self
 
     async def ack(self, message_id: str) -> None:
+        """Mark the message with this id done for the group. `Message.ack` calls this."""
         client = self.backend.client()
         await client.xack(self.backend.key(self.topic), self.group, message_id)
 
@@ -146,6 +148,8 @@ class Consumer:
         return int(info["pending"]) if info else 0
 
     def close(self) -> None:
+        """Stop iterating. Messages read and not acked stay pending, and another
+        member claims them after `claim_after_ms`."""
         self._closed = True
 
     def _absorb(self, entries: Any) -> int:
@@ -240,6 +244,7 @@ class RedisBackend:
         self._lock = threading.Lock()
 
     def key(self, topic: str) -> str:
+        """The Redis key a topic's stream is stored under: the prefix and the name."""
         return f"{self.prefix}{topic}"
 
     def client(self):
@@ -283,6 +288,8 @@ class RedisBackend:
                 raise
 
     async def publish(self, topic: str, value: Any) -> str:
+        """Append a value to the topic's stream, trimmed to about `maxlen`, and
+        return the entry id Redis gave it."""
         fields = {b"d": _encode(value), b"n": self.node_id}
         kwargs: dict[str, Any] = {}
         if self.maxlen:
@@ -334,12 +341,16 @@ class RedisBackend:
         return int(info["pending"]) if info else 0
 
     async def length(self, topic: str) -> int:
+        """Entries currently held in the topic's stream."""
         return await self.client().xlen(self.key(topic))
 
     async def trim(self, topic: str, maxlen: int) -> int:
+        """Trim the topic's stream to exactly `maxlen` entries, removing the oldest, and
+        return how many were removed."""
         return await self.client().xtrim(self.key(topic), maxlen=maxlen, approximate=False)
 
     async def close(self) -> None:
+        """Close every connection pool, one per worker loop that used Redis."""
         with self._lock:
             clients = list(self._clients.values())
             self._clients.clear()
