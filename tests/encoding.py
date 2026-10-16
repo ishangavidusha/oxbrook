@@ -215,6 +215,32 @@ def unknown_objects_are_refused(c: TestClient) -> None:
         check("hunter2" not in r.text, f"{path}: an object's repr reached the client")
 
 
+def bson_values_are_encoded() -> None:
+    """A MongoDB document's ObjectId and Decimal128 encode as strings; a class
+    that only shares the name, from anywhere else, is still refused."""
+    from oxbrook._schema import encode
+
+    class ObjectId:  # not bson's: refused like any other unknown object
+        def __str__(self) -> str:
+            return "hunter2"
+
+    try:
+        encode({"_id": ObjectId()})
+        failures.append("a class named ObjectId outside bson was str()'d")
+    except Exception:  # pydantic wraps the TypeError
+        pass
+    try:
+        from bson import Decimal128
+        from bson import ObjectId as Real
+    except ModuleNotFoundError:
+        print("  (bson not installed: the MongoDB types are left to tests/mongo.py)")
+        return
+    oid = Real("6ad1f6af6efc1b1029c4b351")
+    got = json.loads(encode({"_id": oid, "price": Decimal128("12.50"), "refs": [oid]}))
+    check(got == {"_id": str(oid), "price": "12.50", "refs": [str(oid)]},
+          f"bson values encoded as {got}")
+
+
 def every_error_is_problem_details() -> None:
     """One error format, RFC 9457, whichever side answered.
 
@@ -356,6 +382,8 @@ def main() -> None:
     logging.getLogger("oxbrook").setLevel(logging.CRITICAL)
     every_error_is_problem_details()
     print("  every_error_is_problem_details: ok")
+    bson_values_are_encoded()
+    print("  bson_values_are_encoded: ok")
     with TestClient(app) as c:
         for step in (
             every_surface_agrees,

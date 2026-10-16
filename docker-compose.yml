@@ -6,9 +6,11 @@
 #   redis     backing store for durable topics (milestone 4)
 #   postgres  the database the database suite and example run against
 #   keycloak  a real OpenID Connect provider, for tests/oidc.py
+#   mongo     a one-member replica set, for tests/mongo.py and examples/mongo
 #
-# Ports are deliberately non-default (6399, 5499 and 8199, not 6379, 5432 and
-# 8080) so this never collides with anything already running on the machine.
+# Ports are deliberately non-default (6399, 5499, 8199 and 27099, not 6379,
+# 5432, 8080 and 27017) so this never collides with anything already running on
+# the machine.
 
 name: oxbrook-dev
 
@@ -89,3 +91,25 @@ services:
       timeout: 3s
       retries: 40
       start_period: 10s
+
+  mongo:
+    image: mongo:8
+    container_name: oxbrook-mongo
+    # A replica set of one: multi-document transactions need a replica set,
+    # and the transaction-per-request pattern is part of what is tested.
+    # Clients connect with directConnection=true, since the member's name
+    # (localhost:27017) is only right inside the container.
+    command: ["--replSet", "rs0", "--bind_ip_all", "--quiet"]
+    ports:
+      - "127.0.0.1:27099:27017"
+    healthcheck:
+      # Initiates the set on the first check, then reports whether this node
+      # has become primary; writes fail until it has.
+      test: ["CMD", "mongosh", "--quiet", "--eval", "try { rs.status().ok } catch (e) { rs.initiate({_id: 'rs0', members: [{_id: 0, host: 'localhost:27017'}]}).ok }; db.hello().isWritablePrimary || quit(1)"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+    tmpfs:
+      # Same reasoning as redis: every run starts from an empty database.
+      - /data/db

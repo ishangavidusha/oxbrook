@@ -68,7 +68,20 @@ def to_json(instance: Any) -> bytes:
 # which no JSON parser accepts, and the Rust encoder already answers null.
 
 
+#: BSON types a MongoDB document carries, by class name, and how each is
+#: written: the string forms MongoDB's own extended JSON uses in relaxed mode.
+#: Matched on the type rather than imported, so `bson` is never loaded here.
+_BSON = {"ObjectId": str, "Decimal128": str}
+
+
 def _mapping_or_refuse(value: Any) -> Any:
+    # A document from PyMongo holds its `_id` as an ObjectId, which would
+    # otherwise make every document a handler returns as it is a 500.
+    cls = type(value)
+    if cls.__module__.startswith("bson."):
+        convert = _BSON.get(cls.__name__)
+        if convert is not None:
+            return convert(value)
     # A database row is usually mapping-like without being a registered
     # Mapping: asyncpg's Record has keys() and lookup by name. Anything else is
     # refused rather than str()'d, because a repr in a response is a bug that

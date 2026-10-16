@@ -62,7 +62,7 @@ whole process when it is imported, with a `RuntimeWarning`.
 | PostgreSQL | `psycopg` (pure Python) | installs; needs a system `libpq` at run time |
 | MySQL | `asyncmy` | yes |
 | SQLite | `aiosqlite` | pure Python |
-| MongoDB | `pymongo` (its async API) | yes |
+| MongoDB | `pymongo` (its async API); see [MongoDB](mongodb.md) | yes |
 | any of the above | `sqlalchemy[asyncio]` | yes, including `greenlet` |
 
 The picture changes as projects publish wheels. For PostgreSQL today, use

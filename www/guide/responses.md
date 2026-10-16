@@ -33,6 +33,8 @@ inside a model as outside one.
 | NaN, infinity | `null`, since JSON has no way to write them |
 | a pydantic model, at any depth | what the model serializes to |
 | a mapping-like object, such as a database row | object, from its `keys()` |
+| MongoDB's `ObjectId` | its 24-character hex string, `"6ad1f6af6efc1b1029c4b351"` |
+| MongoDB's `Decimal128` | string, like `Decimal` |
 
 Anything else is refused with a `500` and a logged `TypeError` naming the type,
 rather than sent as its `repr`: a repr in a response reaches the client looking

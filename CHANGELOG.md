@@ -7,6 +7,11 @@ release does not; changes that break existing code are listed under
 
 ## Unreleased
 
+- **MongoDB.** A tested pattern on PyMongo's async client: a client per
+  worker loop, a transaction per request, documents returned as they are or
+  read into pydantic models. MongoDB's `ObjectId` encodes as its hex string
+  and `Decimal128` as a string, wherever Oxbrook writes JSON. See the MongoDB
+  guide and `examples/mongo/`.
 - **Tracing.** `App(telemetry=Telemetry())` makes every request a handler
   answers an OpenTelemetry server span, named after its route, joined to the
   caller's trace through `traceparent`, and current while the handler runs so

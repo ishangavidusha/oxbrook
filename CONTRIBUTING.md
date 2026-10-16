@@ -13,8 +13,8 @@ ceremony.
   target; the standard GIL build must keep working too.
 - **A Rust toolchain**, for the extension module.
 - **[uv](https://docs.astral.sh/uv/)**, for the environments.
-- **Docker**, for Redis and PostgreSQL. Services run in containers, never on
-  the host.
+- **Docker**, for Redis, PostgreSQL, MongoDB and Keycloak. Services run in
+  containers, never on the host.
 - **[oha](https://github.com/hatoo/oha)**, only for benchmarks.
 - **Linux, macOS or Windows.** The first two are what gets measured; Windows
   is supported so the framework can be developed against there.
@@ -50,7 +50,7 @@ C. The CI leg is what actually runs them.
 ## Tests
 
 ```bash
-make verify        # forty-three suites, free-threaded
+make verify        # forty-four suites, free-threaded
 make verify-gil    # the same suites on the GIL build
 ```
 
@@ -64,29 +64,32 @@ freshly built wheel, and it holds the list that the Makefile reads.
 ``` Each suite is a standalone script that exits non-zero on
 failure and runs against a real server on a real socket.
 
-**Start the services first**, with `make up`. Four suites need one:
+**Start the services first**, with `make up`. Five suites need one:
 `tests/durable.py` is the only suite covering durable topics, and needs Redis;
 `tests/database.py` is the only one that runs a query — the pool per loop,
-transactions, migrations, `examples/database/` — and needs PostgreSQL; the
-second halves of `tests/oidc.py` and `tests/login.py` check real tokens, a key
+transactions, migrations, `examples/database/` — and needs PostgreSQL;
+`tests/mongo.py` covers the same for MongoDB and `examples/mongo/`, against a
+one-member replica set; the second halves of `tests/oidc.py` and `tests/login.py` check real tokens, a key
 rotation, and a person logging in through the login form, against Keycloak.
 Each prints `SKIP` rather than failing when its service is unreachable, so a
 green run without them has not tested any of that. `make verify` therefore
-requires all three services and checks for them before the suites start:
+requires all four services and checks for them before the suites start:
 
 ```bash
-make up                                  # redis, postgres and keycloak, in containers
-make verify                              # refuses to start without them
-make verify REDIS= POSTGRES= KEYCLOAK=   # accept the gap instead, with no containers
+make up                                         # redis, postgres, mongo and keycloak
+make verify                                     # refuses to start without them
+make verify REDIS= POSTGRES= MONGO= KEYCLOAK=   # accept the gap, with no containers
 ```
 
 `tests/run.py` makes the same checks, and honours `OXBROOK_REQUIRE_REDIS`,
-`OXBROOK_REQUIRE_POSTGRES` and `OXBROOK_REQUIRE_KEYCLOAK`.
-`OXBROOK_TEST_REDIS`, `OXBROOK_TEST_POSTGRES` and `OXBROOK_TEST_KEYCLOAK` point
-elsewhere than the defaults, `redis://127.0.0.1:6399`,
-`postgresql://oxbrook:oxbrook@127.0.0.1:5499/oxbrook` and
-`http://localhost:8199`. The database suite creates a database per run and
-drops it afterwards; Keycloak imports its test realm from `tests/keycloak/`
+`OXBROOK_REQUIRE_POSTGRES`, `OXBROOK_REQUIRE_MONGO` and
+`OXBROOK_REQUIRE_KEYCLOAK`. `OXBROOK_TEST_REDIS`, `OXBROOK_TEST_POSTGRES`,
+`OXBROOK_TEST_MONGO` and `OXBROOK_TEST_KEYCLOAK` point elsewhere than the
+defaults, `redis://127.0.0.1:6399`,
+`postgresql://oxbrook:oxbrook@127.0.0.1:5499/oxbrook`,
+`mongodb://127.0.0.1:27099/?directConnection=true` and
+`http://localhost:8199`. The database suites create databases per run and
+drop them afterwards; Keycloak imports its test realm from `tests/keycloak/`
 at every start, so the key the OIDC suite rotates away comes back.
 
 Coverage of both halves:
