@@ -25,7 +25,8 @@ from oxbrook import _cli
 failures: list[str] = []
 ROOT = Path(__file__).resolve().parent.parent
 EXPECTED = {
-    ".env.example", ".gitignore", ".python-version", "AGENTS.md", "CLAUDE.md", "README.md",
+    ".env.example", ".gitignore", ".python-version", ".github/workflows/test.yml", "AGENTS.md",
+    "CLAUDE.md", "README.md",
     "pyproject.toml", "app/__init__.py", "app/main.py", "app/notes.py", "app/settings.py",
     "tests/conftest.py", "tests/test_notes.py",
 }
@@ -64,6 +65,16 @@ def makes_a_project_that_passes_its_own_tests() -> None:
         check(f'"{_cli.requirement()}"' in pyproject, "the oxbrook requirement was not pinned")
         check('title="Notes Api"' in (project / "app/main.py").read_text(encoding="utf-8"),
               "the title was not derived from the name")
+
+        # The CI workflow runs what the README tells a person to run, on the
+        # interpreter .python-version names, which is what uv reads.
+        workflow = (project / ".github/workflows/test.yml").read_text(encoding="utf-8")
+        readme = (project / "README.md").read_text(encoding="utf-8")
+        for command in ("uv sync", "uv run pytest"):
+            check(f"- run: {command}" in workflow and command in readme,
+                  f"the workflow and the README disagree about {command!r}")
+        check((project / ".python-version").read_text(encoding="utf-8").strip() == "3.14t",
+              "the project does not ask for free-threaded 3.14")
 
         tests = subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider"],
                                cwd=project, capture_output=True, text=True, timeout=180)

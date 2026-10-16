@@ -33,7 +33,7 @@ jobs:
 
       - uses: astral-sh/setup-uv@v7
       - name: Python lint
-        run: uvx ruff check python/oxbrook tests bench examples
+        run: uvx ruff check python/oxbrook tests bench examples hooks eval tools
 
   verify:
     name: ${{ matrix.label }}

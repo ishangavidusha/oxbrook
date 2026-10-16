@@ -1,0 +1,17 @@
+# The tests on every push and pull request, on the interpreter .python-version
+# names: free-threaded 3.14, which uv installs itself.
+name: test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+      - run: uv sync
+      - run: uv run pytest

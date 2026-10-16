@@ -270,6 +270,14 @@ To cut a release:
    uploads through the `pypi` environment. Pushing the tag publishes: the
    environment has no required reviewer, so the dry run in step 2 is the gate.
    Tag the release commit by name if `main` has moved past it.
+4. Once it is on PyPI, refresh the template repository, which is exactly what
+   `oxbrook new` writes. With the new version installed:
+
+   ```bash
+   python tools/template.py ../oxbrook-template
+   ```
+
+   Then review the diff there, commit and push.
 
 A version on PyPI can never be uploaded again, even after it is deleted, so a
 broken release is fixed with a new patch version.

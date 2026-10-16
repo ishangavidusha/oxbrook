@@ -663,8 +663,8 @@ def new(args: argparse.Namespace) -> int:
         # Stored under other names so that tools working on this repository
         # leave them alone: git and packaging would obey a .gitignore, and
         # linters and uv would read a pyproject.toml as this repository's.
-        if relative.name.startswith("dot-"):
-            relative = relative.with_name("." + relative.name.removeprefix("dot-"))
+        relative = Path(*("." + part.removeprefix("dot-") if part.startswith("dot-") else part
+                          for part in relative.parts))
         relative = relative.with_name(relative.name.removesuffix(".tmpl"))
         text = source.read_text(encoding="utf-8")
         for placeholder, value in values.items():
