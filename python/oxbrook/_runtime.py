@@ -293,7 +293,12 @@ async def _respond(handler, request, responder, params, debug) -> bool:
         # The default handling, for a route with no middleware and no
         # registered handlers, which is wrapped in nothing. Anything registered
         # was already applied by the time an exception reaches here.
-        responder.send(exc.status, PROBLEM, http_error_body(exc), header_pairs(exc.headers))
+        try:
+            responder.send(exc.status, PROBLEM, http_error_body(exc), header_pairs(exc.headers))
+        except ValueError as refused:
+            # A header the HTTPError carried that HTTP cannot: the same 500 a
+            # bad header on any other reply gets, logged with its name.
+            _unsendable(request, responder, refused, debug)
         return False
     except Exception as exc:  # noqa: BLE001 - a handler crash must still answer
         # The detail goes to the server's log. The client gets a status and
@@ -364,17 +369,26 @@ async def _respond(handler, request, responder, params, debug) -> bool:
                 # anything, so the responder is still unused here.
                 responder.send(200, "application/json", encode(result))
     except Exception as exc:  # noqa: BLE001
-        logger.exception(
-            "response could not be sent",
-            exc_info=exc,
-            extra={"method": request.method, "path": request.path},
-        )
-        _note(responder, exc)
-        detail = f"{type(exc).__name__}: {exc}" if debug else None
-        try:
-            responder.send(500, PROBLEM, problem(500, detail))
-        except Exception:  # noqa: BLE001
-            # Already answered, or a stream that had started. Nothing to add.
-            pass
+        _unsendable(request, responder, exc, debug)
         return False
     return True
+
+
+def _unsendable(request, responder, exc, debug) -> None:
+    """Log why a response could not be sent and answer 500 instead.
+
+    A status or header the server refuses names itself in `exc`: the check is
+    made where Python can still see it, so the log says which header it was.
+    """
+    logger.exception(
+        "response could not be sent",
+        exc_info=exc,
+        extra={"method": request.method, "path": request.path},
+    )
+    _note(responder, exc)
+    detail = f"{type(exc).__name__}: {exc}" if debug else None
+    try:
+        responder.send(500, PROBLEM, problem(500, detail))
+    except Exception:  # noqa: BLE001
+        # Already answered, or a stream that had started. Nothing to add.
+        pass

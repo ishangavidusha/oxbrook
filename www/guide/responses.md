@@ -70,6 +70,13 @@ challenges or two cookies.
 
 `body` may be `bytes` or `str`; a `str` is encoded as UTF-8.
 
+A status outside 100–599, or a header HTTP cannot carry, is refused before
+anything is sent. That covers a name with a space, or a value with a newline,
+which is how a value built from user input could otherwise add a header of its
+own. The client gets a `500`, and the log names the status or the header but
+not the header's value. This applies to every response, including the headers
+of an `HTTPError` and a `Reply`.
+
 ## Status codes you get for free
 
 Each of these is [problem details](errors.md#the-error-shape),

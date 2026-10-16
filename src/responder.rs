@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
-use pyo3::exceptions::PyRuntimeError;
+use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use tokio::sync::{mpsc, oneshot};
 
@@ -25,6 +25,41 @@ pub enum Body {
     /// instead would be wrong: holding a clone of it to watch would itself keep
     /// the channel open, so a finished stream would never terminate.
     Stream(mpsc::Receiver<Bytes>, oneshot::Sender<()>),
+}
+
+/// Refuse a reply hyper would refuse later, while the error can still reach
+/// Python. Checked here, on the worker thread, because the response is built
+/// on a tokio thread that cannot touch the interpreter: a bad header found
+/// there could only become an opaque 500 with nothing in the log (I-039).
+/// The header is named and its value is not, since values carry tokens and
+/// cookies and this message goes to the log.
+fn check(status: u16, content_type: &str, headers: &[(String, String)]) -> PyResult<()> {
+    // Outside 100-599 hyper writes the code with no reason phrase, which no
+    // client expects; a status like that is always a mistake (I-040).
+    if !(100..=599).contains(&status) {
+        return Err(PyValueError::new_err(format!(
+            "response status {status} is not an HTTP status (100-599)"
+        )));
+    }
+    if hyper::header::HeaderValue::from_str(content_type).is_err() {
+        return Err(PyValueError::new_err(
+            "the response's content type is not a valid header value",
+        ));
+    }
+    for (name, value) in headers {
+        if hyper::header::HeaderName::from_bytes(name.as_bytes()).is_err() {
+            return Err(PyValueError::new_err(format!(
+                "response header name {name:?} is not a valid header name"
+            )));
+        }
+        if hyper::header::HeaderValue::from_str(value).is_err() {
+            return Err(PyValueError::new_err(format!(
+                "the value of response header {name:?} is not valid: \
+                 a newline or another control character, most likely"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// What the Python side hands back for one request.
@@ -129,6 +164,9 @@ impl Responder {
     }
 
     fn deliver(&self, reply: Reply) -> PyResult<()> {
+        // Before the sender is taken, so a refused reply leaves the responder
+        // able to send the 500 that replaces it.
+        check(reply.status, &reply.content_type, &reply.headers)?;
         let tx = self
             .tx
             .lock()

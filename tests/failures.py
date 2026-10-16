@@ -271,7 +271,86 @@ def a_vanishing_client_leaves_the_server_healthy(port: int, client: httpx.Client
     )
 
 
+def refused_statuses_and_headers_are_named() -> None:
+    """I-039 and I-040: a status outside 100-599, or a header HTTP cannot
+    carry, is a 500 whose log names the status or header, never its value.
+
+    Used to be a bare 500 with nothing logged (the header was refused on a
+    tokio thread, which cannot log), and `HTTP/1.1 999 <none>` on the wire.
+    An app with no middleware, so `HTTPError` takes the runtime's own path.
+    """
+    import logging
+
+    from oxbrook import HTTPError, Reply, Response
+
+    plain = App(openapi_url=None, docs_url=None, mcp_url=None)
+
+    @plain.get("/status")
+    async def status(_: Request):
+        return Response(b"", status=999)
+
+    @plain.get("/name")
+    async def name(_: Request):
+        return Response(b"{}", headers={"bad name": "x"})
+
+    @plain.get("/value")
+    async def value(_: Request):
+        return Reply({}, headers={"x-token": f"{SECRET}\r\nset-cookie: stolen=1"})
+
+    @plain.get("/content-type")
+    async def content_type(_: Request):
+        return Response(b"x", content_type="text/plain\nx-injected: 1")
+
+    @plain.get("/http-error")
+    async def http_error(_: Request):
+        raise HTTPError(401, headers={"www-authenticate": "Bearer\nx-injected: 1"})
+
+    @plain.get("/fine")
+    async def fine(_: Request):
+        return Response(b"{}", status=299, headers={"x-ok": "yes"})
+
+    class Capture(logging.Handler):
+        def __init__(self) -> None:
+            super().__init__()
+            self.records: list[logging.LogRecord] = []
+
+        def emit(self, record: logging.LogRecord) -> None:
+            self.records.append(record)
+
+    capture = Capture()
+    logger = logging.getLogger("oxbrook")
+    logger.addHandler(capture)
+    try:
+        with TestClient(plain, workers=1) as client:
+            for path, named in (("/status", "999"), ("/name", "bad name"),
+                                ("/value", "x-token"), ("/content-type", "content type"),
+                                ("/http-error", "www-authenticate")):
+                before = len(capture.records)
+                r = client.get(path)
+                check(r.status_code == 500, f"{path} answered {r.status_code}, not 500")
+                check("stolen" not in r.headers.get("set-cookie", "")
+                      and "x-injected" not in r.headers,
+                      f"{path}: a header value split into a second header")
+                logged = [rec for rec in capture.records[before:]
+                          if rec.getMessage() == "response could not be sent"]
+                text = "".join(str(rec.exc_info[1]) for rec in logged if rec.exc_info)
+                check(named in text, f"{path}: the log did not name {named!r}: {text!r}")
+                check(SECRET not in text, f"{path}: the log carried the header's value")
+            r = client.get("/fine")
+            check(r.status_code == 299 and r.headers.get("x-ok") == "yes",
+                  f"a valid unusual status and header were refused: {r.status_code}")
+    finally:
+        logger.removeHandler(capture)
+
+
 def main() -> None:
+    try:
+        refused_statuses_and_headers_are_named()
+        print("  refused_statuses_and_headers_are_named: ok")
+    except Exception as exc:
+        failures.append("refused_statuses_and_headers_are_named raised "
+                        f"{type(exc).__name__}: {exc}")
+        print("  refused_statuses_and_headers_are_named: ERROR")
     for step in (conflicting_routes_are_refused, distinguishable_routes_are_accepted):
         try:
             step()
