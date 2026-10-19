@@ -19,7 +19,9 @@ What is asserted, each against a running server:
   handler was cancelled
 
 With OXBROOK_REQUIRE_MONGO set an unreachable server is a failure rather than
-a SKIP; `make verify` and CI both set it.
+a SKIP; `make verify` sets it. CI does not run this suite: the pattern is
+over a client library, not the framework, and the runner could not hold the
+server beside everything else.
 
     python tests/mongo.py --check    report reachability and stop
 """

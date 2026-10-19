@@ -75,10 +75,7 @@ jobs:
           --health-timeout 3s
           --health-retries 10
 
-    # Twenty minutes is the run; the rest is a cold cache. grpcio, which
-    # firebase-admin needs, publishes no free-threaded Linux wheel and builds
-    # from source, and uv's cache only keeps that build once a job succeeds.
-    timeout-minutes: 40
+    timeout-minutes: 20
 
     env:
       OXBROOK_TEST_REDIS: redis://127.0.0.1:6379
@@ -99,21 +96,19 @@ jobs:
       OXBROOK_REQUIRE_POSTGRES: "1"
       # And for the Keycloak halves of tests/oidc.py and tests/login.py.
       OXBROOK_REQUIRE_KEYCLOAK: "1"
-      # And for tests/mongo.py, against compose's one-member replica set.
-      OXBROOK_REQUIRE_MONGO: "1"
-      # And for tests/firebase.py, against the emulators compose builds.
-      OXBROOK_REQUIRE_FIREBASE: "1"
+      # tests/mongo.py and tests/firebase.py are not run here: they test
+      # patterns over client libraries, not the framework, and a MongoDB, the
+      # Firebase emulators and Keycloak beside the build were more than the
+      # runner held. `make verify` requires both locally. See "Run the suites".
 
     steps:
       - uses: actions/checkout@v7
 
-      # Keycloak needs a start command and the test realm mounted, MongoDB a
-      # replica set initiated, and the Firebase emulators an image built,
-      # which a service container cannot be given; compose already says all
-      # three. Started first and waited on last, so their start-up overlaps
-      # the build.
-      - name: Start Keycloak, MongoDB and the Firebase emulators
-        run: docker compose up -d --build keycloak mongo firebase
+      # Keycloak needs a start command and the test realm mounted, which a
+      # service container cannot be given; compose already says both. Started
+      # first and waited on last, so its start-up overlaps the build.
+      - name: Start Keycloak
+        run: docker compose up -d keycloak
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -126,8 +121,8 @@ jobs:
           key: ${{ matrix.python }}
 
       # One cache per interpreter. A cache key is written once, by whichever
-      # leg saves first; shared, the GIL leg's (all prebuilt wheels) won every
-      # time and the free-threaded leg rebuilt grpcio from source every run.
+      # leg saves first, so a shared one held only the faster leg's packages
+      # and anything the other built from source was rebuilt every run.
       - uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
@@ -135,15 +130,12 @@ jobs:
           cache-suffix: ${{ matrix.python }}
 
       - name: Create the environment
-        timeout-minutes: 30
         run: |
-          # grpcio's source build is serial unless told otherwise.
-          export GRPC_PYTHON_BUILD_EXT_COMPILER_JOBS=$(nproc)
           uv venv --python ${{ matrix.python }} ${{ matrix.venv }}
           uv pip install --python ${{ matrix.venv }}/bin/python \
             maturin "httpx[http2]" cryptography openapi-spec-validator websockets redis mcp coverage pydantic \
             asyncpg "sqlalchemy[asyncio]" alembic "pyjwt[crypto]" brotlicffi prometheus-client pytest \
-            opentelemetry-sdk pymongo firebase-admin
+            opentelemetry-sdk
 
       - name: Confirm the interpreter is the one asked for
         run: |
@@ -151,11 +143,12 @@ jobs:
             print(sys.version); \
             print('gil:', getattr(sys, '_is_gil_enabled', lambda: True)())"
 
-      - name: Wait for Keycloak, MongoDB and the Firebase emulators
-        run: docker compose up -d --wait keycloak mongo firebase
+      - name: Wait for Keycloak
+        run: docker compose up -d --wait keycloak
 
+      # MONGO= and FIREBASE= let those two suites SKIP; see the env above.
       - name: Run the suites
-        run: make ${{ matrix.target }}
+        run: make ${{ matrix.target }} MONGO= FIREBASE=
 
       # Not a benchmark — a shared CI machine cannot be measured, and the real
       # harness refuses to try. This only says whether dispatch still serves
@@ -170,7 +163,7 @@ jobs:
         if: failure()
         run: |
           docker compose ps -a
-          docker compose logs --tail 80 keycloak mongo firebase
+          docker compose logs --tail 80 keycloak
 
       - name: Upload the coverage report
         if: matrix.target == 'coverage'
@@ -211,8 +204,8 @@ jobs:
           key: ${{ matrix.python }}
 
       # One cache per interpreter. A cache key is written once, by whichever
-      # leg saves first; shared, the GIL leg's (all prebuilt wheels) won every
-      # time and the free-threaded leg rebuilt grpcio from source every run.
+      # leg saves first, so a shared one held only the faster leg's packages
+      # and anything the other built from source was rebuilt every run.
       - uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true

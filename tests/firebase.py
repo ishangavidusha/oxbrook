@@ -18,7 +18,9 @@ What is asserted, each against a running server:
 * a Realtime Database transaction counts every one of a concurrent burst
 
 With OXBROOK_REQUIRE_FIREBASE set an unreachable emulator is a failure rather
-than a SKIP; `make verify` and CI both set it.
+than a SKIP; `make verify` sets it. CI does not run this suite, for the
+reasons tests/mongo.py gives; it would also need grpcio, which has no
+free-threaded Linux wheel and takes a quarter of an hour to build.
 
     python tests/firebase.py --check    report reachability and stop
 """

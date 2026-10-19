@@ -82,6 +82,11 @@ make verify           # refuses to start without them
 make verify REDIS= POSTGRES= MONGO= FIREBASE= KEYCLOAK=   # accept the gap
 ```
 
+CI runs the MongoDB and Firebase suites as `SKIP`: they test patterns over
+client libraries rather than the framework, and their services beside
+Keycloak and the build were more than the runner held. Run `make verify`
+locally before a change touching them.
+
 `tests/run.py` makes the same checks, and honours `OXBROOK_REQUIRE_REDIS`,
 `OXBROOK_REQUIRE_POSTGRES`, `OXBROOK_REQUIRE_MONGO`, `OXBROOK_REQUIRE_FIREBASE`
 and `OXBROOK_REQUIRE_KEYCLOAK`. `OXBROOK_TEST_REDIS`, `OXBROOK_TEST_POSTGRES`,
