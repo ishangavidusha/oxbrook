@@ -373,6 +373,7 @@ class App:
         fallback: str | None = None,
         dotfiles: bool = False,
         cache_control: str | None = None,
+        precompressed: bool = False,
     ) -> None:
         """Serve the files in `directory` under the URL `prefix`.
 
@@ -399,12 +400,22 @@ class App:
 
         `cache_control` sets that header on every file served.
 
+        `precompressed` serves `app.js.br` or `app.js.gz`, where one sits beside
+        `app.js`, to a client whose `Accept-Encoding` takes it, with
+        `Content-Encoding` set and the content type still `app.js`'s. Brotli is
+        preferred on a tie. A variant older than its original is ignored, so
+        one left behind by an edit is never served stale, and a range request
+        always gets the original. Every answer from the mount varies by
+        `Accept-Encoding`. Files are never compressed as they are served: a
+        build step that writes the variants once costs nothing per request.
+
         `directory` resolves from the working directory when relative, and must
         exist now. Paths that leave the directory — `..`, encoded or not, or a
         symlink pointing outside it — are answered 404.
         """
         mount = build_mount(prefix, directory, index=index, fallback=fallback,
-                            dotfiles=dotfiles, cache_control=cache_control)
+                            dotfiles=dotfiles, cache_control=cache_control,
+                            precompressed=precompressed)
         taken = set(mount.shapes())
         for route in self.routes:
             if route.method == "GET" and route_shape(route.path) in taken:

@@ -21,10 +21,11 @@ class StaticMount:
     fallback: str | None
     dotfiles: bool
     cache_control: str | None
+    precompressed: bool = False
 
     def as_spec(self) -> tuple:
         return (self.prefix, self.directory, self.index, self.fallback, self.dotfiles,
-                self.cache_control)
+                self.cache_control, self.precompressed)
 
     def shapes(self) -> list[str]:
         """Route shapes this mount occupies, for conflict checks against routes."""
@@ -47,6 +48,7 @@ def build_mount(
     fallback: str | None,
     dotfiles: bool,
     cache_control: str | None,
+    precompressed: bool = False,
 ) -> StaticMount:
     if prefix != "/" and (not prefix.startswith("/") or prefix.endswith("/")):
         raise ValueError(
@@ -70,4 +72,7 @@ def build_mount(
             raise ValueError(f"fallback {fallback!r} is not a file inside {root}")
     if cache_control is not None and ("\r" in cache_control or "\n" in cache_control):
         raise ValueError("cache_control cannot contain a line break")
-    return StaticMount(prefix, str(root), index, fallback, dotfiles, cache_control)
+    if not isinstance(precompressed, bool):
+        raise TypeError("precompressed is True or False")
+    return StaticMount(prefix, str(root), index, fallback, dotfiles, cache_control,
+                       precompressed)

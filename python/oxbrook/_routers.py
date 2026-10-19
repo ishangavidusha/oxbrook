@@ -220,6 +220,7 @@ class Router:
         fallback: str | None = None,
         dotfiles: bool = False,
         cache_control: str | None = None,
+        precompressed: bool = False,
     ) -> None:
         """Serve the files in `directory` under `prefix` on this router. See
         `App.static`; `prefix` is joined to the router's own, and `"/"` means
@@ -233,7 +234,7 @@ class Router:
         """
         self._mutable(f"static files at {prefix}")
         options = {"index": index, "fallback": fallback, "dotfiles": dotfiles,
-                   "cache_control": cache_control}
+                   "cache_control": cache_control, "precompressed": precompressed}
         # Checked here, at the call that is wrong, rather than at `include`.
         build_mount(_join(self.prefix, prefix), directory, **options)
         self._statics.append((prefix, directory, options))

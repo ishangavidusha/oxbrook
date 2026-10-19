@@ -10,6 +10,12 @@
 //! resolves outside the directory through a symlink, and a directory with no
 //! index. Dotfiles are refused unless the mount allows them, because the file
 //! most likely to be sitting in a static directory by accident is `.env`.
+//!
+//! **Precompressed files**, on a mount that asks for them: `app.js.br` or
+//! `app.js.gz` beside `app.js` is sent in its place to a client that accepts
+//! the coding. Nothing is compressed here. A file compressed per request
+//! would cost the CPU every time, and could no longer stream from disk or
+//! answer a range against the bytes there; build tools write these once.
 
 use std::convert::Infallible;
 use std::path::{Path, PathBuf};
@@ -23,13 +29,15 @@ use hyper::header::{
     HeaderMap, HeaderValue, ACCEPT_RANGES, CACHE_CONTROL, CONTENT_LENGTH, CONTENT_RANGE,
     CONTENT_TYPE, ETAG, IF_MODIFIED_SINCE, IF_NONE_MATCH, IF_RANGE, LAST_MODIFIED, LOCATION, RANGE,
 };
+use hyper::header::{ACCEPT_ENCODING, CONTENT_ENCODING, VARY};
 use hyper::{Response, StatusCode};
 use tokio::io::AsyncReadExt;
 
+use crate::compress::{negotiate, Encoding};
 use crate::server::{full, Out};
 
-/// (prefix, directory, index, fallback, dotfiles, cache_control) from
-/// `oxbrook._files.StaticMount`.
+/// (prefix, directory, index, fallback, dotfiles, cache_control,
+/// precompressed) from `oxbrook._files.StaticMount`.
 pub type MountTuple = (
     String,
     String,
@@ -37,6 +45,7 @@ pub type MountTuple = (
     Option<String>,
     bool,
     Option<String>,
+    bool,
 );
 
 const CHUNK: usize = 64 * 1024;
@@ -48,11 +57,12 @@ pub struct Mount {
     fallback: Option<String>,
     dotfiles: bool,
     cache_control: Option<HeaderValue>,
+    precompressed: bool,
 }
 
 impl Mount {
     pub fn build(spec: MountTuple) -> Result<Self, String> {
-        let (prefix, directory, index, fallback, dotfiles, cache_control) = spec;
+        let (prefix, directory, index, fallback, dotfiles, cache_control, precompressed) = spec;
         // Canonical, so a resolved file can be checked against it by prefix:
         // a symlink inside the directory pointing outside it is caught there.
         let root = std::fs::canonicalize(&directory)
@@ -67,6 +77,7 @@ impl Mount {
             fallback,
             dotfiles,
             cache_control,
+            precompressed,
         })
     }
 
@@ -246,12 +257,15 @@ struct Asked {
     if_modified_since: Option<String>,
     range: Option<String>,
     if_range: Option<String>,
+    accept_encoding: Option<String>,
     wants_html: bool,
     head: bool,
 }
 
 impl Asked {
-    fn from(headers: &HeaderMap, head: bool) -> Self {
+    /// `encodings` is whether the mount serves precompressed files: only
+    /// then is `Accept-Encoding` worth copying out.
+    fn from(headers: &HeaderMap, head: bool, encodings: bool) -> Self {
         let text = |name| {
             headers
                 .get(name)
@@ -263,6 +277,11 @@ impl Asked {
             if_modified_since: text(IF_MODIFIED_SINCE),
             range: text(RANGE),
             if_range: text(IF_RANGE),
+            accept_encoding: if encodings {
+                text(ACCEPT_ENCODING)
+            } else {
+                None
+            },
             wants_html: headers
                 .get(hyper::header::ACCEPT)
                 .and_then(|v| v.to_str().ok())
@@ -318,7 +337,7 @@ pub async fn serve(
         },
     };
 
-    let asked = Asked::from(headers, head);
+    let asked = Asked::from(headers, head, mount.precompressed);
     let query = query.map(str::to_owned);
     let outcome = tokio::task::spawn_blocking(move || {
         resolve(&mount, parts, trailing_slash, query.as_deref(), &asked)
@@ -407,7 +426,63 @@ fn resolve(
     if !meta.is_file() {
         return Outcome::Ready(not_found());
     }
-    respond(mount, file, &resolved, meta, asked)
+    if mount.precompressed {
+        if let Some((encoding, file, meta)) = variant(mount, &resolved, &meta, asked) {
+            return respond(mount, file, &resolved, meta, asked, Some(encoding));
+        }
+    }
+    respond(mount, file, &resolved, meta, asked, None)
+}
+
+/// Codings a variant may be stored in, in the server's order of preference:
+/// brotli is the smaller of the two for text.
+const VARIANTS: [Encoding; 2] = [Encoding::Brotli, Encoding::Gzip];
+
+/// The precompressed file to send for `original`, if the client takes one
+/// that exists.
+///
+/// Held to the original's standards: inside the root once symlinks are
+/// followed, a regular file, and no older than the original. A variant left
+/// behind when the original was edited in place would otherwise go on being
+/// served, stale, to every client that compresses, and to nobody else.
+///
+/// Not for a range request: a range names bytes of a representation, and the
+/// identity file is the one a client resuming a download has been reading.
+fn variant(
+    mount: &Mount,
+    original: &Path,
+    original_meta: &std::fs::Metadata,
+    asked: &Asked,
+) -> Option<(Encoding, std::fs::File, std::fs::Metadata)> {
+    if asked.range.is_some() {
+        return None;
+    }
+    let accept = asked.accept_encoding.as_deref()?;
+    let original_modified = original_meta.modified().ok()?;
+    let mut offered = VARIANTS.to_vec();
+    while let Some(encoding) = negotiate(accept, &offered) {
+        offered.retain(|e| *e != encoding);
+        let mut name = original.as_os_str().to_owned();
+        name.push(match encoding {
+            Encoding::Brotli => ".br",
+            Encoding::Gzip => ".gz",
+        });
+        let candidate = PathBuf::from(name);
+        let Some(resolved) = contained(&mount.root, &candidate) else {
+            continue;
+        };
+        let Ok(file) = std::fs::File::open(&resolved) else {
+            continue;
+        };
+        let Ok(meta) = file.metadata() else { continue };
+        let fresh = meta
+            .modified()
+            .is_ok_and(|modified| modified >= original_modified);
+        if meta.is_file() && fresh {
+            return Some((encoding, file, meta));
+        }
+    }
+    None
 }
 
 /// `target` if it stays inside `root` once symlinks are followed.
@@ -434,18 +509,27 @@ fn contained(root: &Path, target: &Path) -> Option<PathBuf> {
     Some(target.to_path_buf())
 }
 
+/// `path` names the file the client asked for, which sets the content type;
+/// `file` and `meta` are the bytes sent, which are a precompressed variant's
+/// when `encoding` says so, and set the validators and the length.
 fn respond(
     mount: &Mount,
     mut file: std::fs::File,
     path: &Path,
     meta: std::fs::Metadata,
     asked: &Asked,
+    encoding: Option<Encoding>,
 ) -> Outcome {
     use std::io::{Read, Seek};
 
     let len = meta.len();
     let modified = meta.modified().unwrap_or(UNIX_EPOCH);
-    let etag = etag_for(len, modified);
+    let mut etag = etag_for(len, modified);
+    if let Some(encoding) = encoding {
+        // Each representation keeps a tag of its own, so a cache revalidating
+        // the one it holds is never told an other is the same bytes.
+        etag.insert_str(etag.len() - 1, &format!("-{}", encoding.token()));
+    }
     let last_modified = httpdate::fmt_http_date(modified);
 
     let mut builder = Response::builder()
@@ -454,6 +538,15 @@ fn respond(
         .header(ACCEPT_RANGES, "bytes");
     if let Some(cache) = &mount.cache_control {
         builder = builder.header(CACHE_CONTROL, cache.clone());
+    }
+    // On every answer from such a mount, whichever file was sent: a cache
+    // must not hand the identity answer to a client that compresses, or the
+    // other way round. The ETags already differ, being the files' own.
+    if mount.precompressed {
+        builder = builder.header(VARY, "Accept-Encoding");
+    }
+    if let Some(encoding) = encoding {
+        builder = builder.header(CONTENT_ENCODING, encoding.token());
     }
 
     // If-None-Match takes precedence over If-Modified-Since when both arrive.

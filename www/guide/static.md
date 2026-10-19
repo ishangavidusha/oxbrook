@@ -43,6 +43,7 @@ loading a page. So:
 | `fallback` | `None` | served for page loads that match no file |
 | `dotfiles` | `False` | serve names beginning with `.` |
 | `cache_control` | `None` | the `Cache-Control` header on every file served |
+| `precompressed` | `False` | serve `.br` and `.gz` files beside the originals; see [Compression](#compression) |
 
 A relative `directory` resolves from the working directory, and it must exist
 when `static` is called. When the app may be started from elsewhere, anchor it
@@ -100,6 +101,44 @@ Build tools put a content hash in asset file names, so those can be cached
 forever; `index.html` must not be, or visitors keep loading an old build. Mounting
 the hashed assets separately, with their own policy, gives each the right one.
 Routes and more specific mounts take precedence over a mount at `/`.
+
+## Compression
+
+```python
+app.static("/assets", "dist/assets", precompressed=True,
+           cache_control="public, max-age=31536000, immutable")
+```
+
+With `precompressed=True`, a request for `app.js` from a client that accepts
+brotli or gzip is answered with `app.js.br` or `app.js.gz` where one sits
+beside it, with `Content-Encoding` set and `app.js`'s content type. The client's
+`Accept-Encoding` weights decide between the two, and brotli wins a tie. Text
+assets shrink four to eight times this way.
+
+Files are not compressed as they are served. Compressing on each request
+would cost the CPU every time for the same output, and a file compressed on
+the fly can no longer stream from disk or answer a range against the bytes
+there. Build tools write the variants once: Vite with
+`vite-plugin-compression`, or any build with `gzip -k` and `brotli -k` over
+the output.
+
+A few rules keep this safe:
+
+- **A variant is only served for an original that exists**, so a stray
+  `report.pdf.br` does not create a URL.
+- **A variant older than its original is ignored.** Editing `app.js` in place
+  and leaving the old `app.js.br` would otherwise go on serving the old code
+  to every browser.
+- **A range request gets the original**, the file a client resuming a
+  download has been reading.
+- **Every answer from the mount varies by `Accept-Encoding`**, and each
+  representation has its own `ETag`, so a cache never hands compressed bytes
+  to a client that did not ask for them.
+- **The same containment rules apply**: a variant that is a symlink pointing
+  outside the directory is not served.
+
+Off by default, because looking for variants costs a file lookup or two per
+request on mounts that have none.
 
 ## On a router
 

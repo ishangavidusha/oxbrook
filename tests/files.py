@@ -391,6 +391,98 @@ def routers_mount_files(site: Path) -> None:
         pass
 
 
+def precompressed_variants(site: Path) -> None:
+    """I-072: `app.js.br` or `.gz` beside `app.js`, sent to a client that takes
+    it, on a mount that asks. Raw sockets, since an HTTP client would decode
+    the body and hide which file was sent."""
+    import gzip
+
+    pre = Path(tempfile.mkdtemp(prefix="oxbrook-precompressed-"))
+    (pre / "app.js").write_text("console.log('original')")
+    (pre / "app.js.br").write_bytes(b"BROTLI BYTES")
+    (pre / "app.js.gz").write_bytes(gzip.compress(b"console.log('original')"))
+    (pre / "style.css").write_text("body{}")
+    (pre / "style.css.gz").write_bytes(gzip.compress(b"body{}"))
+    (pre / "data.json").write_text('{"new": true}')
+    (pre / "data.json.br").write_bytes(b"STALE")
+    old = time.time() - 3600
+    os.utime(pre / "data.json.br", (old, old))
+    (pre / "orphan.js.br").write_bytes(b"NO ORIGINAL")
+    if SYMLINKS:
+        (pre / "leak.js").write_text("leak")
+        os.symlink(site.parent / "outside-secret.txt", pre / "leak.js.br")
+
+    app = App(openapi_url=None, docs_url=None, mcp_url=None)
+    app.static("/p", pre, precompressed=True)
+    app.static("/plain", pre)
+    with TestClient(app, workers=1) as client:
+        def get(path: str, accept: str | None = None, extra: str = ""):
+            header = f"Accept-Encoding: {accept}\r\n" if accept is not None else ""
+            return raw(client.port, path, header + extra)
+
+        status, headers, body = get("/p/app.js", "gzip, deflate, br")
+        check(status == 200 and body == b"BROTLI BYTES" and headers.get("content-encoding") == "br",
+              f"br and gzip accepted: {status} {headers.get('content-encoding')} {body[:20]!r}")
+        check(headers.get("content-type", "").startswith("text/javascript")
+              or "javascript" in headers.get("content-type", ""),
+              f"the variant's content type was {headers.get('content-type')}")
+        check(headers.get("vary", "").lower() == "accept-encoding",
+              f"a variant without Vary: {headers.get('vary')}")
+        check(headers.get("content-length") == str(len(b"BROTLI BYTES")),
+              f"the variant's length was {headers.get('content-length')}")
+        br_tag = headers.get("etag")
+
+        status, headers, body = get("/p/app.js", "gzip")
+        check(headers.get("content-encoding") == "gzip"
+              and gzip.decompress(body) == b"console.log('original')",
+              f"gzip only: {headers.get('content-encoding')}")
+        status, headers, body = get("/p/app.js", "br;q=0.5, gzip")
+        check(headers.get("content-encoding") == "gzip",
+              f"the client's weights were ignored: {headers.get('content-encoding')}")
+        status, headers, body = get("/p/style.css", "br, gzip")
+        check(headers.get("content-encoding") == "gzip",
+              f"a missing .br did not fall back to .gz: {headers.get('content-encoding')}")
+
+        status, headers, body = get("/p/app.js")
+        check(body == b"console.log('original')" and "content-encoding" not in headers
+              and headers.get("vary", "").lower() == "accept-encoding",
+              f"no Accept-Encoding: {headers.get('content-encoding')} vary={headers.get('vary')}")
+        check(headers.get("etag") != br_tag, "the original and its variant share an ETag")
+
+        status, headers, body = get("/p/data.json", "br")
+        check(body == b'{"new": true}' and "content-encoding" not in headers,
+              f"a variant older than its original was served: {body!r}")
+        status, _, body = get("/p/orphan.js", "br")
+        check(status == 404, f"a variant without its original answered {status} {body!r}")
+        status, headers, body = get("/p/app.js", "br", "Range: bytes=0-6\r\n")
+        check(status == 206 and body == b"console" and "content-encoding" not in headers,
+              f"a range request got {status} {headers.get('content-encoding')} {body!r}")
+
+        status, _, _ = get("/p/app.js", "br", f"If-None-Match: {br_tag}\r\n")
+        check(status == 304, f"the variant's own ETag did not revalidate: {status}")
+        status, _, _ = get("/p/app.js", None, f"If-None-Match: {br_tag}\r\n")
+        check(status == 200, f"the variant's ETag revalidated the original: {status}")
+
+        if SYMLINKS:
+            status, headers, body = get("/p/leak.js", "br")
+            check(b"SECRET" not in body and body == b"leak",
+                  f"a variant symlinked outside the directory was served: {body!r}")
+
+        status, headers, body = get("/plain/app.js", "br, gzip")
+        check(body == b"console.log('original')" and "content-encoding" not in headers
+              and "vary" not in headers,
+              f"a mount without precompressed=True sent {headers.get('content-encoding')}")
+
+    try:
+        App().static("/x", pre, precompressed="yes")
+        failures.append("precompressed accepted a string")
+    except TypeError:
+        pass
+    import shutil
+
+    shutil.rmtree(pre, ignore_errors=True)
+
+
 def main() -> None:
     base, site = make_site()
     app = App(openapi_url=None, docs_url=None, mcp_url=None)
@@ -418,7 +510,8 @@ def main() -> None:
                 print(f"  {step.__name__}: ERROR")
 
     for step in (cors_and_dotfiles, workers_are_not_needed, nested_mounts_keep_their_policies,
-                 a_prefixed_mount_serves_its_index, routers_mount_files):
+                 a_prefixed_mount_serves_its_index, routers_mount_files,
+                 precompressed_variants):
         try:
             step(site)
             print(f"  {step.__name__}: ok")

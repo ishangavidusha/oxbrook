@@ -7,6 +7,10 @@ release does not; changes that break existing code are listed under
 
 ## Unreleased
 
+- **Precompressed static files.** `app.static(..., precompressed=True)` sends
+  `app.js.br` or `app.js.gz`, where a build step wrote one beside `app.js`, to
+  a client that accepts it. A variant older than its original is ignored, and
+  range requests get the original.
 - **An admin port for probes and metrics.** `run(admin_port=9000)`, or
   `--admin-port`, serves the health probes and `/metrics` on a port of their
   own, and only there. On the main port a probe waited for a connection slot
