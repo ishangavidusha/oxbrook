@@ -301,6 +301,14 @@ def http2(base_url: str, verify, port: int, label: str, prior_knowledge: bool = 
         check(preflight.headers.get("access-control-allow-origin") == "https://site.example",
               f"{label}: preflight headers {preflight.headers}")
 
+        # Header limits match HTTP/1.1's for anything a real client sends.
+        # hyper's HTTP/2 default was 16 KiB, so 20 KiB of cookies that HTTP/1.1
+        # served were refused here with a 431.
+        cookies = h.get("/", headers={"cookie": "session=" + "a" * 20_000})
+        check(cookies.status_code == 200, f"{label}: 20 KiB of cookies {cookies.status_code}")
+        too_many = h.get("/", headers={"x-big": "a" * 70_000})
+        check(too_many.status_code == 431, f"{label}: 70 KiB of headers {too_many.status_code}")
+
         # A socket route cannot be upgraded over HTTP/2; the answer says so.
         upgrade = h.get("/ws")
         check(upgrade.status_code == 426, f"{label}: websocket route over h2 {upgrade}")
@@ -313,6 +321,18 @@ def http2(base_url: str, verify, port: int, label: str, prior_knowledge: bool = 
 
     statuses = asyncio.run(many())
     check(statuses == [200] * 150, f"{label}: 150 multiplexed requests: {statuses[:5]}...")
+
+
+def http1_header_limits(client: TestClient) -> None:
+    """hyper's, kept on HTTP/1.1 and pinned here so an upgrade that moves them
+    is noticed: 100 header fields, and about 400 KiB of them in total."""
+    fields = {f"x-h{i}": "v" for i in range(95)}
+    check(client.get("/", headers=fields).status_code == 200, "95 extra header fields refused")
+    fields = {f"x-h{i}": "v" for i in range(100)}
+    check(client.get("/", headers=fields).status_code == 431,
+          "more than 100 header fields were accepted")
+    big = client.get("/", headers={"cookie": "session=" + "a" * 300_000})
+    check(big.status_code == 200, f"300 KiB of HTTP/1.1 headers: {big.status_code}")
 
 
 def limited_body(cert: Path, key: Path, trust) -> None:
@@ -563,6 +583,7 @@ def main() -> None:
             ("http2 over tls", lambda: http2(secure.base_url, trust, secure.port, "h2")),
             ("http2 cleartext", lambda: http2(plain.base_url, True, plain.port, "h2c",
                                               prior_knowledge=True)),
+            ("http1 header limits", lambda: http1_header_limits(plain)),
             ("http1 still plain", lambda: check(
                 plain.get("/").http_version == "HTTP/1.1", "plain HTTP/1.1")),
             ("limited body", lambda: limited_body(cert, key, trust)),

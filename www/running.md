@@ -155,6 +155,18 @@ backlog where a client's own connect timeout governs it. Health probes wait
 there too, unless they have [a port of their
 own](guide/health.md#a-port-of-their-own).
 
+Request headers have fixed limits, past which the answer is `431 Request
+Header Fields Too Large`:
+
+| | HTTP/1.1 | HTTP/2 |
+|---|---|---|
+| header fields | 100 | no count of its own |
+| all headers together | about 400 KiB | 64 KiB |
+
+Anything a browser or API client sends, large cookies and long bearer tokens
+included, fits well within both. Headers sent slowly are bounded in time
+instead, by the idle limits under [HTTPS and HTTP/2](#https-and-http2).
+
 ## HTTPS and HTTP/2
 
 ```bash

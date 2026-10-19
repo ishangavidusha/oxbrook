@@ -501,6 +501,16 @@ const IDLE: Duration = Duration::from_secs(15);
 /// take every worker's capacity from one connection (CVE-2023-44487).
 const MAX_STREAMS: u32 = 200;
 
+/// Request headers, in total, an HTTP/2 request may carry before it is
+/// answered 431. hyper's default is 16 KiB, against about 400 KiB on
+/// HTTP/1.1, so a browser whose cookies came to 20 KiB was refused over one
+/// protocol and served over the other (I-033).
+///
+/// HTTP/1.1 keeps hyper's limit: there it is also the read buffer's size, and
+/// 64 KiB cut streamed uploads on loopback from about 17 GiB/s to 12. Its
+/// header count stays hyper's 100.
+const MAX_HEADER_BYTES: u32 = 64 * 1024;
+
 /// The connection handler, built once and shared by every connection.
 enum Protocols {
     /// HTTP/1.1 alone, as before HTTP/2 existed here: `http2=False`.
@@ -531,6 +541,7 @@ impl Protocols {
         builder
             .http2()
             .timer(TokioTimer::new())
+            .max_header_list_size(MAX_HEADER_BYTES)
             .max_concurrent_streams(MAX_STREAMS)
             // Pings find a peer that vanished without closing, which on a
             // quiet event stream nothing else would notice.

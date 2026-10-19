@@ -7,6 +7,9 @@ release does not; changes that break existing code are listed under
 
 ## Unreleased
 
+- **HTTP/2 accepts 64 KiB of request headers**, up from 16 KiB. A request
+  with 20 KiB of cookies was served over HTTP/1.1 and refused with `431` over
+  HTTP/2. The limits on both protocols are now documented.
 - **Worker loops start at once.** Every loop's `worker_lifespan` runs at the
   same time instead of one after another, so eight loops each opening a pool
   in 250 ms start in about 0.27 s instead of 2 s. On the free-threaded build
