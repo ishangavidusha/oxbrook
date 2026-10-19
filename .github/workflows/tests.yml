@@ -164,6 +164,14 @@ jobs:
       - name: Throughput sanity check
         run: ${{ matrix.venv }}/bin/python bench/smoke.py --seconds 3
 
+      # A service that dies takes its reason with it otherwise: the runner
+      # only reports the container's exit code.
+      - name: Show the services' logs
+        if: failure()
+        run: |
+          docker compose ps -a
+          docker compose logs --tail 80 keycloak mongo firebase
+
       - name: Upload the coverage report
         if: matrix.target == 'coverage'
         uses: actions/upload-artifact@v7
