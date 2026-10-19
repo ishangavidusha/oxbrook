@@ -120,12 +120,21 @@ hooks is an error at startup rather than a silent override.
 
 If a hook raises during startup, the server does not start and the exception it
 raised is the one that surfaces — from `app.run()`, or from entering a
-`TestClient`. Worker loops that had already started run their shutdown first, so
-a database that is down on the third worker does not leave the first two holding
-connections.
+`TestClient`. Every worker loop that did start runs its shutdown first,
+including one still starting when another failed, so a database that is down
+on one worker does not leave the others holding connections. If several fail,
+the first worker's exception is the one raised.
 
-Workers start one at a time, each after the previous one's `worker_lifespan`
-has finished.
+## Workers start at once
+
+Every worker loop starts at the same time, so startup takes as long as one
+`worker_lifespan`, not one per loop: eight loops each opening a pool in a
+quarter of a second start in a quarter of a second, not two.
+
+On the free-threaded build that means `worker_lifespan` runs on several
+threads at once. Anything it touches outside the loop it runs on — a module
+counter, a shared list — needs a lock, as any code on two worker loops does.
+What it creates and yields is its own loop's alone.
 
 ## Shutdown
 

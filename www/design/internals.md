@@ -165,9 +165,10 @@ stall is a `408` and never races into a `504`.
 
 Each worker thread runs `worker_lifespan` on its own loop before registering
 its drain callback, and again after its loop stops, having first removed the
-callback so nothing new starts during teardown. Workers start one at a time; if
-one fails, the ones already running are stopped and joined before the error
-surfaces. At shutdown — on `SIGINT` or `SIGTERM`, both handled in the accept loop — the
+callback so nothing new starts during teardown. Every worker thread is
+started before any is waited for, so their lifespans run at once. If one
+fails, the server still waits for the others to report, stops and joins every
+one that started, and only then raises the first failure by worker index. At shutdown — on `SIGINT` or `SIGTERM`, both handled in the accept loop — the
 server waits for every worker thread, bounded by `shutdown_grace`, and only
 then runs the process `lifespan`'s teardown. On Windows, where there is no
 `SIGTERM`, Ctrl-Break and the console closing are handled the same way.

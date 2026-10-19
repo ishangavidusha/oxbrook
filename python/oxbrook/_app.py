@@ -100,7 +100,8 @@ class App:
         readable resources. Set it to None to turn the endpoint off entirely.
 
         `lifespan` runs once around the server's life and `worker_lifespan` runs
-        on every worker loop; what they yield is `request.state`. Two, because
+        on every worker loop, all of them at once; what they yield is
+        `request.state`. Two, because
         a connection pool belongs to the loop that made it and a server has
         several loops. See the lifespan guide.
 

@@ -194,13 +194,56 @@ pub struct Worker {
     thread: Mutex<Option<JoinHandle<()>>>,
 }
 
+/// What a started worker thread reports: its loop and that loop's
+/// `call_soon_threadsafe`, or why it could not start.
+type Report = PyResult<(Py<PyAny>, Py<PyAny>)>;
+
+/// A worker thread that is starting: its loop and lifespan are being set up,
+/// and `finish` waits for the outcome. Separate from `Worker` so every loop
+/// can be started before any is waited for, and their lifespans run at once
+/// rather than one after another (I-048).
+pub struct Starting {
+    queue: Arc<WorkerQueue>,
+    thread: JoinHandle<()>,
+    reported: mpsc::Receiver<Report>,
+}
+
+impl Starting {
+    /// Wait for the worker to report. On failure its thread has torn down
+    /// whatever it set up, and is joined before the error is returned.
+    pub fn finish(self, py: Python<'_>) -> PyResult<Worker> {
+        let Self {
+            queue,
+            thread,
+            reported,
+        } = self;
+        // Detach while waiting: blocking in native code while attached stalls
+        // free-threaded CPython's stop-the-world and deadlocks startup. The
+        // wait includes the worker lifespan, which may take a while.
+        let reported = py.detach(move || reported.recv());
+        let (event_loop, call_soon_threadsafe) = match reported {
+            Ok(Ok(pair)) => pair,
+            Ok(Err(e)) => {
+                let _ = py.detach(move || thread.join());
+                return Err(e);
+            }
+            Err(_) => panic!("worker thread died before reporting its event loop"),
+        };
+        Ok(Worker {
+            queue,
+            event_loop,
+            call_soon_threadsafe,
+            thread: Mutex::new(Some(thread)),
+        })
+    }
+}
+
 impl Worker {
-    /// Nine arguments. Called once per worker at start, with a different value
-    /// for each, so grouping them would be a struct that exists only to
+    /// Eight arguments. Called once per worker at start, with a different
+    /// value for each, so grouping them would be a struct that exists only to
     /// satisfy a count.
     #[allow(clippy::too_many_arguments)]
-    pub fn spawn(
-        py: Python<'_>,
+    pub fn start(
         index: usize,
         routes: Arc<Vec<Py<PyAny>>>,
         gates: Arc<Vec<Option<Py<PyAny>>>>,
@@ -209,12 +252,12 @@ impl Worker {
         debug: bool,
         tokio_handle: tokio::runtime::Handle,
         lifecycle: Py<PyAny>,
-    ) -> PyResult<Self> {
+    ) -> PyResult<Starting> {
         let (write_end, read_end) = wake::pair()?;
 
         let queue = Arc::new(WorkerQueue::new(write_end, limit));
         let worker_queue = queue.clone();
-        let (tx, rx) = mpsc::channel::<PyResult<(Py<PyAny>, Py<PyAny>)>>();
+        let (tx, rx) = mpsc::channel::<Report>();
 
         let handle = thread::Builder::new()
             .name(format!("oxbrook-py-{index}"))
@@ -304,24 +347,10 @@ impl Worker {
             })
             .expect("failed to spawn python worker thread");
 
-        // Detach while waiting: blocking in native code while attached stalls
-        // free-threaded CPython's stop-the-world and deadlocks startup. The
-        // wait includes the worker lifespan, which may take a while.
-        let reported = py.detach(move || rx.recv());
-        let (event_loop, call_soon_threadsafe) = match reported {
-            Ok(Ok(pair)) => pair,
-            Ok(Err(e)) => {
-                let _ = py.detach(move || handle.join());
-                return Err(e);
-            }
-            Err(_) => panic!("worker thread died before reporting its event loop"),
-        };
-
-        Ok(Self {
+        Ok(Starting {
             queue,
-            event_loop,
-            call_soon_threadsafe,
-            thread: Mutex::new(Some(handle)),
+            thread: handle,
+            reported: rx,
         })
     }
 

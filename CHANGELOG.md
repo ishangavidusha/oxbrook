@@ -7,6 +7,11 @@ release does not; changes that break existing code are listed under
 
 ## Unreleased
 
+- **Worker loops start at once.** Every loop's `worker_lifespan` runs at the
+  same time instead of one after another, so eight loops each opening a pool
+  in 250 ms start in about 0.27 s instead of 2 s. On the free-threaded build
+  the hook therefore runs on several threads at once; shared state it touches
+  needs a lock. A failed startup still tears down every loop that started.
 - **Precompressed static files.** `app.static(..., precompressed=True)` sends
   `app.js.br` or `app.js.gz`, where a build step wrote one beside `app.js`, to
   a client that accepts it. A variant older than its original is ignored, and

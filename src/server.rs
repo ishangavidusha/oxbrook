@@ -325,10 +325,13 @@ impl Server {
             None
         };
 
-        let mut workers: Vec<Worker> = Vec::with_capacity(self.worker_count);
+        // Every loop is started before any is waited for, so their worker
+        // lifespans run at once: eight loops each opening a pool in 250 ms
+        // took two seconds to start one after another (I-048).
+        let mut starting = Vec::with_capacity(self.worker_count);
+        let mut failure = None;
         for i in 0..self.worker_count {
-            let spawned = Worker::spawn(
-                py,
+            match Worker::start(
                 i,
                 handlers.clone(),
                 gates.clone(),
@@ -337,25 +340,38 @@ impl Server {
                 self.debug,
                 runtime.handle().clone(),
                 self.lifecycle.clone_ref(py),
-            );
-            match spawned {
-                Ok(worker) => workers.push(worker),
+            ) {
+                Ok(started) => starting.push(started),
                 Err(e) => {
-                    // A worker lifespan that fails usually fails everywhere —
-                    // the database is down — so this is the ordinary startup
-                    // failure, not a rare one. The loops that did start own
-                    // resources, and must release them before the error
-                    // surfaces rather than being abandoned mid-flight.
-                    for worker in &workers {
-                        worker.stop(py);
-                    }
-                    let deadline = Instant::now() + self.shutdown_grace;
-                    for worker in &workers {
-                        worker.join(py, deadline);
-                    }
-                    return Err(e);
+                    failure = Some(e);
+                    break;
                 }
             }
+        }
+        // All of them, even after one has failed: a loop still starting owns
+        // what its lifespan is opening, and has to be stopped once it has it
+        // rather than abandoned mid-flight. The first failure, by index, is
+        // the one reported; a worker lifespan that fails usually fails
+        // everywhere — the database is down — so this is the ordinary
+        // startup failure, not a rare one.
+        let mut workers: Vec<Worker> = Vec::with_capacity(starting.len());
+        for started in starting {
+            match started.finish(py) {
+                Ok(worker) => workers.push(worker),
+                Err(e) => {
+                    failure.get_or_insert(e);
+                }
+            }
+        }
+        if let Some(e) = failure {
+            for worker in &workers {
+                worker.stop(py);
+            }
+            let deadline = Instant::now() + self.shutdown_grace;
+            for worker in &workers {
+                worker.join(py, deadline);
+            }
+            return Err(e);
         }
 
         if metrics.is_some() {

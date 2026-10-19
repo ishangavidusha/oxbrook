@@ -12,8 +12,11 @@ loop. These cases hold each part of that to account:
   server has stopped. Worker threads were never joined before this, so a
   teardown would have been cut off when the process exited;
 * a teardown that hangs cannot hang shutdown past the grace period;
-* a startup failure surfaces as the exception the lifespan raised, and the
-  workers that had already started release what they built first;
+* the loops start at once, so startup takes one worker lifespan rather than
+  one per loop: eight loops opening a pool in 250 ms took two seconds;
+* a startup failure surfaces as the exception the lifespan raised, and every
+  worker that did start — including one still starting when another failed —
+  releases what it built first;
 * state is read-only, and a key yielded by both hooks is refused.
 """
 import asyncio
@@ -125,6 +128,21 @@ def teardown_hang_is_bounded() -> None:
     time.sleep(hold + 0.5)
 
 
+def loops_start_at_once() -> None:
+    @asynccontextmanager
+    async def slow(app):
+        await asyncio.sleep(0.6)  # opening a pool
+        yield {}
+
+    started = time.monotonic()
+    with TestClient(make_app(worker_lifespan=slow), workers=WORKERS) as client:
+        took = time.monotonic() - started
+        check(client.get("/probe").status_code == 200, "the server did not serve after starting")
+    # One after another is 0.6 s per loop; at once it is one 0.6 s.
+    check(took < 0.6 * WORKERS - 0.3,
+          f"{WORKERS} worker lifespans of 0.6s took {took:.2f}s to start: one after another")
+
+
 def startup_failure_cleans_up() -> None:
     events.clear()
     started = []
@@ -136,6 +154,9 @@ def startup_failure_cleans_up() -> None:
             started.append(index)
         if index == 1:
             raise ConnectionRefusedError("database is down")
+        # Still starting when the other has failed: it must be let finish and
+        # then torn down, not abandoned holding what it opened.
+        await asyncio.sleep(0.3)
         try:
             yield {}
         finally:
@@ -149,10 +170,12 @@ def startup_failure_cleans_up() -> None:
         pass
     except Exception as exc:
         failures.append(f"worker startup failure surfaced as {type(exc).__name__}: {exc}")
-    check("released 0" in events, f"the worker that started was not torn down: {events}")
+    released = {e for e in events if e.startswith("released")}
+    expected = {f"released {i}" for i in started if i != 1}
+    check(released == expected and expected,
+          f"workers that started were not all torn down: started {started}, {sorted(released)}")
     check(events[-1:] == ["process down"],
           f"the process lifespan was not torn down after a worker failed: {events}")
-    check(started == [0, 1], f"workers kept starting after one failed: {started}")
 
 
 def process_startup_failure_starts_no_workers() -> None:
@@ -270,6 +293,7 @@ def a_per_loop_budget_is_divided_not_multiplied() -> None:
 def main() -> None:
     for step in (
         resources_stay_on_their_loop,
+        loops_start_at_once,
         a_per_loop_budget_is_divided_not_multiplied,
         startup_failure_cleans_up,
         process_startup_failure_starts_no_workers,
