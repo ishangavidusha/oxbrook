@@ -32,6 +32,8 @@ uses.
 | `--tls-cert` | `tls_cert` | none | PEM certificate chain; serve HTTPS |
 | `--tls-key` | `tls_key` | none | PEM private key for that certificate |
 | `--no-http2` | `http2=False` | HTTP/2 on | serve HTTP/1.1 only |
+| `--admin-port` | `admin_port` | none | serve [health probes](guide/health.md#a-port-of-their-own) and [metrics](guide/metrics.md) on this port only |
+| `--admin-host` | `admin_host` | `host` | interface for the admin port |
 
 The command also takes `--access-log`, to log every request, and
 `--log-level`, which sets the level of Oxbrook's own loggers.
@@ -149,7 +151,9 @@ that capacity for itself, add a [rate limit](guide/rate-limits.md).
 costs a file descriptor without ever reaching a worker. An open WebSocket
 counts as the connection it was upgraded from, until it closes. At that limit the
 server stops accepting rather than refusing, so the wait lands in the OS
-backlog where a client's own connect timeout governs it.
+backlog where a client's own connect timeout governs it. Health probes wait
+there too, unless they have [a port of their
+own](guide/health.md#a-port-of-their-own).
 
 ## HTTPS and HTTP/2
 

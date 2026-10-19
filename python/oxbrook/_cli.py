@@ -99,6 +99,8 @@ def _run_options() -> dict[str, tuple[Any, Any, str]]:
         "max_message": (int, _app.DEFAULT_MAX_MESSAGE, "a whole number"),
         "request_timeout": (float, _app.DEFAULT_REQUEST_TIMEOUT, "a number"),
         "shutdown_grace": (float, None, "a number"),
+        "admin_port": (int, None, "a whole number"),
+        "admin_host": (str, None, "text"),
     }
 
 
@@ -276,6 +278,8 @@ def serve(args: argparse.Namespace) -> int:
         tls_cert=args.tls_cert,
         tls_key=args.tls_key,
         http2=args.http2,
+        admin_port=args.admin_port,
+        admin_host=args.admin_host,
     )
     return 0
 
@@ -756,6 +760,10 @@ def parser() -> argparse.ArgumentParser:
                            help=f"one of {', '.join(LOG_LEVELS)} (default: info)")
     serve_cmd.add_argument("--max-concurrency", type=int, default=None,
                            help=f"default: {_app.DEFAULT_MAX_CONCURRENCY}")
+    serve_cmd.add_argument("--admin-port", type=int, default=None,
+                           help="serve health probes and metrics on this port only")
+    serve_cmd.add_argument("--admin-host", default=None,
+                           help="interface for --admin-port (default: --host)")
     serve_cmd.add_argument("--max-connections", type=int, default=None,
                            help=f"default: {_app.DEFAULT_MAX_CONNECTIONS}")
     serve_cmd.add_argument("--max-body", type=int, default=None,

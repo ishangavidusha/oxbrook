@@ -69,7 +69,9 @@ scraper sets.
 The endpoint is public, is not in the [OpenAPI document](../openapi.md), and is
 never an agent tool. It reveals route templates, request counts and load. That
 is usually fine on a private network and worth keeping off a public one: leave
-`/metrics` unrouted at the proxy, as you would a database port.
+`/metrics` unrouted at the proxy, as you would a database port, or serve it on
+[an admin port](health.md#a-port-of-their-own), which the main port then does
+not answer for.
 
 ## Your own metrics
 

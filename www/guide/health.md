@@ -112,6 +112,42 @@ readinessProbe:
 terminationGracePeriodSeconds: 30
 ```
 
+## A port of their own
+
+```python
+app.run(host="0.0.0.0", port=8000, admin_port=9000)
+```
+
+```bash
+oxbrook run main:app --host 0.0.0.0 --admin-port 9000
+```
+
+On the main port a probe is a connection like any other, and it waits for one
+of [`max_connections`](../running.md#backpressure) before the server accepts
+it. A server holding that many idle keep-alive connections leaves the probe in
+the OS backlog, and a liveness probe that times out there gets an instance
+restarted whose loops are fine.
+
+With `admin_port`, the probes and [`/metrics`](metrics.md) are served on that
+port and only there; the main port answers `404` for them. The admin port
+keeps a few connections of its own, so a probe is answered however busy the
+main port is, and it speaks plain HTTP/1.1, as orchestrators and scrapers
+expect on a port that is not published. `admin_host` binds it to another
+interface than `host`. A port already in use stops the server from starting.
+
+Probes keep answering on it while the server [drains](#draining), readiness
+saying so.
+
+```yaml
+livenessProbe:
+  httpGet: {path: /livez, port: 9000}
+readinessProbe:
+  httpGet: {path: /readyz, port: 9000}
+```
+
+In tests, `TestClient(app, admin_port=free_port())` serves it and sets
+`client.admin_url`.
+
 ## Options
 
 | option | default | |

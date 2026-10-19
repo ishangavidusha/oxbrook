@@ -87,6 +87,11 @@ impl Health {
         None
     }
 
+    /// Whether `path` is the readiness probe's, whatever the method.
+    pub fn is_ready_path(&self, path: &str) -> bool {
+        self.ready.as_deref() == Some(path)
+    }
+
     /// The loops that have left a wake unanswered for longer than
     /// `stall_after`, by index; None when there are none.
     fn stalled(&self, workers: &[Worker]) -> Option<Vec<usize>> {

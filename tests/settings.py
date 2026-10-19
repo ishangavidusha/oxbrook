@@ -208,7 +208,7 @@ def env_files_are_read() -> None:
 # the command
 # ---------------------------------------------------------------------------
 APP = '''
-from oxbrook import App, Request, Settings
+from oxbrook import App, Health, Request, Settings
 from pydantic import SecretStr
 
 class Config(Settings, prefix="APP_"):
@@ -217,7 +217,7 @@ class Config(Settings, prefix="APP_"):
     origins: list[str] = []
 
 config = Config()
-app = App(openapi_url=None, docs_url=None, mcp_url=None)
+app = App(openapi_url=None, docs_url=None, mcp_url=None, health=Health())
 
 @app.get("/")
 async def root(_: Request):
@@ -293,6 +293,25 @@ def options_come_from_the_environment(directory: Path) -> None:
     check(got is not None, "OXBROOK_PORT did not win over PORT")
     got = serving(directory, ["--port", str(port)], {**base, "OXBROOK_PORT": str(other)}, port)
     check(got is not None, "--port did not win over OXBROOK_PORT")
+
+    # The admin port too, where the probes then are.
+    port, admin = free_port(), free_port()
+    server = subprocess.Popen([str(BIN / f"oxb{EXE}"), "run", "main:app"], cwd=directory,
+                              env={**base, "OXBROOK_PORT": str(port),
+                                   "OXBROOK_ADMIN_PORT": str(admin)},
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    try:
+        def live() -> int | None:
+            try:
+                with urllib.request.urlopen(f"http://127.0.0.1:{admin}/livez",
+                                            timeout=1) as response:
+                    return response.status
+            except OSError:
+                return None
+        check(wait_for(live, 20) == 200, "OXBROOK_ADMIN_PORT did not serve the probes")
+    finally:
+        server.terminate()
+        server.communicate(timeout=20)
 
     for name, value, says in (("OXBROOK_PORT", SENTINEL, "OXBROOK_PORT must be a whole number"),
                               ("OXBROOK_ACCESS_LOG", SENTINEL, "must be true or false"),

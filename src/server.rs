@@ -72,6 +72,9 @@ struct State {
     /// Static mounts, indexed by `RouteSpec::mount`. Shared, because a file
     /// is resolved on a blocking thread that outlives the borrow.
     mounts: Vec<Arc<Mount>>,
+    /// Probes and metrics are served on their own listener, and not on this
+    /// one (I-125).
+    admin: bool,
 }
 
 #[pyclass(name = "Server", module = "oxbrook._core")]
@@ -109,6 +112,8 @@ pub struct Server {
     /// The app traces requests: queues stamp arrivals so a span can start
     /// when the request arrived. The tracing itself is Python's.
     telemetry: bool,
+    /// Host and port of the admin listener, for probes and metrics alone.
+    admin: Option<(String, u16)>,
 }
 
 /// A route's own limit, and whether it is exempt from the app's: the
@@ -131,7 +136,7 @@ type Route = (
 #[pymethods]
 impl Server {
     #[new]
-    /// Twenty-five arguments, which clippy dislikes. This is the Python
+    /// Twenty-six arguments, which clippy dislikes. This is the Python
     /// constructor: the signature *is* the API, and collapsing it into a
     /// config object would move the same fields behind a dict that Python has
     /// to build on every server start.
@@ -162,6 +167,7 @@ impl Server {
         app_limit: Option<PyRef<'_, Limiter>>,
         route_limits: Vec<(Option<PyRef<'_, Limiter>>, bool)>,
         telemetry: bool,
+        admin: Option<(String, u16)>,
     ) -> Self {
         // The budgets themselves, taken here, on a thread attached to the
         // interpreter: a tokio thread never touches the Python object.
@@ -200,6 +206,7 @@ impl Server {
             app_limit,
             route_limits,
             telemetry,
+            admin,
         }
     }
 
@@ -378,11 +385,21 @@ impl Server {
             route_limits: self.route_limits.clone(),
             socket_origins: SocketOrigins::build(self.socket_origins.clone()),
             mounts,
+            admin: self.admin.is_some(),
         });
 
         let addr: SocketAddr = format!("{}:{}", self.host, self.port)
             .parse()
             .map_err(|e| PyRuntimeError::new_err(format!("bad address: {e}")))?;
+        let admin = self
+            .admin
+            .as_ref()
+            .map(|(host, port)| {
+                format!("{host}:{port}")
+                    .parse::<SocketAddr>()
+                    .map_err(|e| PyRuntimeError::new_err(format!("bad admin address: {e}")))
+            })
+            .transpose()?;
 
         let shutdown = state.clone();
         let listen = Listen {
@@ -393,6 +410,7 @@ impl Server {
             signals,
             tls,
             http2: self.http2,
+            admin,
         };
         let result: Result<(), String> = py.detach(|| runtime.block_on(serve_loop(listen, state)));
 
@@ -452,6 +470,7 @@ struct Listen {
     signals: Option<Terminate>,
     tls: Option<tokio_rustls::TlsAcceptor>,
     http2: bool,
+    admin: Option<SocketAddr>,
 }
 
 /// How long a connection may hold a slot with nothing to show for it: request
@@ -730,13 +749,34 @@ async fn serve_loop(listen: Listen, state: Arc<State>) -> Result<(), String> {
         mut signals,
         tls,
         http2,
+        admin,
     } = listen;
+    // Bound first, so a port already taken fails the start rather than
+    // leaving a server whose probes can never be reached, and so a client
+    // that waits for the main port finds this one open too.
+    let admin = match admin {
+        Some(admin) => Some((
+            TcpListener::bind(admin)
+                .await
+                .map_err(|e| format!("bind admin {admin}: {e}"))?,
+            admin,
+        )),
+        None => None,
+    };
     let listener = TcpListener::bind(addr)
         .await
         .map_err(|e| format!("bind {addr}: {e}"))?;
     if !quiet {
         let scheme = if tls.is_some() { "https" } else { "http" };
         println!("Oxbrook listening on {scheme}://{addr}");
+        if let Some((_, admin)) = &admin {
+            println!("Oxbrook probes and metrics on http://{admin}");
+        }
+    }
+    // Left running when the main listener stops: probes keep answering while
+    // requests drain, readiness saying so, until the runtime is dropped.
+    if let Some((listener, _)) = admin {
+        tokio::spawn(admin_loop(listener, state.clone()));
     }
     let protocols = Arc::new(Protocols::build(http2));
 
@@ -1228,18 +1268,20 @@ async fn serve_request(
     connection: Option<ConnectionLoad>,
     peer: IpAddr,
 ) -> Result<Response<Out>, Infallible> {
-    // Probes and scrapes first, before CORS and routing, and not counted:
-    // they are the server describing itself, at a rate set by a scraper.
-    if let Some(metrics) = &state.metrics {
-        if metrics.is_scrape(req.method(), req.uri().path()) {
-            let draining = state.health.as_ref().map(Health::is_draining);
-            return Ok(metrics.scrape(&state.workers, draining, req.method() == Method::HEAD));
+    if state.admin {
+        // Probes and metrics belong to the admin listener. The readiness
+        // route with checks is the one of them in the router, so it is
+        // the one this listener has to refuse; the rest match nothing here.
+        if state
+            .health
+            .as_ref()
+            .is_some_and(|h| h.is_ready_path(req.uri().path()))
+        {
+            let answer = crate::problem::response(StatusCode::NOT_FOUND, None);
+            return Ok(refuse(req, answer).await);
         }
-    }
-    if let Some(health) = &state.health {
-        if let Some(answer) = health.answer(req.method(), req.uri().path(), &state.workers) {
-            return Ok(answer);
-        }
+    } else if let Some(answer) = describe(&req, &state) {
+        return Ok(answer);
     }
     let Some(metrics) = state.metrics.clone() else {
         return cors_and_handle(req, state, connection, peer, &mut None).await;
@@ -1257,6 +1299,74 @@ async fn serve_request(
         response.extensions().get::<Refusal>().copied(),
     );
     Ok(response)
+}
+
+/// A probe's or a scrape's answer, or None. Before CORS and routing, and not
+/// counted: they are the server describing itself, at a rate set by a scraper.
+fn describe(req: &hyper::Request<Incoming>, state: &State) -> Option<Response<Out>> {
+    if let Some(metrics) = &state.metrics {
+        if metrics.is_scrape(req.method(), req.uri().path()) {
+            let draining = state.health.as_ref().map(Health::is_draining);
+            return Some(metrics.scrape(&state.workers, draining, req.method() == Method::HEAD));
+        }
+    }
+    state
+        .health
+        .as_ref()
+        .and_then(|h| h.answer(req.method(), req.uri().path(), &state.workers))
+}
+
+/// Connections the admin listener holds at once. Probes open one each and
+/// close it; a scraper keeps one. Its own count, so the main listener at
+/// `max_connections` never leaves a probe in the backlog (I-125).
+const ADMIN_CONNECTIONS: usize = 16;
+
+/// The admin listener: probes and metrics alone, over plain HTTP/1.1, which is
+/// what orchestrators and scrapers speak on a port that is not published.
+async fn admin_loop(listener: TcpListener, state: Arc<State>) {
+    let connections = Arc::new(tokio::sync::Semaphore::new(ADMIN_CONNECTIONS));
+    let mut builder = http1::Builder::new();
+    builder
+        .timer(TokioTimer::new())
+        .header_read_timeout(Some(IDLE));
+    let builder = Arc::new(builder);
+    loop {
+        let Ok(permit) = connections.clone().acquire_owned().await else {
+            return;
+        };
+        let Ok((stream, peer)) = listener.accept().await else {
+            continue;
+        };
+        let _ = stream.set_nodelay(true);
+        let state = state.clone();
+        let builder = builder.clone();
+        tokio::spawn(async move {
+            let _permit = permit;
+            let peer = peer.ip();
+            let svc = service_fn(move |req| serve_admin(req, state.clone(), peer));
+            let _ = builder.serve_connection(TokioIo::new(stream), svc).await;
+        });
+    }
+}
+
+async fn serve_admin(
+    req: hyper::Request<Incoming>,
+    state: Arc<State>,
+    peer: IpAddr,
+) -> Result<Response<Out>, Infallible> {
+    if let Some(answer) = describe(&req, &state) {
+        return Ok(answer);
+    }
+    // Readiness with checks: the one probe that runs on the worker loops.
+    if state
+        .health
+        .as_ref()
+        .is_some_and(|h| h.is_ready_path(req.uri().path()))
+    {
+        return handle(req, state, None, peer, &mut None).await;
+    }
+    let answer = crate::problem::response(StatusCode::NOT_FOUND, None);
+    Ok(refuse(req, answer).await)
 }
 
 async fn cors_and_handle(

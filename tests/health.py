@@ -16,15 +16,16 @@ the log.
 """
 import asyncio
 import json
+import socket
 import sys
 import threading
 import time
 from contextlib import asynccontextmanager
 
 import httpx
-from oxbrook import App, Health, Request
+from oxbrook import App, Health, Metrics, Request
 from oxbrook.auth import APIKey, Principal
-from oxbrook.testing import TestClient
+from oxbrook.testing import TestClient, free_port
 
 failures: list[str] = []
 SECRET = "postgres://admin:hunter2@db.internal/prod"
@@ -331,9 +332,126 @@ def draining_keeps_serving() -> None:
     check(time.monotonic() - started < 2, "drain_delay=0 delayed the stop")
 
 
+# ---- the admin port ---------------------------------------------------------------
+
+def hold(client: TestClient, count: int) -> list[socket.socket]:
+    """Fill the main port's connection slots with idle keep-alive connections,
+    each answered once and left open, as a pool of clients does."""
+    held = []
+    for _ in range(count):
+        conn = socket.create_connection((client.host, client.port), timeout=5)
+        conn.sendall(b"GET /items HTTP/1.1\r\nHost: x\r\n\r\n")
+        conn.recv(4096)
+        held.append(conn)
+    return held
+
+
+def probes_answer_at_the_connection_limit() -> None:
+    """I-125. A probe on the main port waits for a connection slot like any
+    request: two idle keep-alive connections under `max_connections=2` left a
+    liveness probe unanswered for three seconds, past the one second an
+    orchestrator gives it. On the admin port it has slots of its own."""
+    health = Health()
+
+    @health.check
+    async def database(state):
+        return True
+
+    app = App(health=health, metrics=Metrics())
+
+    @app.get("/items")
+    async def items(_: Request):
+        return [1]
+
+    with TestClient(app, workers=1, max_connections=2, admin_port=free_port()) as client:
+        admin = client.admin_url
+        held = hold(client, 2)
+        try:
+            with httpx.Client(base_url=admin, timeout=1) as probe:
+                for path, status in (("/livez", 200), ("/readyz", 200), ("/metrics", 200)):
+                    started = time.monotonic()
+                    try:
+                        r = probe.get(path)
+                        check(r.status_code == status,
+                              f"admin {path} at the limit: {r.status_code} {r.text[:80]}")
+                    except httpx.TimeoutException:
+                        failures.append(f"admin {path} timed out at the connection limit")
+                        continue
+                    took = time.monotonic() - started
+                    check(took < 0.5, f"admin {path} took {took:.2f}s at the connection limit")
+                ready = json.loads(probe.get("/readyz").text)
+                check(ready == {"status": "ready", "checks": {"database": "ok"}},
+                      f"readiness on the admin port did not run the checks: {ready}")
+                check(probe.get("/items").status_code == 404,
+                      "the admin port served an application route")
+                check(probe.head("/livez").status_code == 200, "HEAD /livez on the admin port")
+        finally:
+            for conn in held:
+                conn.close()
+
+        # The main port no longer serves them, so /metrics is not public.
+        for path in ("/livez", "/readyz", "/metrics"):
+            r = client.get(path)
+            check(r.status_code == 404, f"main port {path} with an admin port: {r.status_code}")
+        check(client.get("/items").status_code == 200, "the main port stopped serving routes")
+
+
+def admin_port_is_checked() -> None:
+    port = free_port()
+    for label, app, options, kind in [
+        ("an app with neither probes nor metrics", App(), {"admin_port": free_port()},
+         ValueError),
+        ("the main port", App(health=Health()), {"admin_port": port}, ValueError),
+        ("a host without a port", App(health=Health()), {"admin_host": "127.0.0.1"},
+         ValueError),
+        ("port 0", App(health=Health()), {"admin_port": 0}, ValueError),
+        ("a string", App(health=Health()), {"admin_port": "9000"}, TypeError),
+    ]:
+        try:
+            app.build_server("127.0.0.1", port, **options)
+            failures.append(f"admin_port accepted {label}")
+        except kind:
+            pass
+        except Exception as exc:
+            failures.append(f"admin_port with {label} raised {type(exc).__name__}: {exc}")
+
+    # A port already taken fails the start, not the first probe.
+    with socket.socket() as taken:
+        taken.bind(("127.0.0.1", 0))
+        taken.listen()
+        busy = taken.getsockname()[1]
+        try:
+            with TestClient(App(health=Health()), workers=1, admin_port=busy):
+                failures.append("the server started with its admin port taken")
+        except RuntimeError as exc:
+            check("admin" in str(exc), f"a taken admin port was reported as: {exc}")
+
+
+def draining_on_the_admin_port() -> None:
+    """Probes keep answering after the main listener stops, readiness saying
+    so, while requests drain."""
+    app = App(health=Health(drain_delay=1.0))
+    client = TestClient(app, workers=1, admin_port=free_port())
+    client.start()
+    try:
+        client._server.shutdown()
+        time.sleep(0.2)
+        r = httpx.get(f"{client.admin_url}/readyz", timeout=2)
+        check(r.status_code == 503 and json.loads(r.text) == {"status": "draining"},
+              f"admin readiness while draining: {r.status_code} {r.text}")
+        check(httpx.get(f"{client.admin_url}/livez", timeout=2).status_code == 200,
+              "admin liveness failed while draining")
+        client._thread.join(timeout=10)
+    finally:
+        client._server = None
+        client.stop()
+
+
 def main() -> None:
     for step in (configuration_is_checked, the_probes_answer, checks_run_on_every_loop,
-                 a_stalled_loop_fails, draining_keeps_serving):
+                 a_stalled_loop_fails, draining_keeps_serving,
+                 probes_answer_at_the_connection_limit, admin_port_is_checked,
+                 draining_on_the_admin_port):
         try:
             step()
             print(f"  {step.__name__}: ok")

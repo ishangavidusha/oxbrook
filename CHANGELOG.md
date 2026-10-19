@@ -7,6 +7,11 @@ release does not; changes that break existing code are listed under
 
 ## Unreleased
 
+- **An admin port for probes and metrics.** `run(admin_port=9000)`, or
+  `--admin-port`, serves the health probes and `/metrics` on a port of their
+  own, and only there. On the main port a probe waited for a connection slot
+  like any request, so a server at `max_connections` could leave a liveness
+  probe unanswered until it timed out and the instance was restarted.
 - **Resumable subscriptions.** `topic.subscribe(since=...)` on a durable topic
   replays what came after a stream id, then follows live messages with none
   missed or repeated across the switch, yielding `Message` objects that carry

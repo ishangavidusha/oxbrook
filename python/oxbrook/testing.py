@@ -68,6 +68,11 @@ class TestClient:
         secure = "s" if server_options.get("tls_cert") is not None else ""
         self.base_url = f"http{secure}://{host}:{self.port}"
         self.ws_url = f"ws{secure}://{host}:{self.port}"
+        #: Where probes and metrics are, given `admin_port=`; None otherwise.
+        self.admin_url: str | None = None
+        if server_options.get("admin_port") is not None:
+            admin_host = server_options.get("admin_host") or host
+            self.admin_url = f"http://{admin_host}:{server_options['admin_port']}"
         self.timeout = timeout
         self._options = server_options
         self._server: Any = None

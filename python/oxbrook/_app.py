@@ -861,6 +861,8 @@ class App:
         tls_cert: str | os.PathLike[str] | None = None,
         tls_key: str | os.PathLike[str] | None = None,
         http2: bool = True,
+        admin_port: int | None = None,
+        admin_host: str | None = None,
     ) -> None:
         """Serve until interrupted.
 
@@ -901,12 +903,24 @@ class App:
         single event loop, given to all of them together rather than to each.
         Raise it for handlers that mostly wait on a network or a disk; it
         bounds how many blocking calls run at once, and the rest queue.
+
+        `admin_port` serves the health probes and `/metrics` on a port of their
+        own, and only there: the main port answers 404 for them. A probe on
+        the main port waits for a connection like any request, so a server at
+        `max_connections` leaves it in the backlog, and a liveness probe that
+        times out there restarts an instance that is fine. The admin port
+        keeps its own few connections and speaks plain HTTP/1.1, which is
+        what orchestrators and scrapers use on a port not published to
+        clients. `admin_host` is the interface it binds, `host` by default.
+        Needs `health=` or `metrics=` on the app, since there is nothing else
+        to serve there.
         """
         server = self.build_server(
             host, port, workers, max_concurrency, max_body, request_timeout,
             shutdown_grace, max_connections, max_message, announce=True,
             blocking_threads=blocking_threads,
             tls_cert=tls_cert, tls_key=tls_key, http2=http2,
+            admin_port=admin_port, admin_host=admin_host,
         )
         try:
             server.serve()
@@ -930,6 +944,8 @@ class App:
         tls_cert: str | os.PathLike[str] | None = None,
         tls_key: str | os.PathLike[str] | None = None,
         http2: bool = True,
+        admin_port: int | None = None,
+        admin_host: str | None = None,
     ):
         """Prepare a server without starting it.
 
@@ -949,6 +965,7 @@ class App:
 
         if (tls_cert is None) != (tls_key is None):
             raise ValueError("tls_cert and tls_key are needed together")
+        admin = self._admin(host, port, admin_port, admin_host)
         tls = None if tls_cert is None else (os.fspath(tls_cert), os.fspath(tls_key))
         self._serving_tls = tls is not None
         workers = workers or default_workers()
@@ -1007,8 +1024,31 @@ class App:
             [(None if r.rate_limit is None else r.rate_limit._limiter, self._unlimited(r))
              for r in self.routes],
             tracing is not None,
+            admin,
         )
         return ServerHandle(core, lifecycle)
+
+    def _admin(
+        self, host: str, port: int, admin_port: int | None, admin_host: str | None
+    ) -> tuple[str, int] | None:
+        """The admin listener's address, checked before anything binds."""
+        if admin_port is None:
+            if admin_host is not None:
+                raise ValueError("admin_host needs admin_port")
+            return None
+        if isinstance(admin_port, bool) or not isinstance(admin_port, int):
+            raise TypeError("admin_port is a port number")
+        if not 0 < admin_port < 65536:
+            raise ValueError(f"admin_port {admin_port} is not a port number")
+        if self.health is None and self.metrics is None:
+            raise ValueError(
+                "admin_port serves health probes and metrics, and this app has "
+                "neither; pass health= or metrics= to App"
+            )
+        admin_host = host if admin_host is None else admin_host
+        if admin_port == port and admin_host == host:
+            raise ValueError("admin_port must differ from port")
+        return (admin_host, admin_port)
 
     def _unlimited(self, r: RouteInfo) -> bool:
         """Exempt from the app's rate limit: the readiness route, which is a
