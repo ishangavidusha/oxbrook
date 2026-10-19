@@ -16,13 +16,18 @@ Each of these was demonstrated before being fixed:
   won the race often enough to hide it, but paid for it in a connection that
   could not be reused. Asserted here through that second cost, which is
   visible on every platform: the connection stays alive.
+* The same, on a route that streams its body and answers without reading it:
+  a handler refusing first, or an authorizer's `401`. The body is pumped by
+  the future that waits for the reply, so it was dropped unread when the
+  reply came (I-093).
 """
 import socket
 import sys
 import threading
 
 import httpx
-from oxbrook import App, Request
+from oxbrook import App, BodyStream, HTTPError, Request
+from oxbrook.auth import APIKey
 
 PORT = 8807
 DEBUG_PORT = 8808
@@ -71,6 +76,16 @@ debug_app = App(openapi_url=None, docs_url=None, debug=True)
 @debug_app.get("/boom")
 async def debug_boom(_: Request):
     raise ValueError(f"connection failed for {SECRET}")
+
+
+@app.post("/upload")
+async def refuses_unread(_: Request, body: BodyStream):
+    raise HTTPError(403)  # before reading a byte of it
+
+
+@app.post("/locked", auth=APIKey(header="x-key", verify=lambda key: None))
+async def locked(_: Request, body: BodyStream):
+    return {"read": len(await body.read())}
 
 
 def check(failures, cond, msg):
@@ -122,12 +137,15 @@ def main() -> None:
         )
 
         # --- a refusal before the body is read keeps the connection ---
-        for label, request, status in (
-            ("no such route", b"POST /nope HTTP/1.1", b"404"),
-            ("wrong method", b"PUT /only-post HTTP/1.1", b"405"),
-            ("bad path parameter", b"POST /items/xyz HTTP/1.1", b"422"),
+        for label, request, status, size in (
+            ("no such route", b"POST /nope HTTP/1.1", b"404", 200_000),
+            ("wrong method", b"PUT /only-post HTTP/1.1", b"405", 200_000),
+            ("bad path parameter", b"POST /items/xyz HTTP/1.1", b"422", 200_000),
+            # Under the body limit, so these are not refusals about size.
+            ("a streaming handler refusing", b"POST /upload HTTP/1.1", b"403", LIMIT - 1024),
+            ("a streaming route's authorizer", b"POST /locked HTTP/1.1", b"401", LIMIT - 1024),
         ):
-            body = b"a" * 200_000
+            body = b"a" * size
             sock = socket.create_connection(("127.0.0.1", PORT), timeout=10)
             try:
                 sock.sendall(request + b"\r\nHost: x\r\nContent-Length: "
