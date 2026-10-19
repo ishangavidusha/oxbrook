@@ -278,16 +278,183 @@ async def trimming():
     await backend.close()
 
 
+async def resuming():
+    """`subscribe(since=...)` replays what came after a position, then follows
+    live, as Messages carrying their ids."""
+    from oxbrook import Message
+    from oxbrook._streams import Topic
+
+    backend = RedisBackend(URL, prefix=PREFIX)
+    topic = Topic("resume", backend=backend)
+    for i in range(5):
+        await topic.emit({"n": i})
+    ids = [ident for ident, _ in await topic.history(count=10)]
+
+    sub = topic.subscribe(since=ids[1])
+    got = [await asyncio.wait_for(sub.__anext__(), 5) for _ in range(3)]
+    check(all(isinstance(m, Message) for m in got), f"since= yielded {got}")
+    check([m.data["n"] for m in got] == [2, 3, 4], f"replay after #1 gave {got}")
+    check([m.id for m in got] == ids[2:], "replayed ids are not the stream's")
+
+    await topic.emit({"n": 5})
+    live = await asyncio.wait_for(sub.__anext__(), 5)
+    check(live.data == {"n": 5} and live.id not in ids, f"live after replay gave {live}")
+    await asyncio.sleep(0.3)
+    check(sub.pending == 0, f"{sub.pending} duplicate(s) after the replay met live delivery")
+    sub.close()
+
+    everything = topic.subscribe(since="0")
+    first = await asyncio.wait_for(everything.__anext__(), 5)
+    check(first.data == {"n": 0}, f'since="0" started at {first}')
+    everything.close()
+
+    fresh = topic.subscribe(since="$")
+    await topic.emit({"n": 6})
+    only = await asyncio.wait_for(fresh.__anext__(), 5)
+    check(isinstance(only, Message) and only.data == {"n": 6}, f'since="$" gave {only}')
+    fresh.close()
+
+    # A client inventing a Last-Event-ID gets new messages, not a failure.
+    invented = topic.subscribe(since="not-an-id")
+    await topic.emit({"n": 7})
+    got = await asyncio.wait_for(invented.__anext__(), 5)
+    check(got.data == {"n": 7}, f"a malformed since gave {got}")
+    invented.close()
+
+    try:
+        topic.subscribe(since=0)
+        failures.append("a non-string since was accepted")
+    except TypeError:
+        pass
+    try:
+        Topic("plain").subscribe(since="0")
+        failures.append("since= was accepted on an in-memory topic")
+    except RuntimeError:
+        pass
+
+    topic.close()
+    await backend.close()
+
+
+async def resuming_under_load():
+    """Nothing lost or repeated where the replay hands over to live delivery,
+    with another node and this one both publishing throughout."""
+    from oxbrook._streams import Topic
+
+    listener = RedisBackend(URL, prefix=PREFIX)
+    elsewhere = RedisBackend(URL, prefix=PREFIX)
+    topic = Topic("handover", backend=listener)
+    total, start = 400, 50
+
+    async def produce():
+        for i in range(total):
+            if i % 2:
+                await elsewhere.publish("handover", {"n": i})
+            else:
+                await topic.emit({"n": i})
+            if i % 25 == 0:
+                await asyncio.sleep(0)
+
+    producer = asyncio.create_task(produce())
+    while await listener.length("handover") <= start + 100:
+        await asyncio.sleep(0.005)
+    after = (await topic.history(count=start + 1))[start][0]
+    sub = topic.subscribe(since=after)
+    seen = []
+    try:
+        while len(seen) < total - start - 1:
+            seen.append((await asyncio.wait_for(sub.__anext__(), 10)).data["n"])
+    except TimeoutError:
+        pass
+    await producer
+    expected = list(range(start + 1, total))
+    wrong = next((a for a, b in zip(seen, expected, strict=False) if a != b), None)
+    check(seen == expected,
+          f"handover gave {len(seen)} messages; first gap or repeat near {wrong}")
+    await asyncio.sleep(0.3)
+    check(sub.pending == 0, f"{sub.pending} message(s) repeated after the handover")
+    topic.close()
+    await listener.close()
+    await elsewhere.close()
+
+
+def resuming_over_sse():
+    """The browser's side: ids on the wire, and Last-Event-ID resuming."""
+    from oxbrook import SSE, Request
+    from oxbrook.testing import TestClient
+
+    app = App(redis_url=URL)
+    app._backend = RedisBackend(URL, prefix=PREFIX)
+
+    @app.get("/feed")
+    async def feed(request: Request):
+        since = request.headers.get("last-event-id", "$")
+        return SSE(app.topic("resume-sse", durable=True).subscribe(since=since), ping=None)
+
+    async def publish(n: int) -> str:
+        backend = RedisBackend(URL, prefix=PREFIX)
+        try:
+            return await backend.publish("resume-sse", {"n": n})
+        finally:
+            await backend.close()
+
+    def events(lines, count):
+        out, current = [], {}
+        for line in lines:
+            if not line:
+                if current:
+                    out.append(current)
+                    current = {}
+                    if len(out) == count:
+                        return out
+                continue
+            name, _, value = line.partition(": ")
+            current[name] = value
+        return out
+
+    ids = [asyncio.run(publish(n)) for n in range(3)]
+    with TestClient(app) as client:
+        with client.stream("GET", "/feed", headers={"last-event-id": ids[0]},
+                           timeout=10) as r:
+            lines = r.iter_lines()
+            got = events(lines, 2)
+            check([e.get("id") for e in got] == ids[1:],
+                  f"resumed events carried ids {[e.get('id') for e in got]}")
+            check([e.get("data") for e in got] == ['{"n":1}', '{"n":2}'],
+                  f"resumed events were {got}")
+            later = asyncio.run(publish(3))
+            got = events(lines, 1)
+            check(got and got[0].get("id") == later, f"the live event after it was {got}")
+
+        with client.stream("GET", "/feed", timeout=10) as r:
+            later = asyncio.run(publish(4))
+            got = events(r.iter_lines(), 1)
+            check(got and got[0] == {"id": later, "data": '{"n":4}'},
+                  f"a first connection got {got}")
+    # The tail ran on a worker loop that has now closed. Left pending, it was
+    # destroyed with the loop, mid-read on its Redis connection.
+    check(app.topic("resume-sse", durable=True)._tail is None,
+          "the topic's tail outlived the server that started it")
+    asyncio.run(app._backend.close())
+
+
 async def main_async():
     for step in (persistence_and_history, cross_node, separate_process, at_least_once,
                  competing_consumers, claiming_from_a_dead_consumer,
-                 survives_a_dropped_connection, refusals, trimming):
+                 survives_a_dropped_connection, refusals, trimming, resuming,
+                 resuming_under_load):
         try:
             await asyncio.wait_for(step(), 60)
             print(f"  {step.__name__}: ok")
         except Exception as exc:
             failures.append(f"{step.__name__} raised {type(exc).__name__}: {exc}")
             print(f"  {step.__name__}: ERROR")
+    try:
+        await asyncio.to_thread(resuming_over_sse)
+        print("  resuming_over_sse: ok")
+    except Exception as exc:
+        failures.append(f"resuming_over_sse raised {type(exc).__name__}: {exc}")
+        print("  resuming_over_sse: ERROR")
 
 
 def main() -> None:

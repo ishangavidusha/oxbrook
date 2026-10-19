@@ -8,13 +8,16 @@ immediately, then every item the source yields becomes an event.
         return SSE(app.topic("orders").subscribe())
 
 The source is any async iterable, so a topic subscription is the common case
-but an async generator works just as well.
+but an async generator works just as well. A `Message` from a durable topic
+goes out with its stream id, so a subscription opened with `since` resumes
+where a reconnecting browser left off.
 """
 
 import re
 from dataclasses import dataclass
 from typing import Any
 
+from ._redis import Message
 from ._schema import encode
 
 #: `send_chunk` return codes, matching ChunkResult in src/responder.rs.
@@ -88,6 +91,8 @@ def format_event(item: Any) -> bytes:
     """Render one item in the `text/event-stream` wire format."""
     if isinstance(item, Event):
         data, name, ident, retry = item.data, item.event, item.id, item.retry
+    elif isinstance(item, Message):
+        data, name, ident, retry = item.data, None, item.id, None
     else:
         data, name, ident, retry = item, None, None, None
 

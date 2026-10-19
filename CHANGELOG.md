@@ -7,6 +7,15 @@ release does not; changes that break existing code are listed under
 
 ## Unreleased
 
+- **Resumable subscriptions.** `topic.subscribe(since=...)` on a durable topic
+  replays what came after a stream id, then follows live messages with none
+  missed or repeated across the switch, yielding `Message` objects that carry
+  their ids. An `SSE` response sends each id, so a feed that passes the
+  browser's `Last-Event-ID` header as `since` picks up after a reconnect
+  where it left off.
+- **A durable topic's tail resumes where it was after an outage**, so
+  messages other nodes published while this one was cut off from Redis
+  arrive late instead of not at all.
 - **Fixed: a durable topic's tail outlived the server.** Stopping a server
   left the task following Redis pending on a closed worker loop, where it was
   destroyed mid-read. Each worker now stops the tails it runs as it shuts

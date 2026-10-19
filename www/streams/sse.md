@@ -50,6 +50,21 @@ returns count: a client ends a line at `\r`, `\n` or `\r\n` alike.
     odd-looking id — it ends the event and everything after it is parsed as
     further events the application never sent.
 
+## Resuming after a reconnect
+
+A `Message` from a durable topic goes out with its stream id. A browser
+reconnecting after a dropped connection sends the last id back in
+`Last-Event-ID`, and a subscription opened with `since` replays from there:
+
+```python
+@app.get("/feed")
+async def feed(request: Request):
+    since = request.headers.get("last-event-id", "$")
+    return SSE(app.topic("orders", durable=True).subscribe(since=since))
+```
+
+See [Durable topics](durable.md#resuming) for what the replay guarantees.
+
 ## Keep-alive
 
 Idle connections get a comment line every `ping` seconds, 15 by default, so

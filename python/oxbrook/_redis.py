@@ -71,7 +71,14 @@ def _decode(raw: bytes | None, model: Any = None) -> Any:
 
 @dataclass(slots=True)
 class Message:
-    """One message from a consumer group, awaiting acknowledgement."""
+    """One message from a durable topic, with the stream id Redis gave it.
+
+    A consumer group yields these awaiting acknowledgement. A subscription
+    opened with `since` yields them too, so the reader knows where it got to;
+    there `ack()` does nothing, since a broadcast has nothing to acknowledge.
+    An `SSE` response sends the id as the event's `id:`, which is what a
+    reconnecting browser hands back as `Last-Event-ID`.
+    """
 
     id: str
     data: Any
@@ -302,6 +309,24 @@ class RedisBackend:
 
         Runs forever; cancel the task to stop it.
         """
+        async for ident, value, own in self.follow(topic, start):
+            if skip_own and own:
+                continue
+            yield ident, value
+
+    async def last_id(self, topic: str) -> str:
+        """The id of the newest entry, or "0-0" for an empty or missing stream:
+        a definite position to read on from, where "$" would be wherever the
+        stream happens to end when a read is next issued."""
+        entries = await self.client().xrevrange(self.key(topic), count=1)
+        if not entries:
+            return "0-0"
+        entry_id = entries[0][0]
+        return entry_id.decode() if isinstance(entry_id, bytes) else entry_id
+
+    async def follow(self, topic: str, start: str):
+        """Yield (id, value, own) for every entry after `start`, where `own`
+        says this node published it. Runs forever; cancel the task to stop it."""
         key = self.key(topic)
         last = start
         client = self.client()
@@ -310,10 +335,8 @@ class RedisBackend:
             for _stream, entries in result or ():
                 for entry_id, fields in entries:
                     last = entry_id
-                    if skip_own and fields.get(b"n") == self.node_id:
-                        continue
                     ident = entry_id.decode() if isinstance(entry_id, bytes) else entry_id
-                    yield ident, _decode(fields.get(b"d"))
+                    yield ident, _decode(fields.get(b"d")), fields.get(b"n") == self.node_id
 
     async def history(self, topic: str, count: int = 100, start: str = "-") -> list:
         """Recent messages, oldest first. For replay and for tests."""
