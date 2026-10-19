@@ -211,8 +211,14 @@ class Lifecycle:
 
     async def stop_worker(self, context: WorkerContext) -> None:
         """Called by each worker thread after its loop has stopped serving."""
-        if context.manager is not None:
-            await context.manager.__aexit__(None, None, None)
+        try:
+            if context.manager is not None:
+                await context.manager.__aexit__(None, None, None)
+        finally:
+            # A durable topic follows Redis from a task on whichever worker
+            # loop subscribed first; that loop is about to close.
+            for topic in list(self.app._topics.values()):
+                await topic._stop_tail()
 
 
 class ServerHandle:

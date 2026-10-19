@@ -7,6 +7,10 @@ release does not; changes that break existing code are listed under
 
 ## Unreleased
 
+- **Fixed: a durable topic's tail outlived the server.** Stopping a server
+  left the task following Redis pending on a closed worker loop, where it was
+  destroyed mid-read. Each worker now stops the tails it runs as it shuts
+  down, and `Topic.close()` cancels a tail from the loop it runs on.
 - **Logging out at the provider.** `OAuthLogin(provider_logout=True)` sends
   the person to the provider's `end_session_endpoint` on logout, so the next
   login asks for a password instead of going straight through.

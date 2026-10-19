@@ -400,9 +400,31 @@ class Topic:
         with self._lock:
             tail, self._tail = self._tail, None
         if tail is not None:
-            tail.cancel()
+            # A task is cancelled from its own loop, and the tail's is
+            # whichever worker subscribed first, not necessarily this one.
+            tail.get_loop().call_soon_threadsafe(tail.cancel)
         for sub in self._snapshot():
             sub.close()
+
+    async def _stop_tail(self) -> None:
+        """Stop the tail if it runs on the calling loop, and wait for it.
+
+        Called on every worker loop as the server stops: the loop is about
+        to close, and a task still pending on it would be destroyed with a
+        connection half-read. Subscriptions are left alone; their handlers
+        are ending with the server.
+        """
+        loop = asyncio.get_running_loop()
+        with self._lock:
+            tail = self._tail
+            if tail is None or tail.get_loop() is not loop:
+                return
+            self._tail = None
+        tail.cancel()
+        try:
+            await tail
+        except asyncio.CancelledError:
+            pass
 
     def __repr__(self) -> str:
         kind = "durable" if self.durable else "memory"
