@@ -371,8 +371,17 @@ async def resuming_under_load():
     wrong = next((a for a, b in zip(seen, expected, strict=False) if a != b), None)
     check(seen == expected,
           f"handover gave {len(seen)} messages; first gap or repeat near {wrong}")
-    await asyncio.sleep(0.3)
-    check(sub.pending == 0, f"{sub.pending} message(s) repeated after the handover")
+    # What the reader gets next is the test: nothing. The tail delivered live
+    # copies of entries the replay was still reading, and the reader may well
+    # have its last message before the replay has found the end, so copies can
+    # be buffered at this point; they must never come out.
+    try:
+        extra = await asyncio.wait_for(sub.__anext__(), 1.0)
+        failures.append(f"a message repeated after the handover: {extra}")
+    except TimeoutError:
+        pass
+    check(sub.pending == 0,
+          f"{sub.pending} copies still counted as pending after the handover")
     topic.close()
     await listener.close()
     await elsewhere.close()

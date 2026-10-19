@@ -264,12 +264,25 @@ class Subscription:
                 self._backlog.extend(page)
             elif live:
                 self._replaying = False
+                self._prune()
                 return None
             else:
                 await asyncio.sleep(0.01)
         ident, value = self._backlog.popleft()
         self._after = _position(ident)
         return Message(ident, value)
+
+    def _prune(self) -> None:
+        """Drop buffered live copies of what the replay already gave.
+
+        The tail delivers while the replay reads, so entries the replay
+        reaches can be waiting in the buffer as well. The reader would skip
+        them, but until then they inflate `pending`, which a caller reads as
+        messages it has yet to see.
+        """
+        after = self._after
+        with self._lock:
+            self._buffer = deque(m for m in self._buffer if _position(m.id) > after)
 
     async def __anext__(self) -> Any:
         if self._replaying:
