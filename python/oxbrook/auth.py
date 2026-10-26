@@ -41,6 +41,7 @@ import hmac
 import inspect
 import itertools
 import logging
+import re
 import secrets
 import time
 import types
@@ -479,6 +480,11 @@ _ASYMMETRIC = {
 #: live tokens at once; past that the oldest quarter is dropped and verified
 #: again when next seen.
 _CACHE_SIZE = 4096
+
+_GUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+
+#: Microsoft's tenant for personal accounts: `organizations` refuses it.
+_CONSUMERS = "9188040d-6c67-4c5b-b112-36a304b66dad"
 
 
 def _pyjwt(what: str) -> Any:
@@ -950,34 +956,71 @@ class OIDC(_Signed):
 
     @classmethod
     def entra(
-        cls, tenant_id: str, *, audience: Any, version: int = 2, **options: Any
+        cls,
+        tenant_id: str,
+        *,
+        audience: Any,
+        version: int = 2,
+        tenants: Iterable[str] | str | None = None,
+        **options: Any,
     ) -> "OIDC":
         """Microsoft Entra ID: `OIDC.entra(tenant_id, audience=api_client_id)`.
 
-        `tenant_id` is the directory's GUID; `common` and `organizations`
-        name no single issuer and are refused. Scopes from `scp`, app roles
+        `tenant_id` is the directory's GUID. Scopes from `scp`, app roles
         from `roles`. An API's access tokens are version 1 unless its manifest
         sets `requestedAccessTokenVersion` to 2, and the two have different
         issuers: pass `version=1` for those.
+
+        A multi-tenant API passes `"organizations"` (work and school accounts)
+        or `"common"` (those and personal Microsoft accounts) with `tenants`:
+        a list of the tenant ids whose users it serves, or `"any"` for every
+        tenant. Each token's issuer is checked against its own `tid` claim, so
+        a token is accepted only as coming from the tenant it names. The
+        caller's tenant is `principal.claims["tid"]`; with `tenants="any"`,
+        what one tenant's users may see of another's is the app's to decide.
         """
         tenant = _segment(tenant_id, "tenant_id")
-        if tenant.lower() in {"common", "organizations", "consumers"}:
-            raise ValueError(
-                f"{tenant!r} is not one tenant, so it names no issuer to check; pass the "
-                f"tenant id"
-            )
         defaults: dict[str, Any] = {
             "audience": audience, "scopes_claim": "scp", "roles_claim": "roles",
         }
+        if version not in (1, 2):
+            raise ValueError("Entra access tokens are version 1 or 2")
+        if tenant.lower() in {"common", "organizations"}:
+            if tenants is None:
+                raise ValueError(
+                    f"{tenant!r} accepts users from many tenants: pass tenants=[...], the "
+                    f"tenant ids to accept, or tenants='any'"
+                )
+            if version == 2:
+                template = "https://login.microsoftonline.com/{tenantid}/v2.0"
+                discovery = (f"https://login.microsoftonline.com/{tenant.lower()}/v2.0"
+                             f"/.well-known/openid-configuration")
+            else:
+                # Personal accounts are never issued version 1 tokens.
+                template = "https://sts.windows.net/{tenantid}/"
+                discovery = (f"https://login.microsoftonline.com/{tenant.lower()}"
+                             f"/.well-known/openid-configuration")
+            return _Tenants(
+                template, discovery, refuse_consumers=tenant.lower() == "organizations",
+                tenants=tenants, **{**defaults, **options},
+            )
+        if tenants is not None:
+            raise ValueError(
+                "tenants is for 'common' and 'organizations'; a tenant id already names "
+                "the one tenant to accept"
+            )
+        if tenant.lower() == "consumers":
+            raise ValueError(
+                "'consumers' is personal accounts alone; pass 'common' with tenants=[...] "
+                "to accept them"
+            )
         if version == 2:
             issuer = f"https://login.microsoftonline.com/{tenant}/v2.0"
-        elif version == 1:
+        else:
             issuer = f"https://sts.windows.net/{tenant}/"
             defaults["discovery_url"] = (
                 f"https://login.microsoftonline.com/{tenant}/.well-known/openid-configuration"
             )
-        else:
-            raise ValueError("Entra access tokens are version 1 or 2")
         return cls._preset(issuer, defaults, options)
 
     @classmethod
@@ -1039,6 +1082,56 @@ class OIDC(_Signed):
         return cls._preset(
             f"https://securetoken.google.com/{project}", {"audience": project}, options
         )
+
+
+class _Tenants(OIDC):
+    """Microsoft's `common` and `organizations`: one discovery document, whose
+    issuer is a template, for tokens that each name their own tenant.
+
+    The issuer cannot be checked against one value, so each token's is checked
+    against the template filled in with the token's own `tid`, which must be a
+    tenant id and, when `tenants` lists some, one of them. Both the login flow
+    (ID tokens) and `OIDC.entra` (access tokens) use it.
+    """
+
+    def __init__(self, template: str, discovery_url: str, *, refuse_consumers: bool,
+                 tenants: Iterable[str] | str = "any", **options: Any) -> None:
+        if tenants == "any":
+            allowed = None
+        elif isinstance(tenants, str):
+            raise TypeError("tenants is a list of tenant ids, or 'any'")
+        else:
+            allowed = frozenset(str(t).lower() for t in tenants)
+            wrong = sorted(t for t in allowed if not _GUID.fullmatch(t))
+            if wrong or not allowed:
+                raise ValueError(
+                    f"tenants are tenant ids (GUIDs), at least one; got {wrong or 'none'}"
+                )
+        super().__init__(template, discovery_url=discovery_url, **options)
+        self.template = template
+        self.refuse_consumers = refuse_consumers
+        self.tenants = allowed
+        # Checked per token below, against the token's own tenant.
+        self._issuers = None
+
+    def accepts_issuer(self, value: str) -> bool:
+        prefix, _, rest = self.template.partition("{tenantid}")
+        if not value.startswith(prefix) or not value.endswith(rest):
+            return False
+        tid = value[len(prefix): len(value) - len(rest)]
+        return (bool(_GUID.fullmatch(tid))
+                and not (self.refuse_consumers and tid == _CONSUMERS)
+                and (self.tenants is None or tid in self.tenants))
+
+    def _principal(self, claims: dict[str, Any]) -> Principal:
+        tid = claims.get("tid")
+        iss = claims.get("iss")
+        if (not isinstance(tid, str) or not isinstance(iss, str) or not self.accepts_issuer(iss)
+                or iss != self.template.replace("{tenantid}", tid)):
+            logger.info("jwt refused: issuer does not match an accepted tenant",
+                        extra={"scheme": self.name})
+            raise Unauthenticated("token invalid")
+        return super()._principal(claims)
 
 
 def _segment(value: Any, what: str) -> str:

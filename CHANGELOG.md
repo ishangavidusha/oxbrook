@@ -7,6 +7,10 @@ release does not; changes that break existing code are listed under
 
 ## Unreleased
 
+- **Multi-tenant Entra APIs.** `OIDC.entra("organizations", audience=...,
+  tenants=[...])` accepts access tokens from the listed tenants, or from any
+  with `tenants="any"`; `"common"` takes personal accounts too. Each token
+  must come from the issuer of the tenant it names.
 - **Fixed: a reply that could not be encoded was sent after its transaction
   committed.** A handler whose return value was not JSON-encodable answered
   `500` while the write it made through a dependency was kept. On a route

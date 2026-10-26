@@ -19,6 +19,9 @@ its own, because the attacks need an issuer that misbehaves on request:
 * A discovery document naming another issuer, and one too large to be one,
   are refused. Redirects never go from HTTPS to plain HTTP.
 * A verified token is remembered until its `exp`, and a refused one never is.
+* A multi-tenant issuer (Entra's `organizations`) accepts a token only from
+  the tenant it names, only a listed tenant when tenants are listed, and
+  never the personal-account tenant under `organizations`.
 * No token reaches a log line.
 
 The second half runs against a real Keycloak (`make up`): real tokens for
@@ -52,7 +55,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec, rsa
 from jwt.algorithms import ECAlgorithm, RSAAlgorithm
 from oxbrook import App, Depends, Request, _jwks
-from oxbrook.auth import JWT, OIDC, Principal, principal
+from oxbrook.auth import JWT, OIDC, Principal, _Tenants, principal
 from oxbrook.testing import TestClient
 
 KEYCLOAK = os.environ.get("OXBROOK_TEST_KEYCLOAK", "http://localhost:8199")
@@ -206,6 +209,14 @@ lying_issuer = Issuer(STANDARD_KEYS)
 lying_issuer.named_issuer = "https://someone-else.example.com"
 huge_issuer = Issuer(STANDARD_KEYS)
 huge_issuer.huge = True
+# One discovery document for many tenants, its issuer a template, as
+# Microsoft's `organizations` and `common` documents are.
+tenants_issuer = Issuer([_public_jwk(RSA_A, "a", "RS256")])
+TENANT_TEMPLATE = tenants_issuer.url + "/{tenantid}/v2.0"
+tenants_issuer.named_issuer = TENANT_TEMPLATE
+TENANT_A = "0b6f2d58-1d2e-4c1a-9a43-6d3c8a1e7f01"
+TENANT_B = "5e0c41a7-8f3b-4d2c-b1e6-2a9d7c4f8e02"
+CONSUMERS = "9188040d-6c67-4c5b-b112-36a304b66dad"
 
 with socket.socket() as probe:
     probe.bind(("127.0.0.1", 0))
@@ -224,6 +235,11 @@ small = OIDC(main_issuer.url, audience="api", cache_size=4, name="small")
 narrowed = OIDC(main_issuer.url, audience="api", algorithms=["RS256"], name="narrowed")
 cognito_like = OIDC(main_issuer.url, audience=None, name="cognito_like",
                     claims={"token_use": "access", "client_id": ["web", "cli"]})
+listed_tenants = _Tenants(TENANT_TEMPLATE, tenants_issuer.url + "/.well-known/openid-configuration",
+                          refuse_consumers=True, tenants=[TENANT_A.upper()], audience="api",
+                          name="listed")
+any_tenant = _Tenants(TENANT_TEMPLATE, tenants_issuer.url + "/.well-known/openid-configuration",
+                      refuse_consumers=True, tenants="any", audience="api", name="any_tenant")
 
 app = App()
 
@@ -238,7 +254,8 @@ def describe(who: Principal | None):
 for path, scheme in (("/main", provider), ("/rotating", rotating), ("/withdrawing", withdrawing),
                      ("/flaky", flaky), ("/slow", slow), ("/lying", lying), ("/huge", huge),
                      ("/down", down), ("/small", small), ("/narrowed", narrowed),
-                     ("/cognito", cognito_like)):
+                     ("/cognito", cognito_like), ("/listed", listed_tenants),
+                     ("/any-tenant", any_tenant)):
     def route(scheme=scheme):
         async def handler(_: Request, who=Depends(principal)):
             return describe(who)
@@ -281,7 +298,30 @@ def construction_rules() -> None:
     check(refused(lambda: OIDC("https://x.example.com", audience="a", cache_size=-1)),
           "a negative cache size was accepted")
     check(refused(lambda: OIDC.entra("common", audience="a")),
-          "Entra's multi-tenant 'common' was accepted as an issuer")
+          "Entra's multi-tenant 'common' was accepted without saying which tenants")
+    check(refused(lambda: OIDC.entra("consumers", audience="a")),
+          "Entra's 'consumers' was accepted as one tenant")
+    check(refused(lambda: OIDC.entra("tid", audience="a", tenants="any")),
+          "tenants= was accepted beside a single tenant id")
+    for wrong in ([], ["acme.onmicrosoft.com"], "all"):
+        check(refused(lambda w=wrong: OIDC.entra("organizations", audience="a", tenants=w),
+                      (ValueError, TypeError)),
+              f"tenants={wrong!r} was accepted")
+    check(refused(lambda: OIDC.entra("organizations", audience="a", tenants="any", version=3)),
+          "a third token version was accepted")
+    orgs = OIDC.entra("Organizations", audience="a", tenants=[TENANT_A])
+    check(orgs.template == "https://login.microsoftonline.com/{tenantid}/v2.0"
+          and orgs.discovery_url == "https://login.microsoftonline.com/organizations/v2.0"
+          "/.well-known/openid-configuration"
+          and orgs.refuse_consumers and orgs.tenants == {TENANT_A}
+          and orgs.scopes_claim == "scp" and orgs.roles_claim == "roles",
+          f"entra organizations: {orgs.template} {orgs.discovery_url}")
+    common_v1 = OIDC.entra("common", audience="a", tenants="any", version=1)
+    check(common_v1.template == "https://sts.windows.net/{tenantid}/"
+          and common_v1.discovery_url
+          == "https://login.microsoftonline.com/common/.well-known/openid-configuration"
+          and not common_v1.refuse_consumers and common_v1.tenants is None,
+          f"entra common v1: {common_v1.template} {common_v1.discovery_url}")
     check(refused(lambda: OIDC.auth0("https://acme.auth0.com", audience="a")),
           "auth0 took a URL where it wants a domain")
 
@@ -333,6 +373,36 @@ def issuer_tokens_are_accepted(c: TestClient) -> None:
     check(r.status_code == 403, f"a scope named like the role passed for it: {r.status_code}")
     check(provider.keys.fetches == 1 and main_issuer.discoveries == 1,
           f"{provider.keys.fetches} fetches, {main_issuer.discoveries} discoveries for one issuer")
+
+
+def tenants_name_their_own_issuer(c: TestClient) -> None:
+    def token(tid, iss_tid=None, **overrides):
+        iss = TENANT_TEMPLATE.replace("{tenantid}", iss_tid or tid)
+        return signed(tenants_issuer, iss=iss, tid=tid, **overrides)
+
+    r = c.get("/listed", headers=bearer(token(TENANT_A)))
+    check(r.status_code == 200 and r.json()["subject"] == "u1",
+          f"a listed tenant's token answered {r.status_code} {r.text}")
+    for label, tok in (
+        ("an unlisted tenant", token(TENANT_B)),
+        ("a token whose issuer names another tenant", token(TENANT_A, iss_tid=TENANT_B)),
+        ("a token with no tid", signed(tenants_issuer,
+                                       iss=TENANT_TEMPLATE.replace("{tenantid}", TENANT_A))),
+        ("the template itself as issuer", signed(tenants_issuer, iss=TENANT_TEMPLATE,
+                                                 tid="{tenantid}")),
+    ):
+        r = c.get("/listed", headers=bearer(tok))
+        check(r.status_code == 401, f"{label} answered {r.status_code}")
+
+    r = c.get("/any-tenant", headers=bearer(token(TENANT_B)))
+    check(r.status_code == 200, f"any tenant refused another tenant: {r.status_code}")
+    for label, tok in (
+        ("the personal-account tenant under organizations", token(CONSUMERS)),
+        ("a tenant that is not an id", token("contoso")),
+        ("a token whose issuer names another tenant", token(TENANT_A, iss_tid=TENANT_B)),
+    ):
+        r = c.get("/any-tenant", headers=bearer(tok))
+        check(r.status_code == 401, f"any tenant: {label} answered {r.status_code}")
 
 
 def algorithms_are_the_providers(c: TestClient) -> None:
@@ -942,7 +1012,8 @@ def main() -> None:
     print("issuer under test control")
     run([construction_rules], None)
     with TestClient(app) as c:
-        run([issuer_tokens_are_accepted, algorithms_are_the_providers, claims_are_checked,
+        run([issuer_tokens_are_accepted, tenants_name_their_own_issuer,
+             algorithms_are_the_providers, claims_are_checked,
              one_fetch_for_every_loop, unknown_keys_are_rate_limited,
              withdrawn_keys_stop_working, an_unreachable_provider_is_503,
              bad_documents_are_refused, verified_tokens_are_remembered,

@@ -16,7 +16,6 @@ import asyncio
 import base64
 import hashlib
 import hmac
-import re
 import secrets
 import time
 import urllib.parse
@@ -28,6 +27,8 @@ from . import _jwks
 from ._errors import HTTPError
 from ._response import Response
 from .auth import (
+    _CONSUMERS,
+    _GUID,
     OIDC,
     Forbidden,
     SessionAuth,
@@ -36,6 +37,7 @@ from .auth import (
     _call,
     _frozen,
     _segment,
+    _Tenants,
     logger,
 )
 
@@ -58,10 +60,6 @@ _RESERVED = frozenset({
 })
 
 _LOOPBACK = {"localhost", "127.0.0.1", "::1"}
-_GUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
-
-#: Microsoft's tenant for personal accounts: an `organizations` login refuses it.
-_CONSUMERS = "9188040d-6c67-4c5b-b112-36a304b66dad"
 
 
 class LoginFailed(HTTPError):
@@ -384,9 +382,10 @@ class OAuthLogin:
         }
         discovery = f"{authority}/{tenant}/v2.0/.well-known/openid-configuration"
         if tenant in ("common", "organizations"):
-            verifier: OIDC = _AnyTenant(
-                authority, discovery, refuse_consumers=tenant == "organizations",
-                audience=client_id, **verifier_options,
+            verifier: OIDC = _Tenants(
+                f"{authority}/{{tenantid}}/v2.0", discovery,
+                refuse_consumers=tenant == "organizations", audience=client_id,
+                **verifier_options,
             )
         else:
             if tenant != "consumers" and not _GUID.fullmatch(tenant):
@@ -837,35 +836,6 @@ class _GitHub(OAuthLogin):
             claims=_frozen(user),
             tokens=_frozen(tokens),
         )
-
-
-class _AnyTenant(OIDC):
-    """Microsoft's `common` and `organizations`: one discovery document, whose
-    issuer is a template, for ID tokens that each name their own tenant."""
-
-    def __init__(self, authority: str, discovery_url: str, *, refuse_consumers: bool,
-                 **options: Any) -> None:
-        self.template = f"{authority}/{{tenantid}}/v2.0"
-        super().__init__(self.template, discovery_url=discovery_url, **options)
-        self.refuse_consumers = refuse_consumers
-        # Checked per token below, against the token's own tenant.
-        self._issuers = None
-
-    def accepts_issuer(self, value: str) -> bool:
-        prefix, _, rest = self.template.partition("{tenantid}")
-        if not value.startswith(prefix) or not value.endswith(rest):
-            return False
-        tid = value[len(prefix): len(value) - len(rest)]
-        return bool(_GUID.fullmatch(tid)) and not (self.refuse_consumers and tid == _CONSUMERS)
-
-    def _principal(self, claims: dict[str, Any]) -> Any:
-        tid = claims.get("tid")
-        iss = claims.get("iss")
-        if (not isinstance(tid, str) or not isinstance(iss, str) or not self.accepts_issuer(iss)
-                or iss != self.template.replace("{tenantid}", tid)):
-            logger.info("jwt refused: issuer does not match tenant", extra={"scheme": self.name})
-            raise Unauthenticated("token invalid")
-        return super()._principal(claims)
 
 
 __all__ = ["Login", "LoginFailed", "OAuthLogin"]

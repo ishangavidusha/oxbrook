@@ -330,10 +330,23 @@ Where each one differs:
   clients that call it, or in a client scope they share. Without one, every
   token is refused for its audience. A client's own roles, rather than the
   realm's, are `roles_claim=("resource_access", "<client>", "roles")`.
-- **Entra ID** takes the tenant's id; `common` and `organizations` name no one
-  issuer and are refused. An API receives version 1 tokens, with issuer
-  `https://sts.windows.net/<tenant>/`, unless its manifest sets
+- **Entra ID** takes the tenant's id. An API receives version 1 tokens, with
+  issuer `https://sts.windows.net/<tenant>/`, unless its manifest sets
   `requestedAccessTokenVersion` to 2: pass `version=1` for those.
+
+  A multi-tenant API passes `organizations`, or `common` to take personal
+  Microsoft accounts too, and says which tenants it serves:
+
+  ```python
+  auth = OIDC.entra("organizations", audience=API_CLIENT_ID,
+                    tenants=["<tenant id>", "<tenant id>"])   # or tenants="any"
+  ```
+
+  Those names have no one issuer, so each token's issuer is checked against
+  the tenant the token names in `tid`, which must be one of `tenants`. The
+  caller's tenant is `principal.claims["tid"]`. With `tenants="any"`, every
+  organisation's users are let in, and keeping one tenant's data from
+  another's is the app's job.
 - **Okta** tokens are checked for a custom authorization server, `default`
   unless `server=` names another. The org server's access tokens are for Okta
   alone.
