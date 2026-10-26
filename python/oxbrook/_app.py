@@ -545,15 +545,20 @@ class App:
         inner = list(route.middleware)
         chain = self._middleware + inner
         mapped = bool(self._exception_handlers or route.handlers)
+        shared = self._shared_limits(route)
         if route.auth is None:
+            if shared:
+                # Where the gate would be: inside the app's middleware, so the
+                # access log sees the 429, and outside the routers'.
+                chain = [*self._middleware, _limits.shared_link(shared), *inner]
             if not chain and not mapped:
                 return target
             return self._layer(target, chain, self._handlers(route))
         limits = self._caller_limits(route)
         if self._resource_metadata is not None and route.path == self.mcp_url:
-            gate = _auth.ResourceGate(route.auth, self._resource_metadata, limits)
+            gate = _auth.ResourceGate(route.auth, self._resource_metadata, limits, shared)
         else:
-            gate = _auth.Gate(route.auth, limits)
+            gate = _auth.Gate(route.auth, limits, shared)
         if socket:
             link = gate.socket_middleware()
         elif not chain and not mapped:
@@ -578,7 +583,8 @@ class App:
         else:
             # The route's own limit only: the app's was spent by the `/mcp`
             # request that carried the call.
-            link = _auth.Gate(route.auth, self._caller_limits(route, app=False)).middleware()
+            link = _auth.Gate(route.auth, self._caller_limits(route, app=False),
+                              self._shared_limits(route, app=False)).middleware()
         return self._layer(route.target, [link, *route.middleware], self._handlers(route))
 
     def _caller_limits(self, route: RouteInfo, app: bool = True) -> tuple:
@@ -590,6 +596,16 @@ class App:
         if route.rate_limit is not None:
             limits.append(route.rate_limit)
         return tuple(limit for limit in limits if limit.key == "principal")
+
+    def _shared_limits(self, route: RouteInfo, app: bool = True) -> tuple:
+        """The limits whose budget is shared through Redis, which a worker
+        loop spends from after the server's in-memory check has passed."""
+        limits = []
+        if app and self.rate_limit is not None and not self._unlimited(route):
+            limits.append(self.rate_limit)
+        if route.rate_limit is not None:
+            limits.append(route.rate_limit)
+        return tuple(limit for limit in limits if limit.shared is not None)
 
     def per_worker(self, total: int) -> int:
         """One worker loop's share of a process-wide budget.
@@ -1115,7 +1131,9 @@ class App:
             recheck = self._recheck(r)
             handler = r.target if r.auth is None else _auth.receive(r.target, *recheck)
             authorizer = r.authorizer
-            if authorizer is None and r.auth is not None:
+            if authorizer is None and (r.auth is not None or self._shared_limits(r)):
+                # Something to run before the handshake: the gate, or a
+                # shared limit's spend.
                 authorizer = make_gate(_auth.accept)
             gate = None if authorizer is None else self._compose(authorizer, r, socket=True)
             return (r.method, r.path, handler, [p.as_spec() for p in r.params], True, gate,

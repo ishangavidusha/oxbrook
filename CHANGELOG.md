@@ -7,6 +7,11 @@ release does not; changes that break existing code are listed under
 
 ## Unreleased
 
+- **Rate limits across instances.** `RateLimit(..., redis_url=..., name=...)`
+  keeps the budget in Redis, so every process behind a load balancer spends
+  from one budget instead of each allowing the full limit. The in-memory check
+  still runs first. If Redis cannot be reached, requests are let through and
+  the failure logged.
 - **Wheels for Windows on ARM.** `win_arm64` wheels on both interpreter
   builds, built and tested on an ARM runner.
 - **Fixed: bursts of durable-topic publishes failed.** More than a hundred

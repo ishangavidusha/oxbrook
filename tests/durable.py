@@ -581,6 +581,149 @@ def tickets_across_processes():
         check(exc.status == 503, f"redeeming with Redis unreachable raised {exc.status}")
 
 
+def shared_rate_limits():
+    """A limit shared through Redis is one budget across processes."""
+    import contextlib
+    import logging
+
+    import websockets
+    from oxbrook import RateLimit, Request
+    from oxbrook.auth import APIKey, Principal
+    from oxbrook.testing import TestClient
+
+    run = uuid.uuid4().hex[:8]
+    owners = {APIKey.digest("alice-1"): "alice", APIKey.digest("alice-2"): "alice",
+              APIKey.digest("bob-1"): "bob"}
+
+    def lookup(digest):
+        subject = owners.get(digest)
+        return None if subject is None else Principal(subject)
+
+    def node(url=URL, everywhere=True):
+        """One process's worth: its own RateLimits, so its own in-memory
+        budgets, sharing only the names."""
+        auth = APIKey(header="x-api-key", verify=lookup)
+        limit = RateLimit("1/minute", burst=3, redis_url=url, name=f"app-{run}")
+        app = App(trusted_proxies=["127.0.0.1"], rate_limit=limit if everywhere else None)
+
+        @app.get("/hello")
+        async def hello(_: Request):
+            return {}
+
+        @app.get("/keyed", rate_limit=RateLimit("1/minute", burst=2, key="header:x-tenant",
+                                                 redis_url=url, name=f"tenant-{run}"))
+        async def keyed(_: Request):
+            return {}
+
+        @app.get("/me", auth=auth, rate_limit=RateLimit(
+            "1/minute", burst=2, key="principal", redis_url=url, name=f"me-{run}"))
+        async def me(_: Request):
+            return {}
+
+        @app.get("/tool", tool=True, rate_limit=RateLimit(
+            "1/minute", burst=2, redis_url=url, name=f"tool-{run}"))
+        async def tool(_: Request):
+            return {"ok": True}
+
+        @app.websocket("/ws", rate_limit=RateLimit(
+            "1/minute", burst=1, redis_url=url, name=f"ws-{run}"))
+        async def ws(_: Request, sock):
+            await sock.send("hi")
+
+        return app
+
+    def at(ip, **headers):
+        return {"x-forwarded-for": ip, **headers}
+
+    async def opens(client, ip):
+        try:
+            async with client.websocket("/ws", headers=at(ip)) as sock:
+                await sock.recv()
+                return 101
+        except websockets.InvalidStatus as exc:
+            return exc.response.status_code
+
+    with TestClient(node()) as a, TestClient(node()) as b:
+        # The app's budget of three, spent across both nodes: alone, each
+        # would allow three.
+        got = [c.get("/hello", headers=at("192.0.2.1")).status_code for c in (a, b, a, b)]
+        check(got == [200, 200, 200, 429], f"one client across two nodes answered {got}")
+        refused = b.get("/hello", headers=at("192.0.2.1"))
+        check(refused.headers.get("retry-after") is not None,
+              "a shared limit's 429 had no Retry-After")
+        check(a.get("/hello", headers=at("192.0.2.2")).status_code == 200,
+              "another address was limited by the first one's budget")
+        # A route with auth= spends the app's shared budget in its gate.
+        bob = {"x-api-key": "bob-1"}
+        got = [a.get("/hello", headers=at("192.0.2.3")).status_code,
+               a.get("/hello", headers=at("192.0.2.3")).status_code,
+               b.get("/me", headers=at("192.0.2.3", **bob)).status_code,
+               a.get("/me", headers=at("192.0.2.3", **bob)).status_code]
+        check(got == [200, 200, 200, 429],
+              f"an authenticated route did not spend the app's shared budget: {got}")
+
+    # The routes' own limits, on nodes without the app's, which every /mcp
+    # request of the tool calls would otherwise spend.
+    with TestClient(node(everywhere=False)) as a, TestClient(node(everywhere=False)) as b:
+        got = [c.get("/keyed", headers=at(f"192.0.2.{10 + i}", **{"x-tenant": "t1"})).status_code
+               for i, c in enumerate((a, b, a))]
+        check(got == [200, 200, 429], f"one tenant from three addresses answered {got}")
+        check(b.get("/keyed", headers=at("192.0.2.13", **{"x-tenant": "t2"})).status_code == 200,
+              "another tenant was limited by the first one's budget")
+
+        got = [c.get("/me", headers=at(f"192.0.2.{20 + i}", **{"x-api-key": k})).status_code
+               for i, (c, k) in enumerate(((a, "alice-1"), (b, "alice-2"), (b, "alice-1")))]
+        check(got == [200, 200, 429], f"one caller with two keys on two nodes answered {got}")
+        check(a.get("/me", headers=at("192.0.2.20", **{"x-api-key": "bob-1"})).status_code == 200,
+              "bob was limited by alice's budget")
+
+        check(a.get("/tool", headers=at("192.0.2.30")).status_code == 200, "HTTP call refused")
+        check(b.call_tool("tool", {}, headers=at("192.0.2.30")) == {"ok": True},
+              "a tool call within the shared budget failed")
+        result = a.mcp("tools/call", {"name": "tool", "arguments": {}}, headers=at("192.0.2.30"))
+        text = "".join(p.get("text", "") for p in result.get("content", []))
+        check(result.get("isError") is True and "429" in text,
+              f"a tool call past the shared budget was not refused: {result!r}")
+
+        got = [asyncio.run(opens(c, "192.0.2.40")) for c in (a, b)]
+        check(got == [101, 429], f"one client opening a socket on two nodes got {got}")
+
+    # Many spends at once on one loop, more than its client has connections:
+    # every one counted, none let through for want of a connection.
+    async def burst():
+        limit = RateLimit("1/minute", burst=100, redis_url=URL, name=f"burst-{run}")
+        waits = await asyncio.gather(*(limit.shared.take(b"one") for _ in range(300)))
+        await limit.shared._backend.close()
+        return sum(wait is None for wait in waits)
+
+    allowed = asyncio.run(burst())
+    check(allowed == 100, f"300 spends at once from a budget of 100 allowed {allowed}")
+
+    # Redis unreachable: let through, and said once rather than per request.
+    records = []
+
+    class Keep(logging.Handler):
+        def emit(self, record):
+            records.append(record)
+
+    handler = Keep()
+    logging.getLogger("oxbrook.limits").addHandler(handler)
+    try:
+        with TestClient(node("redis://127.0.0.1:1")) as c:
+            got = [c.get("/hello", headers=at("192.0.2.50")).status_code for _ in range(3)]
+    finally:
+        logging.getLogger("oxbrook.limits").removeHandler(handler)
+    check(got == [200, 200, 200], f"with Redis unreachable a shared limit answered {got}")
+    check(len(records) == 1, f"an unreachable Redis was logged {len(records)} times, not once")
+
+    with contextlib.suppress(ValueError):
+        RateLimit("1/minute", redis_url=URL)
+        failures.append("a shared limit without a name was accepted")
+    with contextlib.suppress(ValueError):
+        RateLimit("1/minute", name="x")
+        failures.append("a name without redis_url was accepted")
+
+
 async def main_async():
     for step in (persistence_and_history, cross_node, separate_process, a_burst_of_publishes,
                  at_least_once, competing_consumers, claiming_from_a_dead_consumer,
@@ -592,7 +735,7 @@ async def main_async():
         except Exception as exc:
             failures.append(f"{step.__name__} raised {type(exc).__name__}: {exc}")
             print(f"  {step.__name__}: ERROR")
-    for step in (resuming_over_sse, tickets_across_processes):
+    for step in (resuming_over_sse, tickets_across_processes, shared_rate_limits):
         try:
             await asyncio.to_thread(step)
             print(f"  {step.__name__}: ok")

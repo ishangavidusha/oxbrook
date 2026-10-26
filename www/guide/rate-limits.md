@@ -141,12 +141,38 @@ the server is also reachable directly lets anyone choose their own address.
 
 The same address is `request.client` in a handler.
 
-## Limits of the limits
+## Across instances
 
 Budgets are kept in memory, in each process. Behind a load balancer with
-several instances, each counts on its own, so a client can make up to the
-limit times the number of instances; set the limit with that in mind. A
-restart starts every budget afresh.
+several instances each counts on its own, so a client can make up to the
+limit times the number of instances, and a restart starts every budget
+afresh. A limit kept in Redis is one budget everywhere:
+
+```python
+api = RateLimit("600/minute", redis_url="redis://redis:6379", name="api")
+app = App(rate_limit=api)
+```
+
+Every process that declares a limit with the same `name` spends from the same
+budget, by the same key: address, header or caller. `name` is required, so two
+limits that happen to share a rate never share a budget by accident. Redis is
+an optional dependency: `pip install 'oxbrook[redis]'`.
+
+Each process still checks its own in-memory budget first, before a worker loop
+sees the request, so a client already over the limit there costs nothing
+more. A request that passes then spends from the shared budget on a worker
+loop, before the handler runs and before the body of an authenticated route
+is read. That is one Redis round trip per allowed request, and it means the
+shared half applies to requests that reach a route: an unknown path or a
+static file is counted only by the in-memory half. The budget is kept against
+Redis's clock, so instances whose clocks disagree still agree on it.
+
+If Redis cannot be reached, the request is let through and the failure is
+logged, at most once a minute per limit. A limit that refused every request
+while Redis was down would turn a Redis outage into an outage of the whole
+API; the in-memory half still applies meanwhile.
+
+## Limits of the limits
 
 Memory follows the clients seen recently, not every client ever seen: a
 client's entry is dropped once its budget is full again.

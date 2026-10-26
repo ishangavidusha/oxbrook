@@ -20,6 +20,7 @@ use hyper::header::{HeaderMap, HeaderName, HeaderValue, RETRY_AFTER};
 use hyper::{Response, StatusCode};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
+use pyo3::types::PyBytes;
 
 use crate::metrics::Refusal;
 use crate::request::Request;
@@ -110,25 +111,32 @@ impl Limit {
 
     fn key(&self, client: Option<IpAddr>, headers: &HeaderMap) -> u64 {
         let mut hasher = self.seed.build_hasher();
+        self.write_key(client, headers, &mut hasher);
+        hasher.finish()
+    }
+
+    /// What a request is keyed on, written into `out`: the seeded hash here,
+    /// or the bytes themselves for a limit shared through Redis. One function
+    /// for both, so the two can never disagree about who a client is.
+    fn write_key(&self, client: Option<IpAddr>, headers: &HeaderMap, out: &mut impl Hasher) {
         match &self.key {
             Key::Header(name) if headers.contains_key(name) => {
-                hasher.write_u8(1);
+                out.write_u8(1);
                 for value in headers.get_all(name) {
-                    hasher.write(value.as_bytes());
-                    hasher.write_u8(0);
+                    out.write(value.as_bytes());
+                    out.write_u8(0);
                 }
             }
             _ => {
-                hasher.write_u8(0);
+                out.write_u8(0);
                 match client.map(grouped) {
-                    Some(IpAddr::V4(v4)) => hasher.write(&v4.octets()),
-                    Some(IpAddr::V6(v6)) => hasher.write(&v6.octets()),
+                    Some(IpAddr::V4(v4)) => out.write(&v4.octets()),
+                    Some(IpAddr::V6(v6)) => out.write(&v6.octets()),
                     // A request with no address at all, built by hand.
                     None => {}
                 }
             }
         }
-        hasher.finish()
     }
 
     /// Whether this limit is keyed on the authenticated caller, and so left
@@ -149,10 +157,7 @@ impl Limit {
     /// subject from ever sharing a key with an address.
     pub fn take_principal(&self, scheme: &str, subject: &str) -> Result<(), Duration> {
         let mut hasher = self.seed.build_hasher();
-        hasher.write_u8(2);
-        hasher.write(scheme.as_bytes());
-        hasher.write_u8(0);
-        hasher.write(subject.as_bytes());
+        write_principal(scheme, subject, &mut hasher);
         self.spend(hasher.finish())
     }
 
@@ -185,6 +190,28 @@ impl Limit {
             .iter()
             .map(|s| s.lock().unwrap_or_else(|e| e.into_inner()).spent.len())
             .sum()
+    }
+}
+
+fn write_principal(scheme: &str, subject: &str, out: &mut impl Hasher) {
+    out.write_u8(2);
+    out.write(scheme.as_bytes());
+    out.write_u8(0);
+    out.write(subject.as_bytes());
+}
+
+/// Collects what a key is written from, for a limit shared through Redis,
+/// where every process must arrive at the same key and a seeded hash would
+/// not. Hashed again in Python before it becomes a Redis key.
+#[derive(Default)]
+struct Material(Vec<u8>);
+
+impl Hasher for Material {
+    fn finish(&self) -> u64 {
+        0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        self.0.extend_from_slice(bytes);
     }
 }
 
@@ -264,6 +291,27 @@ impl Limiter {
             .take_principal(scheme, subject)
             .err()
             .map(|wait| wait.as_secs_f64())
+    }
+
+    /// What this request is keyed on, as bytes every process derives alike:
+    /// the key of a limit shared through Redis.
+    fn shared_key<'py>(&self, py: Python<'py>, request: &Request) -> Bound<'py, PyBytes> {
+        let mut out = Material::default();
+        self.inner
+            .write_key(request.client, &request.headers, &mut out);
+        PyBytes::new(py, &out.0)
+    }
+
+    /// The shared key for the caller a scheme found.
+    #[staticmethod]
+    fn shared_principal_key<'py>(
+        py: Python<'py>,
+        scheme: &str,
+        subject: &str,
+    ) -> Bound<'py, PyBytes> {
+        let mut out = Material::default();
+        write_principal(scheme, subject, &mut out);
+        PyBytes::new(py, &out.0)
     }
 
     /// Keys currently tracked, for tests of the sweep.

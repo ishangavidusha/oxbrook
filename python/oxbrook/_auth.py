@@ -121,30 +121,42 @@ class Gate:
     caller is. Every request spends from them exactly once: by principal when
     one was found, by address when none was, including a credential that
     failed, so guessing tokens is limited too.
+
+    `shared` are the route's limits whose budget is kept in Redis. Those keyed
+    on the address or a header are spent first, before authenticating, as the
+    server spends their in-memory half before a worker sees the request; those
+    keyed on the caller are spent with `limits`.
     """
 
-    __slots__ = ("anonymous", "limits", "policy", "schemes")
+    __slots__ = ("anonymous", "first", "limits", "policy", "schemes", "shared")
 
-    def __init__(self, policy: Any, limits: tuple = ()) -> None:
+    def __init__(self, policy: Any, limits: tuple = (), shared: tuple = ()) -> None:
         self.policy = policy
         self.schemes, self.anonymous = plan(policy)
         self.limits = tuple(limit._limiter for limit in limits)
+        self.first = tuple(limit for limit in shared if limit.key != "principal")
+        self.shared = tuple(limit for limit in shared if limit.key == "principal")
 
-    def spend(self, request: Any, found: Principal | None) -> None:
+    async def spend(self, request: Any, found: Principal | None) -> None:
         """Take one request from each limit, or raise its `429`."""
         for limiter in self.limits:
             wait = limiter.take(request) if found is None else \
                 limiter.take_principal(found.scheme, found.subject)
             if wait is not None:
                 raise _limits.refused(wait)
+        if self.shared:
+            await _limits.spend_shared(self.shared, request, found)
 
     async def __call__(self, request: Any) -> Principal | None:
+        if self.first:
+            await _limits.spend_shared(self.first, request)
+        spends = bool(self.limits or self.shared)
         for scheme, options in self.schemes:
             try:
                 found = await scheme.authenticate(request)
             except Unauthenticated as exc:
-                if self.limits:
-                    self.spend(request, None)
+                if spends:
+                    await self.spend(request, None)
                 # A credential of this kind, and a wrong one. The search ends
                 # here: trying the next scheme, or letting an optional route
                 # through as anonymous, is how "expired token" quietly becomes
@@ -164,10 +176,10 @@ class Gate:
                 # per request under four loops (BENCHMARKS run 22).
                 found = Principal(found.subject, _name(scheme), found.scopes, found.roles,
                                   found.claims, found.user)
-            if self.limits:
+            if spends:
                 # Before the requirements: a caller refused a scope still
                 # made a request.
-                self.spend(request, found)
+                await self.spend(request, found)
             for requirements in options:
                 for requirement in requirements:
                     if not await requirement.met(found, request):
@@ -175,8 +187,8 @@ class Gate:
                 else:
                     return found
             raise self.forbidden(scheme, options[0], found)
-        if self.limits:
-            self.spend(request, None)
+        if spends:
+            await self.spend(request, None)
         if self.anonymous:
             return None
         raise self.unauthenticated(None, None)
@@ -326,8 +338,10 @@ class ResourceGate(Gate):
 
     __slots__ = ("metadata",)
 
-    def __init__(self, policy: Any, metadata: str, limits: tuple = ()) -> None:
-        super().__init__(policy, limits)
+    def __init__(
+        self, policy: Any, metadata: str, limits: tuple = (), shared: tuple = ()
+    ) -> None:
+        super().__init__(policy, limits, shared)
         self.metadata = metadata
 
     async def admit(self, request: Any) -> None:

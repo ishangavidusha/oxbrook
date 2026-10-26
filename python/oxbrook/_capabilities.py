@@ -221,6 +221,10 @@ class Capability:
         limit = self.route.rate_limit
         if limit is not None and not (limit.key == "principal" and self.route.auth is not None):
             wait = limit._limiter.take(request)
+            if wait is None and limit.shared is not None and self.route.auth is None:
+                # With auth=, the route's gate spends the shared half.
+                material = limit._limiter.shared_key(request)
+                wait = await limit.shared.take(material)
             if wait is not None:
                 return _limited(wait)
         target = self.target if self.target is not None else self.route.target
