@@ -15,6 +15,7 @@ that are easy to get wrong and impossible to notice:
   notification carries no payload and repeating it before the client has read
   changes nothing.
 """
+import asyncio
 import json
 import sys
 import threading
@@ -379,11 +380,33 @@ def listen_streams_its_own_response(client) -> None:
     )
     updates = [f for f in frames[1:] if f["method"] == "notifications/resources/updated"]
     check(len(updates) >= 2, f"two emits produced {len(updates)} updates")
+    # An in-memory topic keeps nothing to re-read on this wire, so each
+    # notification carries its message.
+    carried = [u["params"]["_meta"].get("oxbrook/message") for u in updates]
+    check(carried == [{"item": "x"}, {"item": "y"}],
+          f"the updates carried {carried}, not the two orders")
     # Every frame is stamped with the listen request's id, which is how a
     # client tells one stream's traffic from another's.
     for frame in frames:
         stamped = frame["params"]["_meta"]["io.modelcontextprotocol/subscriptionId"]
         check(stamped == 77, f"a frame carried subscription id {stamped!r}")
+
+
+def a_listener_that_stops_reading_keeps_the_newest() -> None:
+    """Bounded, oldest dropped: what a slow client sees next is the newest."""
+    from oxbrook._mcp import MCP
+
+    async def emits():
+        for n in range(10):
+            yield n
+
+    async def run():
+        queue = asyncio.Queue(maxsize=3)
+        await MCP._drain_into(None, queue, "topic://t", emits())
+        return [queue.get_nowait()[1] for _ in range(queue.qsize())]
+
+    kept = asyncio.run(run())
+    check(kept == [7, 8, 9], f"a full listener kept {kept}")
 
 
 def main() -> None:
@@ -431,6 +454,9 @@ def main() -> None:
         ):
             step(client)
             print(f"  {step.__name__}: ok")
+
+    a_listener_that_stops_reading_keeps_the_newest()
+    print("  a_listener_that_stops_reading_keeps_the_newest: ok")
 
     if failures:
         print("\nfailures:")

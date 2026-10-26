@@ -7,6 +7,10 @@ release does not; changes that break existing code are listed under
 
 ## Unreleased
 
+- **Followed topics deliver their messages on the 2026-07-28 MCP wire.** Each
+  `notifications/resources/updated` from `subscriptions/listen` carries the
+  message under `_meta["oxbrook/message"]`. An in-memory topic delivered the
+  notification alone before, with nothing to read behind it.
 - **Breaking: `Tickets.issue()` is a coroutine.** Write
   `await tickets.issue(who)`; a ticket kept in Redis is written before it is
   handed out.

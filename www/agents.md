@@ -167,9 +167,13 @@ ride a separate connection — a client sends `subscriptions/listen` and the
 response to that request *is* the stream. Nothing is resumable; a dropped
 stream is re-listened, not replayed.
 
-On this wire a followed in-memory topic delivers the notification but not the
-messages behind it, because there is no session to hold them between reads.
-Follow a durable topic where the payload matters.
+There is no session to hold a followed topic's messages between reads either,
+so on this wire each `notifications/resources/updated` carries the message
+that caused it, under `oxbrook/message` in its `_meta`, and every message gets
+its own notification. A client that reads `_meta` needs no second request; one
+that re-reads the resource instead gets the recent history of a durable topic
+and nothing from an in-memory one. A listener that stops reading keeps the
+newest 256 messages.
 
 **2025-11-25 and earlier.** The handshake wire, and what a client falls back to
 when the probe finds nothing. `initialize` returns an `MCP-Session-Id` that

@@ -86,6 +86,10 @@ RESULT_STAMP = {"ttlMs": 0, "cacheScope": "private", "resultType": "complete"}
 META = "_meta"
 PROTOCOL_META = "io.modelcontextprotocol/protocolVersion"
 SUBSCRIPTION_META = "io.modelcontextprotocol/subscriptionId"
+#: Where a topic's message rides on the 2026-07-28 wire. That wire has no
+#: session to buffer messages for a later read, so the notification carries
+#: the message itself, under this server's own `_meta` prefix.
+MESSAGE_META = "oxbrook/message"
 
 PARSE_ERROR = -32700
 INVALID_REQUEST = -32600
@@ -740,12 +744,15 @@ class MCP:
                 event="message",
             )
             while True:
-                uri = await queue.get()
+                uri, item = await queue.get()
+                # One notification per message, not one per quiet period as
+                # on the handshake wire: each carries its message, so folding
+                # two together would drop one.
                 yield Event(
                     data={
                         "jsonrpc": "2.0",
                         "method": RESOURCE_UPDATED,
-                        "params": {"uri": uri, META: meta},
+                        "params": {"uri": uri, META: {**meta, MESSAGE_META: item}},
                     },
                     event="message",
                 )
@@ -756,20 +763,20 @@ class MCP:
                 pump.cancel()
 
     async def _drain_into(self, queue: "asyncio.Queue", uri: str, subscription: Any) -> None:
-        """One topic's emits, as "there is something to read at `uri`".
-
-        The message itself is dropped, because the wire has nowhere to put it:
-        an updated notification carries a uri and no payload. On this wire
-        there is no session either, so no per-client buffer for the client to
-        come back and read — see I-095.
-        """
-        async for _item in subscription:
-            try:
-                queue.put_nowait(uri)
-            except asyncio.QueueFull:
-                # The client is not reading. Dropping a duplicate "something
-                # changed" costs nothing: the next one says the same thing.
-                pass
+        """One topic's emits, each with the uri it arrived on."""
+        async for item in subscription:
+            while True:
+                try:
+                    queue.put_nowait((uri, item))
+                    break
+                except asyncio.QueueFull:
+                    # The client is not reading. The oldest goes, as from a
+                    # followed topic's buffer on the handshake wire: bounded,
+                    # and what the client sees next is the newest.
+                    try:
+                        queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        pass
 
     # ---- transport --------------------------------------------------------
 
