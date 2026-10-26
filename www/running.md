@@ -107,9 +107,10 @@ The default is measured, not guessed:
 So the default is "how many cores can actually run Python in parallel", which
 is not `os.cpu_count()`: that counts efficiency cores, and inside a container it
 reports the host's cores rather than the cgroup quota — which would start
-dozens of loops for a two-CPU limit. Oxbrook probes cgroup quotas, CPU affinity
-and performance-core counts, takes the most constrained answer, and caps it at
-8.
+dozens of loops for a two-CPU limit. Oxbrook probes cgroup quotas, CPU affinity,
+physical cores (two hyperthreads on one core are not two loops' worth of
+Python) and performance cores on hybrid processors, on macOS, Linux and
+Windows alike, takes the most constrained answer, and caps it at 8.
 
 The cap is a guard against an absurd probe result, not a measured ceiling.
 Raise it explicitly on a large homogeneous machine with CPU-heavy handlers:

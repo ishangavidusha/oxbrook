@@ -19,6 +19,7 @@ final answer is the most constrained of everything that did answer.
 """
 
 import os
+import struct
 import sys
 
 # Guard against a probe returning something absurd, not a tuning limit. Raise it
@@ -91,14 +92,72 @@ def _linux_performance_cores() -> int | None:
     return None
 
 
+#: `RelationProcessorCore`: one record per physical core.
+_PROCESSOR_CORE = 0
+
+
+def _windows_cores(records: bytes) -> tuple[int, int | None] | None:
+    """(physical cores, performance cores) from what
+    `GetLogicalProcessorInformationEx(RelationProcessorCore)` wrote.
+
+    Each record is `Relationship` and `Size` (two DWORDs), then a
+    PROCESSOR_RELATIONSHIP whose second byte is `EfficiencyClass`: higher is
+    faster, and every core has the same class on a machine that is not
+    hybrid, which then has no performance count to report.
+    """
+    classes: list[int] = []
+    offset = 0
+    while offset + 10 <= len(records):
+        relationship, size = struct.unpack_from("<II", records, offset)
+        if size < 10:
+            return None
+        if relationship == _PROCESSOR_CORE:
+            classes.append(records[offset + 9])
+        offset += size
+    if not classes:
+        return None
+    fastest = max(classes)
+    split = fastest != min(classes)
+    return len(classes), classes.count(fastest) if split else None
+
+
+def _windows_topology() -> tuple[int, int | None] | None:
+    """Physical and performance cores on Windows, which `os.cpu_count()` gives
+    only as logical processors: SMT siblings counted twice."""
+    if sys.platform != "win32":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        call = kernel32.GetLogicalProcessorInformationEx
+        call.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.POINTER(wintypes.DWORD)]
+        call.restype = wintypes.BOOL
+        length = wintypes.DWORD(0)
+        # Asked with no buffer first, for the size it needs.
+        call(_PROCESSOR_CORE, None, ctypes.byref(length))
+        if not length.value:
+            return None
+        buffer = ctypes.create_string_buffer(length.value)
+        if not call(_PROCESSOR_CORE, buffer, ctypes.byref(length)):
+            return None
+        return _windows_cores(buffer.raw[: length.value])
+    except Exception:  # noqa: BLE001 - a probe that raises must answer None, not propagate
+        return None
+
+
 def _performance_cores() -> int | None:
     """Cores that run at full speed. Apple Silicon splits these from the
     efficiency cores, and the sweep showed loops on efficiency cores losing
-    throughput rather than adding it. Linux hybrid machines split them too,
-    and a uniform machine has no split to report."""
+    throughput rather than adding it. Linux and Windows hybrid machines split
+    them too, and a uniform machine has no split to report."""
     macos = _sysctl_int("hw.perflevel0.physicalcpu")
     if macos:
         return macos
+    windows = _windows_topology()
+    if windows is not None:
+        return windows[1]
     return _linux_performance_cores()
 
 
@@ -108,6 +167,9 @@ def _physical_cores() -> int | None:
     macos = _sysctl_int("hw.physicalcpu")
     if macos:
         return macos
+    windows = _windows_topology()
+    if windows is not None:
+        return windows[0]
     try:
         import glob
 

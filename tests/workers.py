@@ -4,9 +4,36 @@
 Cannot assert exact numbers, since they are machine specific. Asserts the
 invariants that would actually break a deployment.
 """
+import struct
 import sys
 
 from oxbrook import _workers
+
+
+def record(relationship: int, efficiency: int, size: int = 48) -> bytes:
+    """One SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX record, as Windows writes it."""
+    head = struct.pack("<IIBB", relationship, size, 0, efficiency)
+    return head + bytes(size - len(head))
+
+
+def windows_records_are_read() -> list[str]:
+    """The Windows topology parser, on records built here: it runs on every
+    platform, while the call that produces them runs only on Windows CI."""
+    failures = []
+    cases = [
+        ("four uniform cores", b"".join(record(0, 0) for _ in range(4)), (4, None)),
+        ("hybrid: 6 fast, 8 efficient",
+         b"".join([record(0, 1)] * 6 + [record(0, 0)] * 8), (14, 6)),
+        ("other relationships skipped",
+         record(2, 7, 80) + record(0, 0) + record(1, 9, 64) + record(0, 0), (2, None)),
+        ("nothing", b"", None),
+        ("a record claiming no size", struct.pack("<II", 0, 0) + bytes(40), None),
+    ]
+    for label, data, expected in cases:
+        got = _workers._windows_cores(data)
+        if got != expected:
+            failures.append(f"windows records, {label}: {got} rather than {expected}")
+    return failures
 
 
 def main() -> None:
@@ -17,7 +44,7 @@ def main() -> None:
     for key, value in info.items():
         print(f"{key:<18}: {value}")
 
-    failures = []
+    failures = windows_records_are_read()
     workers = info["default_workers"]
 
     if gil and workers != 1:
@@ -32,6 +59,13 @@ def main() -> None:
         )
     if not gil and workers > info["detected"]:
         failures.append(f"{workers} loops exceeds detected parallelism {info['detected']}")
+    if sys.platform == "win32":
+        # The real call, on the one platform that has it: an answer, and one
+        # no larger than the logical processors it groups.
+        physical = info["physical_cores"]
+        if not physical or physical > (info["os_cpu_count"] or 0):
+            failures.append(f"Windows reported {physical} physical cores "
+                            f"for {info['os_cpu_count']} logical processors")
     perf = info["performance_cores"]
     if perf and info["detected"] > perf:
         failures.append(f"detected {info['detected']} exceeds {perf} performance cores")

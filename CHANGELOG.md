@@ -7,6 +7,10 @@ release does not; changes that break existing code are listed under
 
 ## Unreleased
 
+- **Worker-count detection on Windows** counts physical cores, and the
+  performance cores of a hybrid processor, as it already did on macOS and
+  Linux. It counted logical processors before, so hyper-threading doubled
+  the default number of loops.
 - **Sockets can re-check their credentials.** `app.websocket(...,
   recheck=60)` runs the route's `auth=` again every minute against the
   credentials the socket was opened with, and closes it with `4001` or `4003`
