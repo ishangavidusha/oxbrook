@@ -38,9 +38,16 @@ await ws.send_json(payload)          # explicit
 message = await ws.receive()         # None when the peer closed
 data = await ws.receive_json()
 await ws.close()
+await ws.close(4000, "room closed")  # a status and reason for the client
 ```
 
 Ping and Pong are answered underneath and never reach the handler.
+
+A close may carry a status code and a short reason, which the browser reports
+in its `close` event. An application's own codes are `4000` to `4999`; of the
+standard ones, a server may send `1000` (normal), `1001` (going away),
+`1002`, `1003` and `1007` to `1011`. Any other code raises `ValueError`, as
+does a reason longer than 123 bytes.
 
 ## Which sites may connect
 

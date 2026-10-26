@@ -8,6 +8,7 @@ upgrade and for an MCP tool call alike, which is what keeps them from
 disagreeing (invariant 10).
 """
 
+import asyncio
 import logging
 import secrets
 import time
@@ -22,6 +23,7 @@ from .auth import (
     PRINCIPAL,
     Forbidden,
     Principal,
+    Tickets,
     Unauthenticated,
     _checked,
     _Combinable,
@@ -60,6 +62,16 @@ def check(value: Any, where: str) -> Any:
         return _checked(value, "auth=")
     except TypeError as exc:
         raise TypeError(f"{where}: {exc}") from None
+
+
+def interval(value: Any, where: str) -> float | None:
+    """A socket's `recheck=`: None, or seconds between checks."""
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not value > 0:
+        raise ValueError(f"{where}: recheck is seconds between checks, more than 0; "
+                         f"got {value!r}")
+    return float(value)
 
 
 def resolve(*declarations: Any) -> Any:
@@ -421,8 +433,59 @@ def _leave(found: Principal | None) -> str:
     return key
 
 
-def receive(target: Any) -> Any:
-    """A socket handler that starts with the principal its gate found."""
+def presentable(policy: Any) -> Any:
+    """`policy` without the schemes whose credential works once: what a socket
+    can be authenticated against again. None when nothing is left.
+
+    A ticket is gone the moment it opens the socket, so re-checking it would
+    refuse every socket that a ticket opened.
+    """
+    if isinstance(policy, _Optional):
+        inner = presentable(policy.inner)
+        return None if inner is None else _Optional(inner)
+    if isinstance(policy, _Either):
+        kept = [m for m in map(presentable, policy.members) if m is not None]
+        return None if not kept else kept[0] if len(kept) == 1 else _Either(tuple(kept))
+    if isinstance(policy, _Required):
+        inner = presentable(policy.inner)
+        return None if inner is None else _Required(inner, policy.requirement)
+    return None if isinstance(policy, Tickets) else policy
+
+
+#: Close codes for a socket whose credential no longer passes: the
+#: application range, mirroring the HTTP statuses a new request would get.
+UNAUTHENTICATED_CLOSE = 4001
+FORBIDDEN_CLOSE = 4003
+
+
+async def _recheck(gate: Gate, every: float, request: Any, ws: Any) -> None:
+    """Run the socket's gate again every `every` seconds against the request
+    that opened it, and close the socket once it refuses."""
+    while True:
+        await asyncio.sleep(every)
+        if ws.closed:
+            return
+        try:
+            found = await gate(request)
+        except Unauthenticated:
+            await ws.close(UNAUTHENTICATED_CLOSE, "authentication no longer valid")
+            return
+        except Forbidden:
+            await ws.close(FORBIDDEN_CLOSE, "forbidden")
+            return
+        except Exception:
+            # The provider unreachable (503), or a scheme's own bug: neither
+            # says the caller lost access, so the socket stays and the next
+            # look decides.
+            logger.warning("websocket re-check could not complete", exc_info=True)
+            continue
+        request.locals[PRINCIPAL] = found
+
+
+def receive(target: Any, recheck: Any = None, every: float | None = None) -> Any:
+    """A socket handler that starts with the principal its gate found, and,
+    with `recheck`, a gate run again every `every` seconds while it is open."""
+    gate = None if recheck is None else Gate(recheck)
 
     async def socket(request, ws, **params):
         key = request._handoff
@@ -432,7 +495,13 @@ def receive(target: Any) -> Any:
             # a key. Refusing is the one safe answer.
             raise RuntimeError("websocket reached its handler without authentication")
         request.locals[PRINCIPAL] = entry[1]
-        return await target(request, ws, **params)
+        if gate is None:
+            return await target(request, ws, **params)
+        watcher = asyncio.get_running_loop().create_task(_recheck(gate, every, request, ws))
+        try:
+            return await target(request, ws, **params)
+        finally:
+            watcher.cancel()
 
     socket.__name__ = getattr(target, "__name__", "handler")
     socket.__qualname__ = getattr(target, "__qualname__", "handler")

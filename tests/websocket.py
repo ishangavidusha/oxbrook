@@ -52,6 +52,20 @@ async def feed(_: Request, ws):
             await ws.send(item)
 
 
+@app.websocket("/coded")
+async def coded(_: Request, ws):
+    refused = []
+    for code, reason in ((999, ""), (1005, ""), (2000, ""), (5000, ""), (True, ""),
+                         (None, "why"), (4000, "x" * 124)):
+        try:
+            await ws.close(code, reason)
+            refused.append(f"close({code!r}, {reason[:5]!r}) was accepted")
+        except ValueError:
+            pass
+    await ws.send(repr(refused))
+    await ws.close(4321, "done here")
+
+
 @app.websocket("/counted")
 async def counted(_: Request, ws):
     async for _message in ws:
@@ -149,6 +163,18 @@ async def run() -> list[str]:
             bad.append("server close did not end the stream")
         except websockets.ConnectionClosed:
             pass
+
+    # A close with a status: what the client is told, and what is refused.
+    async with websockets.connect(f"{WS}/coded") as ws:
+        refused = await asyncio.wait_for(ws.recv(), 5)
+        if refused != "[]":
+            bad.append(f"bad close codes: {refused}")
+        try:
+            await asyncio.wait_for(ws.recv(), 5)
+        except websockets.ConnectionClosed:
+            pass
+        if (ws.close_code, ws.close_reason) != (4321, "done here"):
+            bad.append(f"a coded close arrived as {(ws.close_code, ws.close_reason)}")
 
     # A client close must end handler iteration rather than hang.
     async with websockets.connect(f"{WS}/counted") as ws:

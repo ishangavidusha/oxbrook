@@ -718,9 +718,28 @@ a ticket or a session cookie. Tickets are kept in the process that issued
 them, so behind a load balancer with several processes the socket has to
 reach the same one.
 
-The check runs once, when the socket opens; a connection can outlive the
-credential that opened it. An `authorize=` function runs after `auth=`, and can
-read `principal(request)`.
+The check runs when the socket opens, so by default a connection can outlive
+the credential that opened it. `recheck=` runs `auth=` again on an interval,
+against the credentials the socket was opened with:
+
+```python
+@app.websocket("/feed", auth=tickets | web, recheck=60)
+async def feed(request, ws): ...
+```
+
+A socket whose credentials are now refused is closed with code `4001`, or
+`4003` when its caller is refused a scope or role they had, the same answers a
+new request would get as `401` and `403`. That catches a token past its expiry,
+a session past its age, and a principal a `verify` function no longer returns.
+A provider that cannot be reached closes nothing, and a check that passes
+replaces the socket's principal, so a role granted meanwhile takes effect.
+A ticket is used up when the socket opens and is not checked again: with
+`tickets | web`, it is the session the socket also carries that is re-checked,
+and a socket opened by a ticket alone is closed at the first re-check. A route
+authenticated by tickets alone cannot have `recheck=`.
+
+An `authorize=` function runs after `auth=`, and can read
+`principal(request)`.
 
 ## Agents
 

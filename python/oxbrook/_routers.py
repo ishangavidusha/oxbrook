@@ -60,6 +60,7 @@ class _Declared:
     blocking: bool = False
     auth: Any = UNSET
     rate_limit: Any = UNSET
+    recheck: float | None = None
 
 
 def _join(base: str, prefix: str) -> str:
@@ -197,15 +198,16 @@ class Router:
                           auth=auth, rate_limit=rate_limit)
 
     def websocket(self, path: str, authorize: Any = None, *, blocking: bool = False,
-                  auth: Any = UNSET, rate_limit: Any = UNSET):
+                  auth: Any = UNSET, rate_limit: Any = UNSET, recheck: float | None = None):
         """Register a WebSocket endpoint. See `App.websocket`."""
         auth = _auth.check(auth, f"WEBSOCKET {self.prefix}{path}")
         rate_limit = _limits.check(rate_limit, f"WEBSOCKET {self.prefix}{path}")
+        recheck = _auth.interval(recheck, f"WEBSOCKET {self.prefix}{path}")
 
         def decorator(fn):
             self._declare(
                 _Declared("GET", path, fn, False, True, authorize, True, blocking, auth,
-                          rate_limit)
+                          rate_limit, recheck)
             )
             return fn
 
@@ -324,6 +326,7 @@ class Router:
             route.rate_limit = None if limit is UNSET else limit
             route.tags = list(tags)
             route.handlers = dict(handlers)
+            route.recheck = declared.recheck
             routes.append(route)
         for child, child_prefix in self._children:
             routes.extend(child._flatten(base + child_prefix, chain, (*seen, self), auth,

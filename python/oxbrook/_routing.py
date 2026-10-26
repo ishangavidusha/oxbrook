@@ -120,6 +120,8 @@ class RouteInfo:
     """OpenAPI tags from the routers it was included through, outermost first."""
     handlers: dict[type, Any] = field(default_factory=dict)
     """Exception handlers from its routers, the nearest router's winning."""
+    recheck: float | None = None
+    """For a socket: seconds between runs of its `auth=` while it is open."""
 
 
 #: Every `{name}` and `{*name}`, whatever it is called. Two routes conflict in

@@ -13,7 +13,8 @@ use futures_util::{SinkExt, StreamExt};
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 use tokio::sync::mpsc;
-use tokio_tungstenite::tungstenite::protocol::{Message, Role, WebSocketConfig};
+use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
+use tokio_tungstenite::tungstenite::protocol::{CloseFrame, Message, Role, WebSocketConfig};
 use tokio_tungstenite::WebSocketStream;
 
 use crate::queue::WorkerQueue;
@@ -24,7 +25,8 @@ const SEND_BUFFER: usize = 256;
 pub enum Frame {
     Text(String),
     Binary(Vec<u8>),
-    Close,
+    /// The server's close, with the code and reason to send, if any.
+    Close(Option<(u16, String)>),
 }
 
 /// State shared between the tokio task and the Python handler.
@@ -127,7 +129,7 @@ impl WebSocket {
         match frame {
             Frame::Text(text) => Some(text.into_pyobject(py).ok()?.into_any()),
             Frame::Binary(bytes) => Some(PyBytes::new(py, &bytes).into_any()),
-            Frame::Close => None,
+            Frame::Close(_) => None,
         }
     }
 
@@ -198,9 +200,14 @@ impl WebSocket {
             .is_ok()
     }
 
-    /// Start a clean close handshake.
-    fn close(&self) {
-        let _ = self.shared.outgoing.try_send(Frame::Close);
+    /// Start a clean close handshake, with a status code and reason when
+    /// given. Python checks both before they get here.
+    #[pyo3(signature = (code = None, reason = String::new()))]
+    fn close(&self, code: Option<u16>, reason: String) {
+        let _ = self
+            .shared
+            .outgoing
+            .try_send(Frame::Close(code.map(|code| (code, reason))));
     }
 }
 
@@ -228,7 +235,16 @@ pub async fn drive<S>(
                     Some(Frame::Text(text)) => Message::Text(text.into()),
                     Some(Frame::Binary(data)) => Message::Binary(data.into()),
                     // Close, or the handler dropped its end of the socket.
-                    Some(Frame::Close) | None => {
+                    Some(Frame::Close(status)) => {
+                        let frame = status.map(|(code, reason)| CloseFrame {
+                            code: CloseCode::from(code),
+                            reason: reason.into(),
+                        });
+                        let _ = sink.send(Message::Close(frame)).await;
+                        break;
+                    }
+                    // The handler dropped its end of the socket.
+                    None => {
                         let _ = sink.send(Message::Close(None)).await;
                         break;
                     }

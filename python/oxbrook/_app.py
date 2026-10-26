@@ -636,7 +636,7 @@ class App:
         return total // workers
 
     def websocket(self, path: str, authorize: Any = None, *, blocking: bool = False,
-                  auth: Any = UNSET, rate_limit: Any = UNSET):
+                  auth: Any = UNSET, rate_limit: Any = UNSET, recheck: float | None = None):
         """Register a WebSocket endpoint.
 
         `auth` is checked before the handshake, as for any route, so a caller
@@ -644,7 +644,16 @@ class App:
         opens and closes. Browsers cannot set headers on a WebSocket, so for a
         page the credential is a cookie — `SessionAuth`. The check runs when
         the socket opens: a connection can outlive the credential that opened
-        it.
+        it, unless `recheck` is given.
+
+        `recheck` is seconds between runs of `auth` against the credentials the
+        socket was opened with, for as long as it stays open. Once they are
+        refused (a token past its expiry, a session past its age, a principal
+        a `verify` function no longer finds) the socket is closed with code
+        `4001`, or `4003` when the caller is now refused a scope or role. A
+        provider that cannot be reached closes nothing. Tickets are used up
+        when the socket opens, so they are not checked again: a route
+        authenticated by tickets alone cannot be re-checked.
 
         `authorize` runs after `auth`, before the handshake, and can refuse the upgrade,
         which the handler cannot: by the time it runs, the 101 has been sent
@@ -671,6 +680,7 @@ class App:
 
         auth = _auth.check(auth, f"WEBSOCKET {path}")
         rate_limit = _limits.check(rate_limit, f"WEBSOCKET {path}")
+        recheck = _auth.interval(recheck, f"WEBSOCKET {path}")
 
         def decorator(fn):
             route = build_route(fn, "GET", path, websocket=True, blocking=blocking)
@@ -678,6 +688,7 @@ class App:
                 route.authorizer = make_gate(authorize)
             route.auth = auth
             route.rate_limit = None if rate_limit is UNSET else rate_limit
+            route.recheck = recheck
             self._add(route)
             return fn
 
@@ -1101,7 +1112,8 @@ class App:
             # there is nothing for middleware or a mapped status to act on. The
             # gate before the handshake gets both instead, and authentication,
             # so an app-wide rule and an `HTTPError(401)` cover sockets too.
-            handler = r.target if r.auth is None else _auth.receive(r.target)
+            recheck = self._recheck(r)
+            handler = r.target if r.auth is None else _auth.receive(r.target, *recheck)
             authorizer = r.authorizer
             if authorizer is None and r.auth is not None:
                 authorizer = make_gate(_auth.accept)
@@ -1118,6 +1130,22 @@ class App:
             body = "collect"
         return (r.method, r.path, self._compose(r.target, r), [p.as_spec() for p in r.params],
                 False, None, body, r.cancel_on_disconnect)
+
+    def _recheck(self, r: RouteInfo) -> tuple[Any, float | None]:
+        """What a socket's re-check runs, and how often: checked when the
+        server is built, since `auth=` is only final once routers are in."""
+        if r.recheck is None:
+            return None, None
+        if r.auth is None:
+            raise ValueError(f"WEBSOCKET {r.path}: recheck= needs auth= to check")
+        policy = _auth.presentable(r.auth)
+        if policy is None:
+            raise ValueError(
+                f"WEBSOCKET {r.path}: a ticket is used up when the socket opens, so a "
+                f"route authenticated by tickets alone cannot be re-checked; accept a "
+                f"session or token as well (tickets | web), or drop recheck="
+            )
+        return policy, r.recheck
 
     def _socket_origins(self) -> tuple[bool, list[str]]:
         """(any origin, allowed origins) for the upgrade check.

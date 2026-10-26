@@ -1400,6 +1400,120 @@ def declarations_are_checked_where_written() -> None:
     App(auth=optional(Custom()))
 
 
+def sockets_are_rechecked() -> None:
+    """`recheck=` closes a socket once the credentials that opened it fail."""
+    members: dict[str, set[str]] = {"k-member": {"member"}}
+    outage = {"on": False}
+
+    async def lookup(digest: str):
+        if outage["on"]:
+            raise HTTPError(503, "directory unreachable")
+        for key, roles in members.items():
+            if digest == APIKey.digest(key):
+                return Principal(subject=key, roles=roles)
+        return None
+
+    member_keys = APIKey(header="x-api-key", verify=lookup)
+    expiring = JWT(key=SECRET, algorithms=["HS256"], audience="notes",
+                   issuer="https://issuer.test/", leeway=0, cache_size=0)
+    socket_tickets = Tickets()
+    app = App()
+
+    async def hold(_: Request, ws, who=Depends(principal)):
+        await ws.send(who.subject)
+        async for _message in ws:
+            # What the socket's principal is now, after any re-check.
+            await ws.send(sorted(principal(_).roles))
+
+    app.websocket("/members", auth=member_keys.requires(roles=("member",)),
+                  recheck=0.2)(hold)
+    app.websocket("/expiring", auth=expiring, recheck=0.2)(hold)
+    app.websocket("/either", auth=socket_tickets | member_keys, recheck=0.2)(hold)
+
+    async def closed_with(c: TestClient, path: str, headers: dict, change=None,
+                          within: float = 3.0):
+        async with c.websocket(path, headers=headers) as sock:
+            await asyncio.wait_for(sock.recv(), 5)
+            if change is not None:
+                change()
+            try:
+                await asyncio.wait_for(sock.recv(), within)
+            except TimeoutError:
+                return None
+            except Exception:  # ConnectionClosed, the expected end
+                pass
+            return sock.close_code, sock.close_reason
+
+    with TestClient(app) as c:
+        got = asyncio.run(closed_with(c, "/expiring",
+                                      bearer(token(exp=int(time.time()) + 2)), within=4))
+        check(got == (4001, "authentication no longer valid"),
+              f"a socket whose token expired ended with {got}")
+
+        got = asyncio.run(closed_with(c, "/members", {"x-api-key": "k-member"},
+                                      change=lambda: members["k-member"].discard("member")))
+        check(got == (4003, "forbidden"), f"a socket whose role was taken ended with {got}")
+        members["k-member"] = {"member"}
+
+        got = asyncio.run(closed_with(c, "/members", {"x-api-key": "k-member"},
+                                      change=lambda: members.pop("k-member")))
+        check(got == (4001, "authentication no longer valid"),
+              f"a socket whose key was revoked ended with {got}")
+        members["k-member"] = {"member"}
+
+        # The directory down is not the caller losing access.
+        async def through_an_outage():
+            async with c.websocket("/members", headers={"x-api-key": "k-member"}) as sock:
+                await asyncio.wait_for(sock.recv(), 5)
+                outage["on"] = True
+                await asyncio.sleep(0.7)
+                outage["on"] = False
+                members["k-member"] = {"member", "admin"}
+                await asyncio.sleep(0.5)
+                await sock.send("roles?")
+                return json.loads(await asyncio.wait_for(sock.recv(), 5))
+
+        roles = asyncio.run(through_an_outage())
+        check(roles == ["admin", "member"],
+              f"through an outage the socket ended with {roles}; it should stay open and "
+              f"pick up the principal's new roles")
+        members["k-member"] = {"member"}
+
+        # Opened with a ticket: nothing to present again, so the key it also
+        # carries is what is re-checked.
+        def ticketed(key):
+            ticket = socket_tickets.issue(Principal(subject="t1", roles={"member"}))
+            return f"/either?ticket={ticket}", {} if key is None else {"x-api-key": key}
+
+        path, headers = ticketed(None)
+        got = asyncio.run(closed_with(c, path, headers))
+        check(got == (4001, "authentication no longer valid"),
+              f"a ticket-opened socket with nothing else to re-check ended with {got}")
+        path, headers = ticketed("k-member")
+        got = asyncio.run(closed_with(c, path, headers, within=0.8))
+        check(got is None, f"a ticket-opened socket that also carries a key ended with {got}")
+
+    for label, build in (
+        ("recheck with tickets alone", lambda a: a.websocket(
+            "/t", auth=socket_tickets, recheck=1)(hold)),
+        ("recheck without auth", lambda a: a.websocket("/n", recheck=1)(hold)),
+    ):
+        refused = App()
+        build(refused)
+        try:
+            with TestClient(refused):
+                pass
+        except ValueError:
+            continue
+        failures.append(f"{label} was accepted")
+    for wrong in (0, -1, True, "5"):
+        try:
+            App().websocket("/w", auth=keys, recheck=wrong)
+        except ValueError:
+            continue
+        failures.append(f"recheck={wrong!r} was accepted")
+
+
 def no_credential_reaches_a_log(c: TestClient, records: list[str]) -> None:
     # Everything logged across the whole run, formatted with every extra.
     leaked = [r for r in records if any(s in r for s in SENTINELS)]
@@ -1428,7 +1542,8 @@ def main() -> None:
     server_log.setLevel(logging.DEBUG)
     server_log.propagate = False
 
-    for step in (declarations_are_checked_where_written, the_example_works):
+    for step in (declarations_are_checked_where_written, the_example_works,
+                 sockets_are_rechecked):
         try:
             step()
             print(f"  {step.__name__}: ok")

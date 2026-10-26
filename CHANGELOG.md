@@ -7,6 +7,12 @@ release does not; changes that break existing code are listed under
 
 ## Unreleased
 
+- **Sockets can re-check their credentials.** `app.websocket(...,
+  recheck=60)` runs the route's `auth=` again every minute against the
+  credentials the socket was opened with, and closes it with `4001` or `4003`
+  once they are refused: an expired token, a session past its age, a revoked
+  key. A provider outage closes nothing.
+- **`ws.close(code, reason)`** sends a close status and reason.
 - **Form routes can be agent tools.** A `tool=True` route that binds a form
   with `Form()` takes the form's fields as tool arguments and receives them as
   a URL-encoded body, so its middleware and validation run as over HTTP.

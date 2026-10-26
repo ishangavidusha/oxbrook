@@ -22,6 +22,10 @@ from typing import Any
 
 from ._schema import encode
 
+#: Codes RFC 6455 defines that an endpoint may send; the rest of 1000-2999
+#: are reserved or only ever reported locally.
+_SENDABLE = frozenset({1000, 1001, 1002, 1003, 1007, 1008, 1009, 1010, 1011})
+
 
 class WebSocketClosed(Exception):
     """A send was attempted after the peer went away."""
@@ -97,9 +101,26 @@ class WebSocket:
         is not already `str` or `bytes`."""
         await self.send(data)
 
-    async def close(self) -> None:
-        """Start a clean close handshake."""
-        self._core.close()
+    async def close(self, code: int | None = None, reason: str = "") -> None:
+        """Start a clean close handshake.
+
+        `code` is the status the peer is given, `1000` meaning a normal close;
+        an application's own reasons go in `4000` to `4999`. `reason` is a short
+        text for people, at most 123 bytes of UTF-8. With neither, the close
+        frame carries no status, which a browser reports as `1005`.
+        """
+        if code is None:
+            if reason:
+                raise ValueError("a close reason needs a code")
+        elif (isinstance(code, bool) or not isinstance(code, int)
+              or not (code in _SENDABLE or 3000 <= code <= 4999)):
+            raise ValueError(
+                f"{code!r} is not a close code a server may send: 1000-1003, "
+                f"1007-1011, or 3000-4999"
+            )
+        if len(reason.encode()) > 123:
+            raise ValueError("a close reason is at most 123 bytes of UTF-8")
+        self._core.close(code, reason)
 
     def __aiter__(self) -> "WebSocket":
         return self
