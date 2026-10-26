@@ -202,9 +202,11 @@ class Capability:
         # The route's limit, which over HTTP the server checks before a worker
         # sees the request. A tool call arrives inside `/mcp`, past that
         # check, so it is made here: an agent must not be able to call a
-        # limited route without limit by calling it as a tool.
-        if self.route.rate_limit is not None:
-            wait = self.route.rate_limit._limiter.take(request)
+        # limited route without limit by calling it as a tool. One keyed on
+        # the caller is the route's gate's to spend, once it knows who that is.
+        limit = self.route.rate_limit
+        if limit is not None and not (limit.key == "principal" and self.route.auth is not None):
+            wait = limit._limiter.take(request)
             if wait is not None:
                 return _limited(wait)
         target = self.target if self.target is not None else self.route.target

@@ -116,9 +116,10 @@ pub struct Server {
     admin: Option<(String, u16)>,
 }
 
-/// A route's own limit, and whether it is exempt from the app's: the
-/// readiness route is, like the probes the server answers itself.
-type RouteLimit = (Option<Arc<Limit>>, bool);
+/// A route's own limit, whether it is exempt from the app's (the readiness
+/// route is, like the probes the server answers itself), and whether it
+/// authenticates: where it does, a limit keyed on the caller is its gate's.
+type RouteLimit = (Option<Arc<Limit>>, bool, bool);
 
 /// (method, path, handler, params, is_websocket, authorizer, body mode,
 /// cancel_on_disconnect). The body mode is "collect", "stream" or "defer".
@@ -165,7 +166,7 @@ impl Server {
         metrics: Option<MetricsTuple>,
         proxies: ProxiesTuple,
         app_limit: Option<PyRef<'_, Limiter>>,
-        route_limits: Vec<(Option<PyRef<'_, Limiter>>, bool)>,
+        route_limits: Vec<(Option<PyRef<'_, Limiter>>, bool, bool)>,
         telemetry: bool,
         admin: Option<(String, u16)>,
     ) -> Self {
@@ -174,7 +175,7 @@ impl Server {
         let app_limit = app_limit.map(|l| l.inner.clone());
         let route_limits = route_limits
             .into_iter()
-            .map(|(l, exempt)| (l.map(|l| l.inner.clone()), exempt))
+            .map(|(l, exempt, gated)| (l.map(|l| l.inner.clone()), exempt, gated))
             .collect();
         Self {
             host,
@@ -1097,6 +1098,26 @@ fn enqueue(state: &State, pending: Pending) -> Option<usize> {
 /// `oxbrook._auth`; it never reaches a client, since the 101 is built here.
 const HANDOFF: &str = "x-oxbrook-handoff";
 
+/// Set by a route's gate on the `429` it answers for a limit keyed on the
+/// caller, which the server could not check itself. Taken off here, so the
+/// refusal is counted as the server's own `429`s are and the client never
+/// sees the header.
+const LIMITED: &str = "x-oxbrook-limited";
+
+/// Whether a handler's reply is a gate's rate-limit refusal; strips the
+/// marker that says so. Only a `429` is looked at, so other replies pay
+/// nothing.
+fn limited(reply: &mut Reply) -> bool {
+    if reply.status != 429 {
+        return false;
+    }
+    let before = reply.headers.len();
+    reply
+        .headers
+        .retain(|(name, _)| !name.eq_ignore_ascii_case(LIMITED));
+    reply.headers.len() != before
+}
+
 /// Complete a WebSocket handshake and hand the socket to a handler.
 ///
 /// The 101 goes out from here rather than from the handler, because hyper only
@@ -1205,7 +1226,8 @@ async fn upgrade_websocket(
                     .find(|(name, _)| name.eq_ignore_ascii_case(HANDOFF))
                     .map(|(_, value)| value.clone());
             }
-            Ok(reply) => {
+            Ok(mut reply) => {
+                let refusal = limited(&mut reply).then_some(Refusal::Limited);
                 let body = match reply.body {
                     Body::Full(bytes) => Bytes::from(bytes),
                     Body::Stream(..) => Bytes::new(),
@@ -1216,9 +1238,13 @@ async fn upgrade_websocket(
                 for (name, value) in &reply.headers {
                     builder = builder.header(name.as_str(), value.as_str());
                 }
-                return builder
+                let mut response = builder
                     .body(full(body))
                     .unwrap_or_else(|_| plain(StatusCode::FORBIDDEN, "refused"));
+                if let Some(refusal) = refusal {
+                    response.extensions_mut().insert(refusal);
+                }
+                return response;
             }
             Err(_) => {
                 return plain(
@@ -1445,13 +1471,18 @@ impl State {
         client: IpAddr,
         headers: &hyper::HeaderMap,
     ) -> Result<(), Duration> {
-        let (own, exempt) = route
+        let (own, exempt, gated) = route
             .and_then(|i| self.route_limits.get(i))
-            .map_or((None, false), |(own, exempt)| (own.as_ref(), *exempt));
-        if let Some(limit) = self.app_limit.as_ref().filter(|_| !exempt) {
+            .map_or((None, false, false), |(own, exempt, gated)| {
+                (own.as_ref(), *exempt, *gated)
+            });
+        // Who the caller is is only known once the gate has run, on a worker
+        // loop; the gate spends from these itself, in the same order.
+        let here = |limit: &&Arc<Limit>| !(gated && limit.by_principal());
+        if let Some(limit) = self.app_limit.as_ref().filter(|_| !exempt).filter(here) {
             limit.take(Some(client), headers)?;
         }
-        if let Some(limit) = own {
+        if let Some(limit) = own.filter(here) {
             limit.take(Some(client), headers)?;
         }
         Ok(())
@@ -1713,10 +1744,11 @@ async fn handle(
     };
 
     match replied {
-        Ok(reply) => {
+        Ok(mut reply) => {
             if let Some(abandon) = abandon {
                 abandon.answered();
             }
+            let refusal = limited(&mut reply).then_some(Refusal::Limited);
             // A HEAD reply carries the headers a GET would, including the
             // length it would have had, but no body.
             let plan = match (&state.compression, &reply.body) {
@@ -1749,6 +1781,9 @@ async fn handle(
                 return Ok(match builder.body(full(Bytes::new())) {
                     Ok(mut response) => {
                         encoded(&plan, response.headers_mut());
+                        if let Some(refusal) = refusal {
+                            response.extensions_mut().insert(refusal);
+                        }
                         response
                     }
                     Err(_) => plain(StatusCode::INTERNAL_SERVER_ERROR, "bad response header"),
@@ -1804,6 +1839,9 @@ async fn handle(
             Ok(match builder.body(body) {
                 Ok(mut response) => {
                     encoded(&plan, response.headers_mut());
+                    if let Some(refusal) = refusal {
+                        response.extensions_mut().insert(refusal);
+                    }
                     response
                 }
                 Err(_) => plain(StatusCode::INTERNAL_SERVER_ERROR, "bad response header"),

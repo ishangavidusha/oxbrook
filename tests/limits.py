@@ -11,8 +11,11 @@ by that route, unless the same `RateLimit` is shared; a router's limit reaches
 its routes and `rate_limit=None` exempts one; an agent calling a limited route
 as a tool spends the same budget as HTTP; a forwarded address is believed only
 from a trusted proxy, and only as far as the trusted entries reach; IPv6
-clients count by /64; probes and scrapes are never limited; and a client
-cycling through addresses does not grow the server's memory for ever.
+clients count by /64; probes and scrapes are never limited; a client
+cycling through addresses does not grow the server's memory for ever; and a
+limit keyed on the caller counts one user as one budget across keys and
+addresses, counts callers it cannot name by address, is spent once per
+request whichever way it arrives, and is counted as limited in the metrics.
 """
 import asyncio
 import sys
@@ -20,6 +23,7 @@ import time
 
 import websockets
 from oxbrook import App, Health, Metrics, RateLimit, Request, Router
+from oxbrook.auth import APIKey, Principal, optional
 from oxbrook.testing import TestClient
 from prometheus_client.parser import text_string_to_metric_families
 
@@ -60,6 +64,8 @@ def configuration_is_checked() -> None:
               f"key={key!r} was accepted")
     check(RateLimit("1000000/second").burst == 100_000,
           "a default burst above the cap was not clamped to it")
+    check(RateLimit("5/minute", key="principal").key == "principal",
+          "key='principal' was not kept")
     limit = RateLimit("10 / minutes", key="header:X-API-Key")
     check(limit.rate == "10/minute" and limit.burst == 10 and limit.key == "header:x-api-key",
           f"a valid RateLimit read back as {limit!r}")
@@ -371,6 +377,181 @@ def memory_is_reclaimed() -> None:
               f"{tracked} of 9000 addresses still tracked: expired entries were kept")
 
 
+#: Two keys for alice, one for bob: a key is a credential, not a caller.
+KEYS = {APIKey.digest("alice-1"): "alice", APIKey.digest("alice-2"): "alice",
+        APIKey.digest("bob-1"): "bob"}
+
+
+def keys(**kwargs) -> APIKey:
+    def lookup(digest: str):
+        subject = KEYS.get(digest)
+        return None if subject is None else Principal(subject, scopes=kwargs.get("scopes", ()))
+
+    return APIKey(header="x-api-key", verify=lookup)
+
+
+def key(value: str, ip: str) -> dict[str, str]:
+    return {"x-api-key": value, **as_client(ip)}
+
+
+def keyed_on_the_caller() -> None:
+    auth = keys()
+    app = App(trusted_proxies=["127.0.0.1"], metrics=Metrics())
+    calls = []
+
+    @app.get("/me", auth=auth, rate_limit=RateLimit("1/minute", burst=2, key="principal"))
+    async def me(_: Request):
+        calls.append(1)
+        return {}
+
+    @app.get("/maybe", auth=optional(auth),
+             rate_limit=RateLimit("1/minute", burst=1, key="principal"))
+    async def maybe(_: Request):
+        return {}
+
+    @app.get("/open", rate_limit=RateLimit("1/minute", burst=1, key="principal"))
+    async def open_(_: Request):
+        return {}
+
+    with TestClient(app) as client:
+        got = [client.get("/me", headers=key(k, ip)).status_code
+               for k, ip in (("alice-1", "192.0.2.1"), ("alice-2", "192.0.2.2"),
+                             ("alice-1", "192.0.2.3"))]
+        check(got == [200, 200, 429],
+              f"one caller with two keys from three addresses answered {got}")
+        check(len(calls) == 2, f"a refused caller reached the handler ({len(calls)} calls)")
+        check(client.get("/me", headers=key("bob-1", "192.0.2.1")).status_code == 200,
+              "bob was limited by alice's budget")
+
+        refused = client.get("/me", headers=key("alice-2", "192.0.2.9"))
+        check(refused.headers.get("retry-after") == "60",
+              f"Retry-After was {refused.headers.get('retry-after')!r}, not 60")
+        check("x-oxbrook-limited" not in refused.headers,
+              "the gate's marker reached the client")
+        check(refused.headers.get("content-type") == "application/problem+json"
+              and refused.json() == {"type": "about:blank", "title": "Too Many Requests",
+                                     "status": 429, "detail": "rate limit exceeded"},
+              f"the gate's 429 was {refused.text!r}")
+
+        # A credential that fails has no caller to count it against, so its
+        # address pays: guessing keys is limited too.
+        got = [client.get("/me", headers=key("guess", "192.0.2.20")).status_code
+               for _ in range(3)]
+        check(got == [401, 401, 429], f"wrong keys from one address answered {got}")
+        check(client.get("/me", headers=key("guess", "192.0.2.21")).status_code == 401,
+              "a wrong key from another address was limited by the first")
+
+        # Anonymous on an optional route, and anyone on a route that
+        # authenticates no one, count by address.
+        got = statuses(client, "/maybe", 2, headers=as_client("192.0.2.30"))
+        check(got == [200, 429], f"anonymous callers of an optional route answered {got}")
+        check(client.get("/maybe", headers=key("alice-1", "192.0.2.30")).status_code == 200,
+              "alice was counted with the anonymous callers from her address")
+        got = statuses(client, "/open", 2, headers=as_client("192.0.2.31"))
+        check(got == [200, 429], f"a route without auth= answered {got}")
+        check(client.get("/open", headers=as_client("192.0.2.32")).status_code == 200,
+              "a route without auth= was limited across addresses")
+
+        families = {f.name: f for f in
+                    text_string_to_metric_families(client.get("/metrics").text)}
+        limited = families["oxbrook_requests_limited"].samples[0].value
+        # /me: alice twice and the wrong key once; /maybe and /open once each.
+        check(limited == 5, f"oxbrook_requests_limited_total read {limited}, not 5")
+
+
+def refused_scopes_still_spend() -> None:
+    app = App(trusted_proxies=["127.0.0.1"])
+
+    @app.get("/admin", auth=keys().requires("admin"),
+             rate_limit=RateLimit("1/minute", burst=2, key="principal"))
+    async def admin(_: Request):
+        return {}
+
+    with TestClient(app) as client:
+        got = [client.get("/admin", headers=key("alice-1", f"192.0.2.{40 + i}")).status_code
+               for i in range(3)]
+        check(got == [403, 403, 429], f"a caller without the scope answered {got}")
+
+
+def caller_limits_reach_tools_and_sockets() -> None:
+    auth = keys()
+    app = App(auth=auth, trusted_proxies=["127.0.0.1"])
+
+    @app.get("/search", tool=True, rate_limit=RateLimit("1/minute", burst=2, key="principal"))
+    async def search(_: Request, q: str = ""):
+        return {"q": q}
+
+    @app.websocket("/ws", rate_limit=RateLimit("1/minute", burst=1, key="principal"))
+    async def ws(_: Request, socket):
+        await socket.send("hi")
+
+    async def attempt(client: TestClient, value: str, ip: str) -> int:
+        try:
+            async with client.websocket("/ws", headers=key(value, ip)) as socket:
+                await socket.recv()
+                return 101
+        except websockets.InvalidStatus as exc:
+            return exc.response.status_code
+
+    with TestClient(app) as client:
+        check(client.get("/search", headers=key("alice-1", "192.0.2.50")).status_code == 200,
+              "HTTP call refused")
+        check(client.call_tool("search", {"q": "a"}, headers=key("alice-2", "192.0.2.51"))
+              == {"q": "a"}, "the tool call within budget failed")
+        result = client.mcp("tools/call", {"name": "search", "arguments": {"q": "b"}},
+                            headers=key("alice-1", "192.0.2.52"))
+        text = "".join(p.get("text", "") for p in result.get("content", []))
+        check(result.get("isError") is True and "429" in text,
+              f"a tool call over the caller's route limit was not refused: {result!r}")
+        # Bob, from the address alice was just refused at: twice, so a check
+        # that also spent from the address's budget would show.
+        got = [client.call_tool("search", {"q": q}, headers=key("bob-1", "192.0.2.52"))
+               for q in ("c", "d")]
+        check(got == [{"q": "c"}, {"q": "d"}],
+              f"another caller's tool calls were limited by alice's: {got}")
+
+        got = [asyncio.run(attempt(client, "alice-1", f"192.0.2.{70 + i}")) for i in range(2)]
+        check(got == [101, 429], f"two socket opens by one caller answered {got}")
+
+
+def tools_spend_the_app_limit_once() -> None:
+    app = App(auth=keys(), rate_limit=RateLimit("1/minute", burst=6, key="principal"),
+              trusted_proxies=["127.0.0.1"])
+    posts: list[int] = []
+
+    @app.middleware
+    async def count(request: Request, call_next):
+        reply = await call_next(request)
+        if request.path == "/mcp":
+            posts.append(reply.status)
+        return reply
+
+    @app.get("/search", tool=True)
+    async def search(_: Request):
+        return {}
+
+    with TestClient(app) as client:
+        me = key("bob-1", "192.0.2.80")
+        client.mcp("tools/list", headers=me)
+        spent = len(posts)
+        answered = 0
+        for _ in range(8):
+            try:
+                client.call_tool("search", headers=me)
+            except Exception:  # the first refusal ends the count
+                break
+            answered += 1
+        # Each `/mcp` request spends one from the app's budget. The tool
+        # inside it spending another would run the budget out at half this.
+        check(answered == 6 - spent,
+              f"{answered} tool calls fit in what {spent} handshake request(s) left of "
+              f"a budget of 6")
+        over = client.http.post("/mcp", json={"jsonrpc": "2.0", "id": 9, "method": "ping"},
+                                headers=me)
+        check(over.status_code == 429,
+              f"a request past the app's limit was answered {over.status_code}")
+
+
 def the_guide_example_works() -> None:
     app = App(rate_limit=RateLimit("600/minute"), trusted_proxies=["10.0.0.0/8", "127.0.0.1"])
 
@@ -388,7 +569,9 @@ def main() -> None:
                  route_limits_are_their_own, both_limits_apply, keyed_on_a_header,
                  the_client_address, ipv6_counts_by_block, agents_spend_the_same_budget,
                  probes_and_scrapes_are_never_limited, sockets_are_limited_before_the_handshake,
-                 memory_is_reclaimed, the_guide_example_works):
+                 memory_is_reclaimed, keyed_on_the_caller, refused_scopes_still_spend,
+                 caller_limits_reach_tools_and_sockets, tools_spend_the_app_limit_once,
+                 the_guide_example_works):
         try:
             step()
             print(f"  {step.__name__}: ok")

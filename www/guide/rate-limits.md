@@ -12,7 +12,8 @@ async def login(request): ...
 A client over a limit is answered `429 Too Many Requests` with `Retry-After`,
 before its request reaches a worker loop: no body is read, no handler or
 middleware runs. A limit that let the request in first would protect the
-handler and nothing else.
+handler and nothing else. The one exception is a limit [per
+user](#per-user), which has to wait for authentication.
 
 [`max_concurrency`](../running.md#backpressure) protects the server from too
 much work in total. A rate limit protects it, and the other clients, from one
@@ -63,8 +64,8 @@ request.
 
 A route's limit applies however it is reached. An agent calling the route as an
 [MCP tool](../agents.md) spends from the same budget as an HTTP client at
-the same address, and over the limit gets an error result carrying the same
-`429` problem.
+the same address, or as the same user for a [per-user](#per-user) limit, and
+over the limit gets an error result carrying the same `429` problem.
 
 [Health probes](health.md), the [metrics](metrics.md) endpoint and CORS
 preflights are never limited.
@@ -85,6 +86,36 @@ async def search(request, q: str): ...
 A request without the header is counted by its address. Combine a header key
 with an app-wide limit by address: anyone can invent a new header value, so
 the address limit is what stops a client that sends a fresh one each time.
+
+### Per user
+
+`key="principal"` counts by who [`auth=`](auth.md) found: the scheme and the
+principal's subject. One user is one budget whichever of their API keys,
+tokens or sessions a request carries, and from whatever address:
+
+```python
+import os
+
+from oxbrook.auth import JWT
+
+auth = JWT(key=os.environ["JWT_SECRET"], algorithms=["HS256"], audience="notes")
+app = App(auth=auth, rate_limit=RateLimit("600/minute"))
+
+@app.post("/reports", rate_limit=RateLimit("20/hour", key="principal"))
+async def create_report(request): ...
+```
+
+A request with no principal is counted by its address: an anonymous caller on
+an [`optional`](auth.md) route, a request to a route without `auth=`, and a
+credential that was refused, so guessing keys or tokens is limited as well.
+A caller authenticated but refused a scope or role has still spent from their
+own budget.
+
+Who the caller is is known only once authentication has run, so this limit is
+checked on a worker loop, after authentication and before the body is read or
+any route middleware runs. A refused request has cost that much, which is why
+the example keeps an app-wide limit by address in front of it: that one is
+still checked before the loop.
 
 ## Behind a proxy
 

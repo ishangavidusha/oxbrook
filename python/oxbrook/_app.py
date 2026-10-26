@@ -544,10 +544,11 @@ class App:
             if not chain and not mapped:
                 return target
             return self._layer(target, chain, self._handlers(route))
+        limits = self._caller_limits(route)
         if self._resource_metadata is not None and route.path == self.mcp_url:
-            gate = _auth.ResourceGate(route.auth, self._resource_metadata)
+            gate = _auth.ResourceGate(route.auth, self._resource_metadata, limits)
         else:
-            gate = _auth.Gate(route.auth)
+            gate = _auth.Gate(route.auth, limits)
         if socket:
             link = gate.socket_middleware()
         elif not chain and not mapped:
@@ -567,8 +568,23 @@ class App:
         middleware must not be skipped either, since a router may guard with
         it.
         """
-        link = _auth.forget if route.auth is None else _auth.Gate(route.auth).middleware()
+        if route.auth is None:
+            link = _auth.forget
+        else:
+            # The route's own limit only: the app's was spent by the `/mcp`
+            # request that carried the call.
+            link = _auth.Gate(route.auth, self._caller_limits(route, app=False)).middleware()
         return self._layer(route.target, [link, *route.middleware], self._handlers(route))
+
+    def _caller_limits(self, route: RouteInfo, app: bool = True) -> tuple:
+        """The limits keyed on the caller that the route's gate spends from,
+        the app's first, as the server orders the ones it checks itself."""
+        limits = []
+        if app and self.rate_limit is not None and not self._unlimited(route):
+            limits.append(self.rate_limit)
+        if route.rate_limit is not None:
+            limits.append(route.rate_limit)
+        return tuple(limit for limit in limits if limit.key == "principal")
 
     def per_worker(self, total: int) -> int:
         """One worker loop's share of a process-wide budget.
@@ -1033,7 +1049,8 @@ class App:
             None if self.metrics is None else self.metrics.as_spec(),
             self.trusted_proxies,
             None if self.rate_limit is None else self.rate_limit._limiter,
-            [(None if r.rate_limit is None else r.rate_limit._limiter, self._unlimited(r))
+            [(None if r.rate_limit is None else r.rate_limit._limiter, self._unlimited(r),
+              r.auth is not None)
              for r in self.routes],
             tracing is not None,
             admin,

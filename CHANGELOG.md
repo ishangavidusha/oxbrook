@@ -7,6 +7,12 @@ release does not; changes that break existing code are listed under
 
 ## Unreleased
 
+- **Rate limits per user.** `RateLimit(..., key="principal")` counts by the
+  caller `auth=` found, so one user is one budget across all their keys,
+  tokens and sessions and from any address. A request with no caller,
+  including one whose credential was refused, counts by its address. The
+  check runs after authentication, on a worker loop, and its `429`s are
+  counted in the metrics like the server's own.
 - **HTTP/2 accepts 64 KiB of request headers**, up from 16 KiB. A request
   with 20 KiB of cookies was served over HTTP/1.1 and refused with `431` over
   HTTP/2. The limits on both protocols are now documented.

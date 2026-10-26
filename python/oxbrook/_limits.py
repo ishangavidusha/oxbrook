@@ -11,6 +11,7 @@ used on several routes is one budget across all of them.
 """
 
 import ipaddress
+import math
 import re
 from collections.abc import Sequence
 from typing import Any
@@ -24,6 +25,10 @@ _MAX_BURST = 100_000
 #: A microsecond between requests at the shortest period.
 _MAX_COUNT = 1_000_000
 
+#: Marks a `429` a gate answered for a limit keyed on the caller, so the
+#: server counts it as limited; it removes the header before the reply leaves.
+LIMITED = "x-oxbrook-limited"
+
 
 class RateLimit:
     """At most `rate` requests per client, such as `"100/minute"`.
@@ -35,18 +40,28 @@ class RateLimit:
     most 100,000), so a client that has been quiet can spend a whole period's
     budget at once.
 
-    `key` is what counts as one client: `"client"`, the address, or
-    `"header:<name>"`, the value of that header, such as an API key. A
-    request without the header is counted by its address. Addresses come from
-    the connection, or through the proxies `App(trusted_proxies=...)` names;
-    IPv6 addresses count by their /64, since one host is normally given a
-    whole block.
+    `key` is what counts as one client:
 
-    Over the limit, the answer is `429` with `Retry-After`, before the
-    request reaches a worker loop. One instance is one budget: the same
-    `RateLimit` on two routes limits them together. Budgets are kept in
-    memory, per process, so behind a load balancer each instance counts on its
-    own.
+    - `"client"`, the address. Addresses come from the connection, or through
+      the proxies `App(trusted_proxies=...)` names; IPv6 addresses count by
+      their /64, since one host is normally given a whole block.
+    - `"header:<name>"`, the value of that header, such as an API key. A
+      request without the header is counted by its address.
+    - `"principal"`, the caller `auth=` found: the scheme and its subject, so
+      one user is one budget whatever token or session they arrive with. A
+      request with no caller (anonymous on an optional route, a credential
+      that failed, a route without `auth=`) is counted by its address.
+
+    Over the limit, the answer is `429` with `Retry-After`. For `"client"`
+    and `"header:..."` that is decided before the request reaches a worker
+    loop. A `"principal"` limit can only be checked once authentication has
+    run, on a worker loop and before the body is read, so a refused request
+    has cost that much; pair it with an address limit where the loops need
+    protecting from callers who never authenticate.
+
+    One instance is one budget: the same `RateLimit` on two routes limits
+    them together. Budgets are kept in memory, per process, so behind a load
+    balancer each instance counts on its own.
     """
 
     __slots__ = ("_limiter", "burst", "key", "rate")
@@ -70,20 +85,31 @@ class RateLimit:
                 f"burst must be a whole number from 1 to {_MAX_BURST}, not {burst!r}"
             )
         header = None
-        if key != "client":
+        if key not in ("client", "principal"):
             name = key[len("header:"):] if isinstance(key, str) and key.startswith("header:") \
                 else None
             if not name or not _HEADER.match(name):
-                raise ValueError(f"key must be 'client' or 'header:<name>', not {key!r}")
+                raise ValueError(
+                    f"key must be 'client', 'principal' or 'header:<name>', not {key!r}"
+                )
             header = name.lower()
         self.rate = f"{count}/{unit}"
         self.burst = burst
         self.key = key if header is None else f"header:{header}"
         interval = _UNITS[unit] * 1_000_000_000 // count
-        self._limiter = Limiter(interval, burst, header)
+        self._limiter = Limiter(interval, burst, header, key == "principal")
 
     def __repr__(self) -> str:
         return f"RateLimit({self.rate!r}, burst={self.burst}, key={self.key!r})"
+
+
+def refused(wait: float) -> Any:
+    """The `429` a gate raises, as the server's own: rounded up the same way,
+    and marked so the server counts it as limited."""
+    from ._errors import HTTPError
+
+    return HTTPError(429, "rate limit exceeded",
+                     {"retry-after": str(max(1, math.ceil(wait))), LIMITED: "1"})
 
 
 def check(value: Any, where: str) -> Any:

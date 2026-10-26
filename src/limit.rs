@@ -64,6 +64,11 @@ enum Key {
     /// A header's value, such as an API key. A request without the header is
     /// keyed on its client instead.
     Header(HeaderName),
+    /// Who `auth=` found, which only a worker loop knows: spent there, after
+    /// authentication, by `take_principal`. The server checks it only where
+    /// nothing authenticates (no `auth=`, no route matched), and there every
+    /// caller is anonymous, so keyed on the client.
+    Principal,
 }
 
 pub struct Limit {
@@ -77,8 +82,9 @@ pub struct Limit {
 }
 
 impl Limit {
-    fn new(interval: u64, burst: u64, header: Option<&str>) -> PyResult<Self> {
+    fn new(interval: u64, burst: u64, header: Option<&str>, principal: bool) -> PyResult<Self> {
         let key = match header {
+            None if principal => Key::Principal,
             None => Key::Client,
             Some(name) => Key::Header(
                 HeaderName::from_bytes(name.as_bytes())
@@ -125,10 +131,32 @@ impl Limit {
         hasher.finish()
     }
 
+    /// Whether this limit is keyed on the authenticated caller, and so left
+    /// to the route's gate wherever there is one.
+    pub fn by_principal(&self) -> bool {
+        matches!(self.key, Key::Principal)
+    }
+
     /// Spend one request of the key's budget, or say how long until there is
     /// one to spend.
     pub fn take(&self, client: Option<IpAddr>, headers: &HeaderMap) -> Result<(), Duration> {
-        let key = self.key(client, headers);
+        self.spend(self.key(client, headers))
+    }
+
+    /// Spend from the budget of the caller a scheme found. Subjects are only
+    /// unique within a scheme (an API key's id and a user's id can both be
+    /// "7"), so the scheme is part of the key. The marker byte keeps a
+    /// subject from ever sharing a key with an address.
+    pub fn take_principal(&self, scheme: &str, subject: &str) -> Result<(), Duration> {
+        let mut hasher = self.seed.build_hasher();
+        hasher.write_u8(2);
+        hasher.write(scheme.as_bytes());
+        hasher.write_u8(0);
+        hasher.write(subject.as_bytes());
+        self.spend(hasher.finish())
+    }
+
+    fn spend(&self, key: u64) -> Result<(), Duration> {
         let now = self.start.elapsed().as_nanos() as u64;
         let shard = &self.shards[(key >> (64 - SHARDS.trailing_zeros())) as usize];
         // Held for a map lookup and nothing else: never across an await, and
@@ -202,10 +230,20 @@ pub struct Limiter {
 #[pymethods]
 impl Limiter {
     #[new]
-    #[pyo3(signature = (interval_ns, burst, header = None))]
-    fn py_new(interval_ns: u64, burst: u64, header: Option<String>) -> PyResult<Self> {
+    #[pyo3(signature = (interval_ns, burst, header = None, principal = false))]
+    fn py_new(
+        interval_ns: u64,
+        burst: u64,
+        header: Option<String>,
+        principal: bool,
+    ) -> PyResult<Self> {
         Ok(Self {
-            inner: Arc::new(Limit::new(interval_ns, burst, header.as_deref())?),
+            inner: Arc::new(Limit::new(
+                interval_ns,
+                burst,
+                header.as_deref(),
+                principal,
+            )?),
         })
     }
 
@@ -215,6 +253,15 @@ impl Limiter {
     fn take(&self, request: &Request) -> Option<f64> {
         self.inner
             .take(request.client, &request.headers)
+            .err()
+            .map(|wait| wait.as_secs_f64())
+    }
+
+    /// Spend one request for the caller `auth=` found: None when allowed,
+    /// else the seconds until one is. Called by the route's gate.
+    fn take_principal(&self, scheme: &str, subject: &str) -> Option<f64> {
+        self.inner
+            .take_principal(scheme, subject)
             .err()
             .map(|wait| wait.as_secs_f64())
     }
