@@ -48,6 +48,12 @@ BLOCK_MS = 5_000
 #: the first command after the restart finds a stale pooled connection and
 #: redis-py surfaces it instead of reconnecting.
 CONNECT_RETRIES = 3
+#: Connections one worker loop's client may hold, and how long a command
+#: waits for one to come free. redis-py's own pool raises the moment a
+#: hundred and first command is in flight; on a busy loop that was most of a
+#: burst of publishes failing outright. Waiting turns a burst into a queue.
+POOL_SIZE = 100
+POOL_WAIT = 10.0
 
 
 def _encode(value: Any) -> bytes:
@@ -271,12 +277,15 @@ class RedisBackend:
                 from redis.exceptions import TimeoutError as RedisTimeoutError
                 from redis.retry import Retry
 
-                existing = aioredis.Redis.from_url(
+                pool = aioredis.BlockingConnectionPool.from_url(
                     self.url,
+                    max_connections=POOL_SIZE,
+                    timeout=POOL_WAIT,
                     decode_responses=False,
                     retry=Retry(ExponentialBackoff(cap=1.0, base=0.05), CONNECT_RETRIES),
                     retry_on_error=[RedisConnectionError, RedisTimeoutError],
                 )
+                existing = aioredis.Redis(connection_pool=pool)
                 self._clients[loop] = existing
             return existing
 

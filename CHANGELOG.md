@@ -7,6 +7,10 @@ release does not; changes that break existing code are listed under
 
 ## Unreleased
 
+- **Fixed: bursts of durable-topic publishes failed.** More than a hundred
+  Redis commands in flight on one worker loop raised instead of waiting for a
+  connection, so most of a burst of `emit()`s to a durable topic failed. They
+  now wait for a free connection.
 - **Multipart uploads can be streamed.** `body.parts()` on a `BodyStream`
   reads `multipart/form-data` a part at a time as it arrives, so a large file
   goes to disk without the body or the file being held in memory. It uses the

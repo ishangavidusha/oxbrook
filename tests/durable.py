@@ -127,6 +127,20 @@ async def separate_process():
     await backend.close()
 
 
+async def a_burst_of_publishes():
+    """I-152: more commands in flight on one loop than the pool has
+    connections. redis-py's pool raised past a hundred, so most of a burst of
+    publishes failed; they wait for a connection now."""
+    backend = RedisBackend(URL, prefix=PREFIX)
+    results = await asyncio.gather(*(backend.publish("burst", {"i": i}) for i in range(1000)),
+                                   return_exceptions=True)
+    errors = [r for r in results if isinstance(r, Exception)]
+    check(not errors, f"{len(errors)} of 1000 concurrent publishes failed: {errors[:1]!r}")
+    check(await backend.client().xlen(backend.key("burst")) == 1000,
+          "a burst of 1000 publishes did not all land")
+    await backend.close()
+
+
 async def at_least_once():
     """The milestone's exit criterion: killed mid-work, resumes losing nothing."""
     backend = RedisBackend(URL, prefix=PREFIX)
@@ -568,8 +582,8 @@ def tickets_across_processes():
 
 
 async def main_async():
-    for step in (persistence_and_history, cross_node, separate_process, at_least_once,
-                 competing_consumers, claiming_from_a_dead_consumer,
+    for step in (persistence_and_history, cross_node, separate_process, a_burst_of_publishes,
+                 at_least_once, competing_consumers, claiming_from_a_dead_consumer,
                  survives_a_dropped_connection, refusals, trimming, resuming,
                  resuming_under_load):
         try:
