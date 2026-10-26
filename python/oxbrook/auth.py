@@ -1494,7 +1494,7 @@ class Tickets(Scheme):
 
         @app.post("/ws-ticket", auth=users)
         async def ws_ticket(_: Request, who: Principal = Depends(principal)):
-            return {"ticket": tickets.issue(who)}
+            return {"ticket": await tickets.issue(who)}
 
         @app.websocket("/feed", auth=tickets)
         async def feed(_: Request, ws, who: Principal = Depends(principal)): ...
@@ -1508,14 +1508,19 @@ class Tickets(Scheme):
     Only a WebSocket upgrade reads one: on any other request a ticket in the
     query string is ignored, and no other scheme reads the query string.
 
-    Tickets are kept in the process that issued them. Behind a load balancer
-    with several processes, the socket must reach the process the ticket
-    came from.
+    By default tickets are kept in the process that issued them, so behind a
+    load balancer with several processes the socket must reach the process
+    the ticket came from. With `redis_url` they are kept in Redis instead and
+    any process can redeem one, still once: Redis removes it in the same step
+    that reads it. A ticket kept there carries the principal's subject,
+    scheme, scopes, roles and claims, which must be JSON values; it cannot
+    carry `user`, so `issue()` refuses a principal that has one. If Redis
+    cannot be reached, issuing or redeeming answers `503`.
     """
 
     def __init__(
         self, *, ttl: float = 30, param: str = "ticket", name: str = "ticket",
-        limit: int = 100_000,
+        limit: int = 100_000, redis_url: str | None = None,
     ) -> None:
         if ttl <= 0:
             raise ValueError("ttl is seconds, more than 0")
@@ -1524,11 +1529,25 @@ class Tickets(Scheme):
         self.name = name
         self.limit = limit
         self._waiting: dict[str, tuple[float, Principal]] = {}
+        self._redis: Any = None
+        if redis_url is not None:
+            from ._redis import HAVE_REDIS, RedisBackend
 
-    def issue(self, who: Principal) -> str:
+            if not HAVE_REDIS:
+                raise RuntimeError(
+                    "tickets kept in Redis need the redis package: pip install 'oxbrook[redis]'"
+                )
+            # Its client per worker loop (invariant 11); nothing connects yet.
+            self._redis = RedisBackend(redis_url, prefix="oxbrook:ticket:")
+
+    async def issue(self, who: Principal) -> str:
         """A new ticket for `who`, good for one socket within `ttl` seconds."""
         if not isinstance(who, Principal):
             raise TypeError("issue() takes the Principal the socket should have")
+        ticket = secrets.token_urlsafe(32)
+        if self._redis is not None:
+            await self._keep(ticket, who)
+            return ticket
         now = time.monotonic()
         waiting = self._waiting
         if len(waiting) >= self.limit:
@@ -1541,9 +1560,55 @@ class Tickets(Scheme):
                     waiting.pop(key, None)
             except RuntimeError:
                 pass  # another loop changed it mid-pass; the next issue trims
-        ticket = secrets.token_urlsafe(32)
         waiting[ticket] = (now + self.ttl, who)
         return ticket
+
+    def _key(self, ticket: str) -> str:
+        # Hashed, so the keys a Redis MONITOR or SCAN shows open nothing.
+        return self._redis.key(hashlib.sha256(ticket.encode()).hexdigest())
+
+    async def _keep(self, ticket: str, who: Principal) -> None:
+        from ._schema import encode
+
+        if who.user is not None:
+            raise TypeError(
+                "a ticket kept in Redis cannot carry Principal.user; issue "
+                "dataclasses.replace(who, user=None) and look the user up from "
+                "who.subject when the socket opens"
+            )
+        record = encode({
+            "subject": who.subject, "scheme": who.scheme, "scopes": sorted(who.scopes),
+            "roles": sorted(who.roles), "claims": dict(who.claims),
+        })
+        from redis.exceptions import RedisError
+
+        expiry = max(1, round(self.ttl * 1000))
+        try:
+            await self._redis.client().set(self._key(ticket), record, px=expiry)
+        except (RedisError, OSError) as exc:
+            logger.error("websocket ticket not stored: %s", exc, extra={"scheme": self.name})
+            raise _unreachable() from None
+
+    async def _redeem(self, ticket: str) -> Principal | None:
+        import json
+
+        from redis.exceptions import RedisError
+
+        try:
+            # GETDEL: read and removed in one step, so two processes offered
+            # the same ticket cannot both get it.
+            raw = await self._redis.client().getdel(self._key(ticket))
+        except (RedisError, OSError) as exc:
+            logger.error("websocket ticket not read: %s", exc, extra={"scheme": self.name})
+            raise _unreachable() from None
+        if raw is None:
+            return None
+        record = json.loads(raw)
+        return Principal(
+            subject=record["subject"], scheme=record["scheme"],
+            scopes=frozenset(record["scopes"]), roles=frozenset(record["roles"]),
+            claims=record["claims"],
+        )
 
     async def authenticate(self, request: Any) -> Principal | None:
         if (request.header("upgrade") or "").strip().lower() != "websocket":
@@ -1556,13 +1621,23 @@ class Tickets(Scheme):
         offered = [v for k, v in parse_qsl(query, keep_blank_values=True) if k == self.param]
         if not offered:
             return None
-        # Popped, whatever happens next: single use means a second attempt
-        # with the same ticket fails even if the first was refused later.
-        entry = self._waiting.pop(offered[0], None) if len(offered) == 1 else None
-        if entry is None or entry[0] < time.monotonic():
+        if len(offered) != 1:
+            who = None
+        elif self._redis is not None:
+            who = await self._redeem(offered[0])
+        else:
+            # Popped, whatever happens next: single use means a second attempt
+            # with the same ticket fails even if the first was refused later.
+            entry = self._waiting.pop(offered[0], None)
+            who = entry[1] if entry is not None and entry[0] >= time.monotonic() else None
+        if who is None:
             logger.info("websocket ticket refused", extra={"scheme": self.name})
             raise Unauthenticated("ticket invalid")
-        return entry[1]
+        return who
+
+
+def _unreachable() -> HTTPError:
+    return HTTPError(503, "the ticket store could not be reached", {"retry-after": "5"})
 
 
 # Last: the login flow is built from the schemes above.

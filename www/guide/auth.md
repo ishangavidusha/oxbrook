@@ -700,7 +700,7 @@ tickets = Tickets()
 
 @app.post("/ws-ticket", auth=users)                # an ordinary authenticated call
 async def ws_ticket(_: Request, who: Principal = Depends(principal)):
-    return {"ticket": tickets.issue(who)}
+    return {"ticket": await tickets.issue(who)}
 
 @app.websocket("/feed", auth=tickets)
 async def feed(_: Request, ws, who: Principal = Depends(principal)):
@@ -714,9 +714,23 @@ const ws = new WebSocket(`wss://api.example.com/feed?ticket=${ticket}`);
 
 A ticket is read only from a WebSocket upgrade, is removed the moment it is
 presented, and expires after `ttl` seconds. `auth=tickets | web` accepts either
-a ticket or a session cookie. Tickets are kept in the process that issued
-them, so behind a load balancer with several processes the socket has to
-reach the same one.
+a ticket or a session cookie.
+
+Tickets are kept in the process that issued them, so behind a load balancer
+with several processes the socket has to reach the same one, unless they are
+kept in Redis:
+
+```python
+tickets = Tickets(redis_url="redis://redis:6379")
+```
+
+Any process can then redeem a ticket, and still only once: Redis removes it in
+the same step that reads it. A ticket kept there holds the principal's
+subject, scheme, scopes, roles and claims, so claims must be JSON values, and
+`user` is not carried: `issue()` refuses a principal that has one, and the
+socket's handler looks the user up from `who.subject`. When Redis cannot be
+reached, issuing a ticket or opening a socket with one answers `503`. Redis is
+an optional dependency: `pip install 'oxbrook[redis]'`.
 
 The check runs when the socket opens, so by default a connection can outlive
 the credential that opened it. `recheck=` runs `auth=` again on an interval,

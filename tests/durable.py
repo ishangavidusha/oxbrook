@@ -17,6 +17,7 @@ import os
 import subprocess
 import sys
 import textwrap
+import time
 import uuid
 
 from oxbrook import App
@@ -447,6 +448,125 @@ def resuming_over_sse():
     asyncio.run(app._backend.close())
 
 
+def tickets_across_processes():
+    """A WebSocket ticket issued by one process opens a socket on another, once."""
+    import hashlib
+    import json
+
+    import httpx
+    from oxbrook import Depends, HTTPError, Request
+    from oxbrook.auth import Principal, Tickets, principal
+    from oxbrook.testing import TestClient
+
+    script = textwrap.dedent(f"""
+        import asyncio
+        from oxbrook.auth import Principal, Tickets
+
+        async def main():
+            who = Principal(subject="p1", scheme="keys", scopes={{"read"}},
+                            roles={{"member"}}, claims={{"tid": "t", "n": 3}})
+            print(await Tickets(redis_url={URL!r}).issue(who))
+            print(await Tickets(redis_url={URL!r}, ttl=0.2).issue(who))
+
+        asyncio.run(main())
+    """)
+    result = subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True, timeout=60
+    )
+    if result.returncode != 0:
+        failures.append(f"ticket subprocess failed: {result.stderr[-400:]}")
+        return
+    ticket, short = result.stdout.split()
+
+    tickets = Tickets(redis_url=URL)
+    app = App()
+
+    @app.websocket("/ws", auth=tickets)
+    async def ws(_: Request, sock, who=Depends(principal)):
+        await sock.send(json.dumps({
+            "subject": who.subject, "scheme": who.scheme, "scopes": sorted(who.scopes),
+            "roles": sorted(who.roles), "claims": dict(who.claims),
+        }))
+
+    upgrade = {
+        "connection": "upgrade", "upgrade": "websocket", "sec-websocket-version": "13",
+        "sec-websocket-key": "dGhlIHNhbXBsZSBub25jZQ==",
+    }
+    with TestClient(app) as c:
+        async def receive(path):
+            async with c.websocket(path) as sock:
+                return json.loads(await asyncio.wait_for(sock.recv(), 5))
+
+        got = asyncio.run(receive(f"/ws?ticket={ticket}"))
+        check(got == {"subject": "p1", "scheme": "keys", "scopes": ["read"],
+                      "roles": ["member"], "claims": {"tid": "t", "n": 3}},
+              f"a ticket from another process opened a socket as {got}")
+        r = httpx.get(f"{c.base_url}/ws?ticket={ticket}", headers=upgrade)
+        check(r.status_code == 401, f"a used ticket answered {r.status_code}")
+        time.sleep(0.3)
+        r = httpx.get(f"{c.base_url}/ws?ticket={short}", headers=upgrade)
+        check(r.status_code == 401, f"an expired ticket answered {r.status_code}")
+
+    class Upgrade:
+        def __init__(self, ticket):
+            self.query = f"ticket={ticket}"
+
+        def header(self, name):
+            return "websocket" if name == "upgrade" else None
+
+    async def race():
+        # One process per redeemer: each its own Tickets, so its own connection.
+        ticket = await Tickets(redis_url=URL).issue(Principal(subject="once"))
+        redeemers = [Tickets(redis_url=URL) for _ in range(8)]
+
+        async def attempt(t):
+            try:
+                return await t.authenticate(Upgrade(ticket))
+            except HTTPError as exc:
+                return exc.status
+
+        got = await asyncio.gather(*(attempt(t) for t in redeemers))
+        for t in redeemers:
+            await t._redis.close()
+        return ticket, got
+
+    ticket, got = asyncio.run(race())
+    opened = [g for g in got if isinstance(g, Principal)]
+    check(len(opened) == 1 and got.count(401) == 7,
+          f"eight processes offered one ticket at once: {got}")
+
+    async def keys(ticket):
+        client = tickets._redis.client()
+        hashed = hashlib.sha256(ticket.encode()).hexdigest()
+        try:
+            return (await client.exists(f"oxbrook:ticket:{ticket}"),
+                    await client.exists(f"oxbrook:ticket:{hashed}"))
+        finally:
+            await tickets._redis.close()
+
+    ticket = asyncio.run(tickets.issue(Principal(subject="k")))
+    check(asyncio.run(keys(ticket)) == (0, 1),
+          "a ticket is stored under its own value rather than a hash of it")
+
+    try:
+        asyncio.run(tickets.issue(Principal(subject="u", user=object())))
+        failures.append("a principal with a user was issued a ticket kept in Redis")
+    except TypeError:
+        pass
+
+    gone = Tickets(redis_url="redis://127.0.0.1:1")
+    try:
+        asyncio.run(gone.issue(Principal(subject="x")))
+        failures.append("issuing a ticket with Redis unreachable succeeded")
+    except HTTPError as exc:
+        check(exc.status == 503, f"issuing with Redis unreachable raised {exc.status}")
+    try:
+        asyncio.run(gone.authenticate(Upgrade("anything")))
+        failures.append("redeeming a ticket with Redis unreachable succeeded")
+    except HTTPError as exc:
+        check(exc.status == 503, f"redeeming with Redis unreachable raised {exc.status}")
+
+
 async def main_async():
     for step in (persistence_and_history, cross_node, separate_process, at_least_once,
                  competing_consumers, claiming_from_a_dead_consumer,
@@ -458,12 +578,13 @@ async def main_async():
         except Exception as exc:
             failures.append(f"{step.__name__} raised {type(exc).__name__}: {exc}")
             print(f"  {step.__name__}: ERROR")
-    try:
-        await asyncio.to_thread(resuming_over_sse)
-        print("  resuming_over_sse: ok")
-    except Exception as exc:
-        failures.append(f"resuming_over_sse raised {type(exc).__name__}: {exc}")
-        print("  resuming_over_sse: ERROR")
+    for step in (resuming_over_sse, tickets_across_processes):
+        try:
+            await asyncio.to_thread(step)
+            print(f"  {step.__name__}: ok")
+        except Exception as exc:
+            failures.append(f"{step.__name__} raised {type(exc).__name__}: {exc}")
+            print(f"  {step.__name__}: ERROR")
 
 
 def main() -> None:

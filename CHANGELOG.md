@@ -7,6 +7,14 @@ release does not; changes that break existing code are listed under
 
 ## Unreleased
 
+- **Breaking: `Tickets.issue()` is a coroutine.** Write
+  `await tickets.issue(who)`; a ticket kept in Redis is written before it is
+  handed out.
+- **WebSocket tickets across processes.** `Tickets(redis_url=...)` keeps
+  tickets in Redis, so a socket can reach any process behind a load balancer
+  and a ticket still opens only one. The principal's subject, scheme, scopes,
+  roles and claims travel with it; `user` does not, and `issue()` refuses a
+  principal that has one.
 - **Worker-count detection on Windows** counts physical cores, and the
   performance cores of a hybrid processor, as it already did on macOS and
   Linux. It counted logical processors before, so hyper-threading doubled

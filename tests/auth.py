@@ -410,12 +410,12 @@ async def ws_open(_: Request, sock, who=Depends(principal)):
 # Tickets: issued by an authenticated call, spent by one socket.
 @app.post("/ticket", auth=keys)
 async def ticket(_: Request, who=Depends(principal)):
-    return {"ticket": tickets.issue(who)}
+    return {"ticket": await tickets.issue(who)}
 
 
 @app.post("/ticket-short", auth=keys)
 async def ticket_short(_: Request, who=Depends(principal)):
-    return {"ticket": short_tickets.issue(who)}
+    return {"ticket": await short_tickets.issue(who)}
 
 
 @app.websocket("/ws-ticket", auth=tickets)
@@ -1024,7 +1024,7 @@ def websocket_tickets(c: TestClient) -> None:
           "a ticket seen on plain HTTP was used up there")
     # Bounded, oldest first.
     few = Tickets(limit=3)
-    issued = [few.issue(Principal(subject=str(i))) for i in range(5)]
+    issued = [asyncio.run(few.issue(Principal(subject=str(i)))) for i in range(5)]
     check(len(few._waiting) <= 3 and issued[-1] in few._waiting,
           f"a limit of 3 holds {len(few._waiting)}, newest kept: {issued[-1] in few._waiting}")
 
@@ -1482,7 +1482,7 @@ def sockets_are_rechecked() -> None:
         # Opened with a ticket: nothing to present again, so the key it also
         # carries is what is re-checked.
         def ticketed(key):
-            ticket = socket_tickets.issue(Principal(subject="t1", roles={"member"}))
+            ticket = asyncio.run(socket_tickets.issue(Principal(subject="t1", roles={"member"})))
             return f"/either?ticket={ticket}", {} if key is None else {"x-api-key": key}
 
         path, headers = ticketed(None)
