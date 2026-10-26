@@ -28,7 +28,7 @@ from ._auth import UNSET as _UNSET
 from ._bodies import BodyStream
 from ._depends import Depends
 from ._depends import bind as bind_dependencies
-from ._forms import Form
+from ._forms import Form, has_files
 from ._schema import (
     HAVE_PYDANTIC,
     RequestValidationError,
@@ -459,11 +459,15 @@ def build_route(
             )
         )
 
-    if tool and (form is not None or stream is not None):
+    if tool and stream is not None:
         raise TypeError(
-            f"{where}: a route that reads a {'form' if form is not None else 'streamed body'} "
-            f"cannot be an agent tool; tool arguments arrive as JSON. Use a pydantic "
-            f"body for a tool=True route"
+            f"{where}: a route that reads a streamed body cannot be an agent tool; tool "
+            f"arguments arrive as JSON. Use a pydantic body for a tool=True route"
+        )
+    if tool and form is not None and has_files(form[1]):
+        raise TypeError(
+            f"{where}: a form with files cannot be an agent tool; tool arguments arrive "
+            f"as JSON. Take the file's content in a pydantic body for a tool=True route"
         )
 
     response_model = hints.get("return")

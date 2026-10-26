@@ -14,6 +14,7 @@ agent by default.
 import json
 import math
 from typing import Any
+from urllib.parse import urlencode
 
 from ._core import Request
 from ._response import Response
@@ -86,8 +87,11 @@ class Capability:
             if param.source == "path" or param.presence == "required":
                 required.append(param.name)
 
-        if route.body is not None:
-            _, model = route.body
+        # A form's fields are arguments exactly as a JSON body's are; only how
+        # they reach the handler differs (see `invoke`).
+        declared = route.body if route.body is not None else route.form
+        if declared is not None:
+            _, model = declared
             body_schema = model.model_json_schema(ref_template="#/$defs/{model}")
             defs.update(body_schema.pop("$defs", {}))
             # Body fields are flattened to the top level rather than nested
@@ -189,12 +193,22 @@ class Capability:
                 path = path.replace(f"{{{param.name}}}", str(params[param.name]))
                 path = path.replace(f"{{*{param.name}}}", str(params[param.name]))
 
+        headers = None if parent is None else list(parent.headers.items())
+        if self.route.form is not None:
+            # A real form body, so the route's form binding, and any middleware
+            # reading `request.form()`, see what an HTTP client would send.
+            payload = _urlencoded(body)
+            headers = [(k, v) for k, v in headers or ()
+                       if k.lower() not in ("content-type", "content-length")]
+            headers.append(("content-type", "application/x-www-form-urlencoded"))
+        else:
+            payload = json.dumps(body).encode() if body else b""
         request = Request(
             self.route.method,
             path,
             None,
-            json.dumps(body).encode() if body else b"",
-            None if parent is None else list(parent.headers.items()),
+            payload,
+            headers,
             None if parent is None else parent._context,
             None if parent is None else parent.locals,
             None if parent is None else parent.client,
@@ -218,6 +232,20 @@ class Capability:
             for fn, args, kwargs in request._take_after():
                 parent.after_response(fn, *args, **kwargs)
         return result
+
+
+def _urlencoded(fields: dict[str, Any]) -> bytes:
+    """Tool arguments as a form body: a list as a repeated field, a boolean as
+    `true`/`false`, which the form's model reads back, and None left out, as
+    a browser leaves out a field with no value."""
+    pairs: list[tuple[str, str]] = []
+    for name, value in fields.items():
+        for item in value if isinstance(value, list) else [value]:
+            if item is None:
+                continue
+            pairs.append((name, ("true" if item else "false") if isinstance(item, bool)
+                          else str(item)))
+    return urlencode(pairs).encode()
 
 
 def _limited(wait: float) -> Response:

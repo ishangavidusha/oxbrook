@@ -74,9 +74,10 @@ as its text. A tool that raises anything unhandled comes back as
 `internal error`, and the traceback goes to the log: an agent is a client, and
 exception text is not returned to clients. `App(debug=True)` includes it.
 
-Routes that read a [form or a streamed body](guide/forms.md) cannot be tools:
-tool arguments arrive as JSON, and marking one `tool=True` raises at
-registration.
+A route that binds a [form](guide/forms.md) takes its fields as arguments in
+the same way, and receives them as a URL-encoded body. A form with files and a
+route that streams its body cannot be tools: tool arguments arrive as JSON,
+and marking one `tool=True` raises at registration.
 
 ## Agents that log in
 

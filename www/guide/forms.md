@@ -148,5 +148,10 @@ On a route without a `BodyStream`, `request.stream()` yields the
 already-collected body once, so code that reads a stream works on both. On a
 streaming route, `request.body` is empty.
 
-Routes that read a form or stream a body cannot be [agent tools](../agents.md):
-tool arguments arrive as JSON.
+A route that binds a form with `Form()` can be an [agent tool](../agents.md),
+as long as the form has no files: the model's fields become the tool's
+arguments, and a call reaches the handler, and any router middleware reading
+`request.form()`, as a URL-encoded body. A list becomes a repeated field, a
+boolean `true` or `false`, and a `None` is left out. A form with files, and a
+route that streams its body, cannot be tools: tool arguments arrive as JSON,
+and `tool=True` raises at registration.

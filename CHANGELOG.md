@@ -7,6 +7,10 @@ release does not; changes that break existing code are listed under
 
 ## Unreleased
 
+- **Form routes can be agent tools.** A `tool=True` route that binds a form
+  with `Form()` takes the form's fields as tool arguments and receives them as
+  a URL-encoded body, so its middleware and validation run as over HTTP.
+  Forms with files and streaming routes are still refused.
 - **Multi-tenant Entra APIs.** `OIDC.entra("organizations", audience=...,
   tenants=[...])` accepts access tokens from the listed tenants, or from any
   with `tenants="any"`; `"common"` takes personal accounts too. Each token

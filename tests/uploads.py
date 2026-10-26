@@ -4,7 +4,9 @@
 **Forms.** `request.form()` parses URL-encoded and multipart bodies in Rust, on
 demand; `Form()` binds them to a pydantic model with the same `422` a JSON body
 gets. Wrong content types, malformed multipart, a missing boundary and too many
-parts each have their own status, and none of them is a `500`.
+parts each have their own status, and none of them is a `500`. A form route
+without files can be an agent tool: its fields are the tool's arguments, and
+the handler and the router's middleware get a real URL-encoded body.
 
 **Streaming.** A `BodyStream` argument makes a route take its body
 incrementally. Each promise is asserted against a running server:
@@ -33,7 +35,7 @@ import sys
 import time
 
 from openapi_spec_validator import validate
-from oxbrook import App, BodyStream, Form, HTTPError, Request, UploadFile
+from oxbrook import App, BodyStream, Form, HTTPError, Request, Router, UploadFile
 from oxbrook.testing import TestClient
 from pydantic import BaseModel
 
@@ -249,11 +251,67 @@ def registration_checks() -> None:
     for label, fn in [
         ("Form() on a non-model", form_not_a_model),
         ("a stream and a form on one handler", two_bodies),
-        ("a form route as a tool", form_tool),
+        ("a form route with files as a tool", form_tool),
         ("a streaming route as a tool", stream_tool),
         ("a BodyStream on a websocket", socket_stream),
     ]:
         check(build(fn), f"{label} was accepted")
+
+
+class Subscribe(BaseModel):
+    email: str
+    age: int
+    topics: list[str] = []
+    weekly: bool = True
+    note: str | None = None
+
+
+def form_routes_are_tools() -> None:
+    seen: list[dict] = []
+    router = Router()
+
+    @router.middleware
+    async def peek(request: Request, call_next):
+        form = request.form()
+        seen.append({k: form.getlist(k) for k in form})
+        return await call_next(request)
+
+    @router.post("/subscribe", tool=True)
+    async def subscribe(_: Request, data: Subscribe = Form()):
+        """Subscribe an address to the newsletter."""
+        return data.model_dump()
+
+    app = App(docs_url=None)
+    app.include(router)
+
+    with TestClient(app) as client:
+        tool = next(t for t in client.mcp("tools/list")["tools"] if t["name"] == "subscribe")
+        schema = tool["inputSchema"]
+        check(set(schema["properties"]) == {"email", "age", "topics", "weekly", "note"}
+              and set(schema["required"]) == {"email", "age"},
+              f"the form tool's schema was {schema}")
+
+        got = client.call_tool("subscribe", {"email": "a@example.com", "age": 30,
+                                             "topics": ["rust", "python"], "weekly": False,
+                                             "note": None})
+        check(got == {"email": "a@example.com", "age": 30, "topics": ["rust", "python"],
+                      "weekly": False, "note": None}, f"the form tool returned {got}")
+        check(seen[-1] == {"email": ["a@example.com"], "age": ["30"],
+                           "topics": ["rust", "python"], "weekly": ["false"]},
+              f"the router's middleware read the form as {seen[-1]}")
+
+        # The same form over HTTP gives the same answer.
+        r = client.post("/subscribe", data={"email": "a@example.com", "age": "30",
+                                            "topics": ["rust", "python"], "weekly": "false"})
+        check(r.status_code == 200 and r.json() == got,
+              f"the route over HTTP answered {r.status_code} {r.text}")
+
+        result = client.mcp("tools/call", {"name": "subscribe",
+                                           "arguments": {"email": "b@example.com",
+                                                         "age": "old"}})
+        text = "".join(p.get("text", "") for p in result.get("content", []))
+        check(result.get("isError") is True and "422" in text and "age" in text,
+              f"a form field that does not validate was not a tool error: {result}")
 
 
 def openapi_describes_bodies(client: TestClient) -> None:
@@ -393,11 +451,13 @@ def timeouts_follow_progress() -> None:
 
 
 def main() -> None:
-    try:
-        registration_checks()
-        print("  registration_checks: ok")
-    except Exception as exc:
-        failures.append(f"registration_checks raised {type(exc).__name__}: {exc}")
+    for step in (registration_checks, form_routes_are_tools):
+        try:
+            step()
+            print(f"  {step.__name__}: ok")
+        except Exception as exc:
+            failures.append(f"{step.__name__} raised {type(exc).__name__}: {exc}")
+            print(f"  {step.__name__}: ERROR")
 
     with TestClient(app, workers=2, max_body=256 * MB, timeout=60) as client:
         for step in (forms_parse, forms_bind, forms_refuse_what_they_cannot_read,
