@@ -13,8 +13,8 @@ pip install oxbrook
 - **CPython 3.14.** The free-threaded build (`python3.14t`) is the primary
   target and runs several worker loops; the standard build runs one.
 - **Linux, macOS or Windows.** Wheels are published for both interpreter
-  builds: x86-64 and ARM on Linux (manylinux 2.28) and macOS (11 or newer),
-  and x86-64 on Windows. Elsewhere pip builds from the source
+  builds: x86-64 and ARM on Linux (manylinux 2.28, and musllinux 1.2 for
+  Alpine) and macOS (11 or newer), and x86-64 on Windows. Elsewhere pip builds from the source
   distribution, which needs a Rust toolchain.
 
     Windows is a development platform here rather than a deployment one: the

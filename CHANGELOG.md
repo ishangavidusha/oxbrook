@@ -7,6 +7,9 @@ release does not; changes that break existing code are listed under
 
 ## Unreleased
 
+- **Wheels for Alpine Linux.** musllinux 1.2 wheels for x86-64 and ARM, on
+  both interpreter builds, so `pip install oxbrook` on Alpine no longer needs
+  a Rust toolchain.
 - **Followed topics deliver their messages on the 2026-07-28 MCP wire.** Each
   `notifications/resources/updated` from `subscriptions/listen` carries the
   message under `_meta["oxbrook/message"]`. An in-memory topic delivered the

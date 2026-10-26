@@ -104,8 +104,8 @@ patch = ["subprocess"]
 [tool.cibuildwheel]
 # Both 3.14 builds, nothing else: the only interpreters the suites run on.
 build = ["cp314-*", "cp314t-*"]
-# musl would need its own CI leg to mean anything; pip builds from the sdist.
-skip = ["*-musllinux_*"]
+# musllinux wheels too: each is installed and tested in its own Alpine
+# container, the same check every other wheel gets.
 build-verbosity = 1
 # Each wheel is installed into a clean environment and a handful of suites run
 # against it from a copy of tests/, away from the source tree, so the import
