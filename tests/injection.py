@@ -145,6 +145,23 @@ def teardown_sees_the_outcome() -> None:
     async def greedy_route(_: Request, g=Depends(greedy)):
         return {"ok": True}
 
+    def sync_transaction():
+        try:
+            yield "tx"
+        except BaseException as exc:
+            seen.append(("rollback", type(exc).__name__))
+            raise
+        else:
+            seen.append(("commit",))
+
+    @app.get("/unencodable")
+    async def unencodable(_: Request, tx=Depends(transaction)):
+        return {"written": object()}
+
+    @app.get("/unencodable-sync")
+    async def unencodable_sync(_: Request, tx=Depends(sync_transaction)):
+        return [object()]
+
     with TestClient(app) as c:
         check(c.get("/ok").status_code == 200, "a plain success did not answer 200")
         check(
@@ -187,6 +204,19 @@ def teardown_sees_the_outcome() -> None:
         )
 
         check(c.get("/greedy").status_code == 500, "a dependency that yielded twice was accepted")
+
+        # The response is encoded after teardown; a value that will not encode
+        # must fail inside the scope, or the write is kept and the client told
+        # it failed.
+        for path in ("/unencodable", "/unencodable-sync"):
+            seen.clear()
+            r = c.get(path)
+            check(r.status_code == 500, f"{path} answered {r.status_code}")
+            check(
+                seen == [("rollback", "PydanticSerializationError")],
+                f"{path}: teardown saw {seen}; a response that cannot be sent must "
+                f"roll back, not commit",
+            )
 
 
 def locals_are_per_request() -> None:

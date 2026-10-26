@@ -20,7 +20,9 @@ function at the top of every handler.
 Results are cached per request, so a dependency shared by three others runs
 once. Teardown runs in reverse order, like a stack of context managers, and an
 exception raised during teardown is the request's outcome: a commit that fails
-is an error response, never the handler's success.
+is an error response, never the handler's success. A return value that cannot
+be encoded as a response counts as the handler raising, so the transaction
+rolls back rather than keeping a write the client is told failed.
 
 Sync dependencies are called on the worker loop and must not block: there is no
 thread offload, by the same rule that makes handlers `async def` only.
@@ -29,6 +31,15 @@ thread offload, by the same rule that makes handlers `async def` only.
 import inspect
 from contextlib import AsyncExitStack
 from typing import Any
+
+from ._middleware import Reply
+from ._response import Response
+from ._schema import encode, is_model_instance, to_json
+from ._sse import SSE
+
+#: Set in a request's dependency cache once a dependency has teardown, which
+#: is when the handler's result must be known to encode before it runs.
+_TEARDOWN = object()
 
 
 class Depends:
@@ -175,12 +186,14 @@ async def _resolve(
         except StopAsyncIteration:
             raise RuntimeError(f"dependency {_name(fn)} returned without yielding") from None
         stack.push_async_exit(_async_exit(fn, produced))
+        cache[_TEARDOWN] = True
     elif inspect.isgenerator(produced):
         try:
             value = next(produced)
         except StopIteration:
             raise RuntimeError(f"dependency {_name(fn)} returned without yielding") from None
         stack.push(_sync_exit(fn, produced))
+        cache[_TEARDOWN] = True
     elif inspect.isawaitable(produced):
         value = await produced
     else:
@@ -189,6 +202,29 @@ async def _resolve(
     if marker.use_cache:
         cache[fn] = value
     return value
+
+
+def _encodes(result: Any) -> None:
+    """Raise now, inside the dependencies' scope, if the response will fail to
+    encode once it has closed.
+
+    The response is encoded after the handler returns, by which time a
+    transaction has committed: a value that will not encode would answer
+    `500` for a write that was kept. Raising here instead makes teardown see
+    an exception, as a `with` block would, and roll back. The encoded bytes
+    are thrown away, so a route with teardown encodes its result twice; a
+    route whose teardown is a commit has spent far longer on the database.
+    A stream is past helping: it is sent after the scope by its nature.
+    """
+    value = result.value if isinstance(result, Reply) else result
+    if value is None or isinstance(value, (SSE, bytes, bytearray, memoryview, str)):
+        return
+    if isinstance(value, Response):
+        value.encoded()
+    elif is_model_instance(value):
+        to_json(value)
+    else:
+        encode(value)
 
 
 def bind(handler: Any, dependencies: dict[str, Depends]) -> Any:
@@ -206,7 +242,10 @@ def bind(handler: Any, dependencies: dict[str, Depends]) -> Any:
             cache: dict[Any, Any] = {}
             for name, marker in dependencies.items():
                 params[name] = await _resolve(marker, request, cache, stack)
-            return await handler(request, *socket, **params)
+            result = await handler(request, *socket, **params)
+            if _TEARDOWN in cache and not socket:
+                _encodes(result)
+            return result
 
     wrapped.__name__ = getattr(handler, "__name__", "handler")
     wrapped.__qualname__ = getattr(handler, "__qualname__", "handler")

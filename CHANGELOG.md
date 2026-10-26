@@ -7,6 +7,11 @@ release does not; changes that break existing code are listed under
 
 ## Unreleased
 
+- **Fixed: a reply that could not be encoded was sent after its transaction
+  committed.** A handler whose return value was not JSON-encodable answered
+  `500` while the write it made through a dependency was kept. On a route
+  whose dependencies have teardown, the result is now encoded first, so the
+  failure reaches the dependency and the transaction rolls back.
 - **Renewed TLS certificates are picked up without a restart.** The server
   looks at `tls_cert` and `tls_key` once a minute and serves a changed pair
   to new connections. A pair that does not load, such as a certificate whose

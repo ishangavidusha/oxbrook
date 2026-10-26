@@ -93,6 +93,7 @@ finished:
 | the handler | the transaction |
 |---|---|
 | returned | committed |
+| returned a value that cannot be encoded as JSON | rolled back, and the request is an error |
 | raised, including `HTTPError` | rolled back |
 | was cancelled because the client left | rolled back |
 | returned, but the commit failed | rolled back, and the request is an error |

@@ -53,7 +53,10 @@ async def create_user(_: Request, user: NewUser, db = Depends(transaction)):
 ```
 
 An `HTTPError` raised by the handler is an exception like any other, so it rolls
-back too. So does a request cancelled because its client left.
+back too. So does a request cancelled because its client left, and so does a
+return value that cannot be encoded as a response: on a route with teardown,
+the result is encoded before teardown runs, and failing to is the handler
+failing.
 
 Teardown runs before the response is sent, and whatever it raises is the
 request's outcome. A commit that fails is an error response, never the success

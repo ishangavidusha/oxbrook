@@ -410,6 +410,11 @@ def transactional_app(name: str, entered: list) -> App:
         await db.execute("insert into deferred values ($1)", k)
         return {"written": k}
 
+    @app.post("/unencodable/{k}")
+    async def unencodable(_: Request, k: str, db=Depends(transaction)):
+        await db.execute("insert into kept values ($1)", k)
+        return {"k": k, "handle": object()}
+
     @app.post("/slow/{k}")
     async def slow(_: Request, k: str, db=Depends(transaction)):
         await db.execute("insert into kept values ($1)", k)
@@ -461,6 +466,12 @@ def a_request_is_one_transaction() -> None:
             f"told a write succeeded when it was not kept",
         )
         check(rows("deferred") == [], f"a failed commit left {rows('deferred')}")
+
+        r = c.post("/unencodable/u")
+        check(r.status_code == 500, f"a reply that cannot be encoded answered {r.status_code}")
+        check("u" not in rows("kept"),
+              "a write was kept for a request the client was told failed: the reply "
+              "was encoded after the commit")
 
         # The client leaves while the handler is inside its transaction. The
         # handler is cancelled, CancelledError reaches the dependency's yield,
