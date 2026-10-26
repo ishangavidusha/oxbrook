@@ -7,6 +7,8 @@ release does not; changes that break existing code are listed under
 
 ## Unreleased
 
+- **Wheels for Windows on ARM.** `win_arm64` wheels on both interpreter
+  builds, built and tested on an ARM runner.
 - **Fixed: bursts of durable-topic publishes failed.** More than a hundred
   Redis commands in flight on one worker loop raised instead of waiting for a
   connection, so most of a burst of `emit()`s to a durable topic failed. They
