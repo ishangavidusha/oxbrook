@@ -70,6 +70,9 @@ watcher that looks every 5 s. A connection with nothing in flight and nothing
 started for three looks gets a graceful shutdown, which is a `GOAWAY` on
 HTTP/2; three looks later it is dropped. The watcher stops once the connection
 turns out to be HTTP/1.1, and requests on HTTP/1.1 are not counted at all.
+A WebSocket opened on an HTTP/2 stream (RFC 8441's extended `CONNECT`) counts
+as in flight until it closes, so a connection carrying a quiet socket is not
+taken for an idle one.
 
 ### Cancellation
 
@@ -195,8 +198,6 @@ a running server before it was fixed.
 
 ## Known gaps
 
-- WebSockets are HTTP/1.1 only; there is no WebSocket over HTTP/2 (RFC 8441).
-- A certificate is read at startup; a renewed one needs a restart.
 - Middleware does not wrap socket handlers, only their authorizer.
 - WebSocket origins are exact strings; there are no patterns for preview
   deployments.

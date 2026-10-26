@@ -7,6 +7,10 @@ release does not; changes that break existing code are listed under
 
 ## Unreleased
 
+- **WebSockets over HTTP/2.** The server offers RFC 8441's extended
+  `CONNECT`, so a browser on an HTTP/2 connection opens a socket as another
+  stream instead of a separate HTTP/1.1 connection. Handlers see the same
+  handshake on either protocol.
 - **Rate limits across instances.** `RateLimit(..., redis_url=..., name=...)`
   keeps the budget in Redis, so every process behind a load balancer spends
   from one budget instead of each allowing the full limit. The in-memory check

@@ -544,6 +544,9 @@ impl Protocols {
             .timer(TokioTimer::new())
             .max_header_list_size(MAX_HEADER_BYTES)
             .max_concurrent_streams(MAX_STREAMS)
+            // RFC 8441: a WebSocket on a stream of this connection, which
+            // browsers use instead of opening a second, HTTP/1.1 connection.
+            .enable_connect_protocol()
             // Pings find a peer that vanished without closing, which on a
             // quiet event stream nothing else would notice.
             .keep_alive_interval(Some(Duration::from_secs(20)))
@@ -566,6 +569,23 @@ fn lend_slot(req: &mut hyper::Request<Incoming>, slot: &ConnectionSlot) {
         req.extensions_mut().insert(slot.clone());
     }
 }
+
+/// An HTTP/2 extended CONNECT for a WebSocket (RFC 8441): the same handshake
+/// as an HTTP/1.1 upgrade, carried on one stream of a shared connection.
+fn websocket_connect(req: &hyper::Request<Incoming>) -> bool {
+    req.method() == Method::CONNECT
+        && req
+            .extensions()
+            .get::<hyper::ext::Protocol>()
+            .is_some_and(|p| p.as_str().eq_ignore_ascii_case("websocket"))
+}
+
+/// Keeps an HTTP/2 connection counted as busy while a WebSocket lives on one
+/// of its streams. The handshake's own response finishes at once, and the
+/// idle check would otherwise close a connection whose only traffic is a
+/// socket.
+#[derive(Clone)]
+struct SocketActivity(#[allow(dead_code)] Arc<Busy>);
 
 /// Requests on one HTTP/2 connection: how many are in flight, and how many
 /// have started, which tells the idle check whether anything happened between
@@ -628,6 +648,10 @@ async fn connection<S>(
     let svc = service_fn(move |mut req: hyper::Request<Incoming>| {
         lend_slot(&mut req, &slot);
         let (busy, running) = if req.version() == Version::HTTP_2 {
+            if websocket_connect(&req) {
+                req.extensions_mut()
+                    .insert(SocketActivity(Arc::new(tracked.begin())));
+            }
             (Some(tracked.begin()), Some(tracked.running.clone()))
         } else {
             // Read first: a store on every request would bounce the cache
@@ -1134,22 +1158,28 @@ async fn upgrade_websocket(
     state: Arc<State>,
     client: IpAddr,
 ) -> Response<Out> {
+    // RFC 8441 on HTTP/2: no Upgrade or key, and 200 rather than 101.
+    let connect = websocket_connect(&req);
     let headers = req.headers();
-    let upgrading = headers
-        .get(UPGRADE)
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|v| v.eq_ignore_ascii_case("websocket"))
-        && headers
-            .get(CONNECTION)
+    let upgrading = connect
+        || headers
+            .get(UPGRADE)
             .and_then(|v| v.to_str().ok())
-            .is_some_and(|v| v.to_ascii_lowercase().contains("upgrade"));
+            .is_some_and(|v| v.eq_ignore_ascii_case("websocket"))
+            && headers
+                .get(CONNECTION)
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|v| v.to_ascii_lowercase().contains("upgrade"));
 
     let version_ok = headers
         .get(SEC_WEBSOCKET_VERSION)
         .and_then(|v| v.to_str().ok())
         .is_some_and(|v| v.trim() == "13");
 
-    let key = headers.get(SEC_WEBSOCKET_KEY).cloned();
+    let key = match connect {
+        true => Some(HeaderValue::from_static("")),
+        false => headers.get(SEC_WEBSOCKET_KEY).cloned(),
+    };
 
     let (Some(key), true, true) = (key, upgrading, version_ok) else {
         // A plain GET to a socket route is a client mistake worth naming.
@@ -1172,6 +1202,17 @@ async fn upgrade_websocket(
         );
     }
 
+    // The application sees one handshake whichever protocol carried it: a
+    // GET with `Upgrade: websocket`, which is what `Tickets` looks for.
+    let method = match connect {
+        true => "GET".to_owned(),
+        false => req.method().as_str().to_owned(),
+    };
+    let mut seen = req.headers().clone();
+    if connect {
+        seen.insert(UPGRADE, HeaderValue::from_static("websocket"));
+    }
+
     // Ask the application before switching protocols. Once the 101 is sent it
     // is too late to refuse, which is why this cannot be left to the handler.
     let mut handoff = None;
@@ -1186,11 +1227,11 @@ async fn upgrade_websocket(
             Pending {
                 route: matched.route,
                 params: matched.params.iter().map(clone_param).collect(),
-                method: req.method().as_str().to_owned(),
+                method: method.clone(),
                 path: req.uri().path().to_owned(),
                 query: req.uri().query().map(str::to_owned),
                 body: Vec::new(),
-                headers: req.headers().clone(),
+                headers: seen.clone(),
                 reply: verdict_tx,
                 websocket: None,
                 gate: true,
@@ -1274,11 +1315,11 @@ async fn upgrade_websocket(
         Pending {
             route: matched.route,
             params: matched.params,
-            method: req.method().as_str().to_owned(),
+            method,
             path: req.uri().path().to_owned(),
             query: req.uri().query().map(str::to_owned),
             body: Vec::new(),
-            headers: req.headers().clone(),
+            headers: seen,
             reply: reply_tx,
             websocket: Some(shared.clone()),
             gate: false,
@@ -1297,11 +1338,15 @@ async fn upgrade_websocket(
 
     let upgrade = hyper::upgrade::on(&mut req);
     let slot = req.extensions_mut().remove::<ConnectionSlot>();
+    let activity = req.extensions_mut().remove::<SocketActivity>();
     // Copied out before the move: `state` does not travel into the task.
     let max_message = state.max_message;
     tokio::spawn(async move {
-        // The socket holds its connection's place until it closes.
+        // The socket holds its connection's place until it closes: the slot
+        // of an HTTP/1.1 connection it took over, or its HTTP/2 connection's
+        // activity, so the idle check leaves that connection open.
         let _slot = slot;
+        let _activity = activity;
         match upgrade.await {
             Ok(upgraded) => {
                 websocket::serve(TokioIo::new(upgraded), shared, outgoing, max_message).await;
@@ -1311,6 +1356,12 @@ async fn upgrade_websocket(
         }
     });
 
+    if connect {
+        return Response::builder()
+            .status(StatusCode::OK)
+            .body(full(Bytes::new()))
+            .unwrap();
+    }
     Response::builder()
         .status(StatusCode::SWITCHING_PROTOCOLS)
         .header(UPGRADE, "websocket")
@@ -1553,9 +1604,17 @@ async fn handle(
         .compression
         .as_ref()
         .and_then(|_| req.headers().get(ACCEPT_ENCODING).cloned());
+    // An HTTP/2 WebSocket handshake is a CONNECT, routed as the GET an
+    // HTTP/1.1 one is, so a socket route is one route on either protocol.
+    let connect = websocket_connect(&req);
+    let method = if connect {
+        "GET"
+    } else {
+        req.method().as_str()
+    };
     let found = state
         .router
-        .find(req.method().as_str(), req.uri().path(), req.uri().query());
+        .find(method, req.uri().path(), req.uri().query());
     let found = match found {
         Err(RouteError::NotFound) | Err(RouteError::MethodNotAllowed(_)) if head => state
             .router
@@ -1623,6 +1682,13 @@ async fn handle(
 
     if state.router.spec(matched.route).websocket {
         return Ok(upgrade_websocket(req, matched, state, client).await);
+    }
+    if connect {
+        let answer = crate::problem::response(
+            StatusCode::BAD_REQUEST,
+            Some("this route does not open a websocket"),
+        );
+        return Ok(refuse(req, answer).await);
     }
 
     // Refused before the body is read, since reading it is work too.

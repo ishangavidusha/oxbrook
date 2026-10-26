@@ -212,14 +212,19 @@ The `:authority` of an HTTP/2 request is copied into the `host` header when the
 client sent none, so a handler reads the host the same way over either
 protocol.
 
-What HTTP/2 does not change:
+**WebSockets ride HTTP/2 too** (RFC 8441). The server offers extended
+`CONNECT`, so a browser that supports it opens a socket as one more stream on
+the connection it already has, rather than a second, HTTP/1.1 connection with
+its own TLS handshake; one that does not support it upgrades over HTTP/1.1 as
+before. Either way it reaches the same socket route, and the handler, `auth=`
+and an authorizer see the same handshake: a `GET` with `Upgrade: websocket`.
+A connection carrying a socket is never closed as idle, however quiet the
+socket is.
 
-- **WebSockets use HTTP/1.1.** The server does not offer WebSockets over
-  HTTP/2, so a browser opens a separate HTTP/1.1 connection for a socket, as it
-  does for any server that does not offer them. A socket route asked over
-  HTTP/2 answers `426`.
-- **Capacity limits are the same.** One HTTP/2 connection can carry many
-  requests at once, and each one still counts against `max_concurrency`.
+What HTTP/2 does not change: **capacity limits are the same.** One HTTP/2
+connection can carry many requests at once, and each one still counts against
+`max_concurrency`. A socket on HTTP/2 is one of the connection's streams, so
+it counts toward the streams a connection may have open.
 
 Limits specific to connections:
 

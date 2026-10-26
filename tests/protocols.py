@@ -32,6 +32,7 @@ The idle cases take about half a minute, run side by side.
 """
 import asyncio
 import contextlib
+import secrets
 import socket
 import ssl
 import sys
@@ -46,6 +47,7 @@ import h2.config
 import h2.connection
 import h2.events
 import h2.exceptions
+import h2.settings
 import httpx
 import oxbrook._app
 from oxbrook import CORS, SSE, App, BodyStream, Request, Response
@@ -143,6 +145,12 @@ async def slow(request: Request):
 async def ws(request: Request, sock):
     async for message in sock:
         await sock.send(message)
+
+
+@app.websocket("/ws-shape")
+async def ws_shape(request: Request, sock):
+    # What the application sees of a handshake, whichever protocol carried it.
+    await sock.send(f"{request.method} {request.header('upgrade')}")
 
 
 def expect_refusal(label: str, fragment: str, **options) -> None:
@@ -356,6 +364,42 @@ class RawH2:
         ], end_stream=True)
         return stream
 
+    def connect(self, path: str, version: bool = True) -> int:
+        """Open a WebSocket on a new stream: RFC 8441's extended CONNECT."""
+        stream = self.conn.get_next_available_stream_id()
+        headers = [
+            (":method", "CONNECT"), (":protocol", "websocket"), (":path", path),
+            (":scheme", "http"), (":authority", f"127.0.0.1:{self.port}"),
+        ]
+        if version:
+            headers.append(("sec-websocket-version", "13"))
+        self.conn.send_headers(stream, headers)
+        return stream
+
+    def send_text(self, stream: int, text: str) -> None:
+        payload = text.encode()
+        mask = secrets.token_bytes(4)
+        assert len(payload) < 126
+        self.conn.send_data(stream, bytes([0x81, 0x80 | len(payload)]) + mask
+                            + bytes(b ^ mask[i % 4] for i, b in enumerate(payload)))
+        self.flush()
+
+    def collect(self, wait: float, until) -> tuple[dict, dict, list]:
+        """Statuses and data per stream, read until `until(statuses, data)`."""
+        statuses: dict[int, str] = {}
+        data: dict[int, bytes] = {}
+        seen: list = []
+        self.flush()
+        deadline = time.monotonic() + wait
+        while time.monotonic() < deadline and not until(statuses, data):
+            for event in self.drain(0.2):
+                seen.append(event)
+                if isinstance(event, h2.events.ResponseReceived):
+                    statuses[event.stream_id] = dict(event.headers)[b":status"].decode()
+                elif isinstance(event, h2.events.DataReceived):
+                    data[event.stream_id] = data.get(event.stream_id, b"") + event.data
+        return statuses, data, seen
+
     def drain(self, wait: float) -> list:
         self.sock.settimeout(wait)
         events = []
@@ -382,6 +426,45 @@ class RawH2:
                 if isinstance(event, h2.events.ResponseReceived) and event.stream_id == stream:
                     return dict(event.headers)[b":status"].decode()
         return None
+
+
+def text_of(frame: bytes) -> str | None:
+    """The text of one unmasked, short server frame."""
+    if len(frame) < 2 or frame[0] != 0x81 or frame[1] >= 126:
+        return None
+    return frame[2:2 + frame[1]].decode()
+
+
+def websocket_over_http2(port: int) -> None:
+    """RFC 8441: a WebSocket on a stream of an HTTP/2 connection, beside
+    ordinary requests on the same connection."""
+    raw = RawH2(port)
+    raw.collect(1, lambda statuses, data: False)
+    enabled = raw.conn.remote_settings.get(h2.settings.SettingCodes.ENABLE_CONNECT_PROTOCOL)
+    check(enabled == 1, f"the server did not offer extended CONNECT (setting {enabled})")
+
+    first, second, shape = raw.connect("/ws"), raw.connect("/ws"), raw.connect("/ws-shape")
+    plain = raw.open("/")
+    statuses, data, _ = raw.collect(5, lambda st, d: len(st) == 4 and shape in d)
+    check(statuses == {first: "200", second: "200", shape: "200", plain: "200"},
+          f"two sockets, a third and a request on one connection answered {statuses}")
+    check(text_of(data.get(shape, b"")) == "GET websocket",
+          f"a handler saw the HTTP/2 handshake as {data.get(shape)!r}, not as a GET upgrade")
+
+    raw.send_text(first, "one")
+    raw.send_text(second, "two")
+    _, data, _ = raw.collect(5, lambda st, d: first in d and second in d)
+    got = (text_of(data.get(first, b"")), text_of(data.get(second, b"")))
+    check(got == ("one", "two"), f"two sockets on one connection echoed {got}")
+
+    refused = raw.connect("/ws", version=False)
+    wrong = raw.connect("/")
+    statuses, _, _ = raw.collect(5, lambda st, d: refused in st and wrong in st)
+    check(statuses.get(refused) == "426",
+          f"a handshake without a version answered {statuses.get(refused)}")
+    check(statuses.get(wrong) == "400",
+          f"a WebSocket CONNECT to an HTTP route answered {statuses.get(wrong)}")
+    raw.sock.close()
 
 
 def served(port: int) -> bytes:
@@ -575,7 +658,28 @@ def idle(tls_port: int, plain_port: int) -> None:
         results["long response events"] = events
         raw.sock.close()
 
-    cases = (silent_tls, silent_plain, idle_h2, deaf_h2, busy_h2)
+    def socket_h2() -> None:
+        """A socket that says nothing for longer than the idle check allows
+        a connection with nothing in flight."""
+        raw = RawH2(plain_port)
+        stream = raw.connect("/ws")
+        statuses, _, _ = raw.collect(5, lambda st, d: stream in st)
+        if statuses.get(stream) != "200":
+            results["quiet HTTP/2 socket"] = f"handshake {statuses.get(stream)}"
+            return
+        _, _, seen = raw.collect(33, lambda st, d: False)
+        ended = [e for e in seen if isinstance(e, h2.events.ConnectionTerminated
+                                               | h2.events.StreamReset)]
+        try:
+            raw.send_text(stream, "still here")
+            _, data, _ = raw.collect(5, lambda st, d: stream in d)
+            results["quiet HTTP/2 socket"] = ended or text_of(data.get(stream, b""))
+        except OSError as exc:
+            results["quiet HTTP/2 socket"] = f"closed: {exc}"
+        finally:
+            raw.sock.close()
+
+    cases = (silent_tls, silent_plain, idle_h2, deaf_h2, busy_h2, socket_h2)
     threads = [threading.Thread(target=case) for case in cases]
     for thread in threads:
         thread.start()
@@ -592,6 +696,9 @@ def idle(tls_port: int, plain_port: int) -> None:
     deaf = results.get("unanswered GOAWAY")
     check(isinstance(deaf, float) and 29 <= deaf <= 40,
           f"a client ignoring GOAWAY was closed after {deaf} s, expected 30 to 35")
+    check(results.get("quiet HTTP/2 socket") == "still here",
+          f"a quiet socket's HTTP/2 connection was closed as idle: "
+          f"{results.get('quiet HTTP/2 socket')}")
     check(results.get("long response events") == 8,
           f"a 40 s response was cut off: {results.get('long response events')} of 8 events")
 
@@ -623,6 +730,7 @@ def main() -> None:
                 plain.get("/").http_version == "HTTP/1.1", "plain HTTP/1.1")),
             ("limited body", lambda: limited_body(cert, key, trust)),
             ("http1 only", lambda: http1_only(cert, key, trust)),
+            ("websocket over http2", lambda: websocket_over_http2(plain.port)),
             ("rapid reset", lambda: rapid_reset(plain.port)),
             ("idle", lambda: idle(secure.port, plain.port)),
         ]
