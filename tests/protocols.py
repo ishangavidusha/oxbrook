@@ -12,6 +12,10 @@ What is asserted:
   bodies larger than its flow-control window, streamed request bodies, SSE,
   HEAD, CORS and the error statuses, and exposes the `:authority` as `host`;
 * `http2=False` serves HTTP/1.1 alone, and ALPN says so;
+* a renewed certificate is served without a restart, once both files are
+  written: a certificate whose key has not been replaced yet, or files that
+  have gone, leave the one in use in place, and connections already open
+  keep theirs;
 * a client that opens HTTP/2 streams and resets each one once its handler has
   started cannot run more than 200 handlers from one connection. Found while
   building this (CVE-2023-44487): hyper only limits resets before a request is
@@ -44,6 +48,7 @@ import h2.connection
 import h2.events
 import h2.exceptions
 import httpx
+import oxbrook._app
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -415,6 +420,70 @@ class RawH2:
         return None
 
 
+def served(port: int) -> bytes:
+    """The certificate a new connection is given, as DER."""
+    context = ssl.create_default_context()
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    with socket.create_connection(("127.0.0.1", port), timeout=5) as raw, \
+            context.wrap_socket(raw) as tls:
+        return tls.getpeercert(binary_form=True)
+
+
+def der(path: Path) -> bytes:
+    return x509.load_pem_x509_certificate(path.read_bytes()).public_bytes(
+        serialization.Encoding.DER)
+
+
+def certificate_renewal(certs: Path) -> None:
+    first, first_key = issue(certs, "first")
+    second, second_key = issue(certs, "second")
+    live, live_key = certs / "live.crt", certs / "live.key"
+    live.write_bytes(first.read_bytes())
+    live_key.write_bytes(first_key.read_bytes())
+
+    def settles(want: bytes, port: int) -> bool:
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if served(port) == want:
+                return True
+            time.sleep(0.05)
+        return False
+
+    poll, oxbrook._app._TLS_POLL = oxbrook._app._TLS_POLL, 0.1
+    try:
+        with TestClient(app, tls_cert=live, tls_key=live_key) as client:
+            port = client.port
+            check(served(port) == der(first), "the first certificate was not served")
+            # Open before the renewal, trusting only the first certificate.
+            before = httpx.Client(verify=ssl.create_default_context(cafile=first))
+            check(before.get(f"https://127.0.0.1:{port}/").status_code == 200,
+                  "the connection made before the renewal failed")
+
+            # Half a renewal: the new certificate beside the old key.
+            live.write_bytes(second.read_bytes())
+            time.sleep(0.5)
+            check(served(port) == der(first),
+                  "a certificate without its key replaced the working pair")
+
+            live_key.write_bytes(second_key.read_bytes())
+            check(settles(der(second), port), "the renewed certificate was never served")
+            check(before.get(f"https://127.0.0.1:{port}/").status_code == 200,
+                  "a connection open across the renewal was dropped")
+            before.close()
+            with httpx.Client(verify=ssl.create_default_context(cafile=second)) as after:
+                check(after.get(f"https://127.0.0.1:{port}/").status_code == 200,
+                      "a client trusting the renewed certificate was refused")
+
+            # Files gone, as between a deploy tool's remove and write.
+            live.unlink()
+            live_key.unlink()
+            time.sleep(0.5)
+            check(served(port) == der(second), "missing files took the certificate away")
+    finally:
+        oxbrook._app._TLS_POLL = poll
+
+
 def rapid_reset(port: int) -> None:
     global slow_peak
     slow_peak = 0
@@ -570,11 +639,14 @@ def main() -> None:
     trust = ssl.create_default_context(cafile=cert)
 
     steps = []
-    try:
-        startup_refusals(certs)
-        print("  startup_refusals: ok")
-    except Exception as exc:
-        failures.append(f"startup_refusals raised {type(exc).__name__}: {exc}")
+    for name, step in (("startup_refusals", startup_refusals),
+                       ("certificate_renewal", certificate_renewal)):
+        try:
+            step(certs)
+            print(f"  {name}: ok")
+        except Exception as exc:
+            failures.append(f"{name} raised {type(exc).__name__}: {exc}")
+            print(f"  {name}: ERROR")
 
     with TestClient(app, tls_cert=cert, tls_key=key) as secure, TestClient(app) as plain:
         secure.app_cert = cert

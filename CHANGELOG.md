@@ -7,6 +7,10 @@ release does not; changes that break existing code are listed under
 
 ## Unreleased
 
+- **Renewed TLS certificates are picked up without a restart.** The server
+  looks at `tls_cert` and `tls_key` once a minute and serves a changed pair
+  to new connections. A pair that does not load, such as a certificate whose
+  new key has not been written yet, leaves the current one in use.
 - **Rate limits per user.** `RateLimit(..., key="principal")` counts by the
   caller `auth=` found, so one user is one budget across all their keys,
   tokens and sessions and from any address. A request with no caller,

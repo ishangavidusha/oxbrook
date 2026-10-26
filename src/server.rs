@@ -485,7 +485,7 @@ struct Listen {
     quiet: bool,
     /// None when serving off the main thread, as the test client does.
     signals: Option<Terminate>,
-    tls: Option<tokio_rustls::TlsAcceptor>,
+    tls: Option<(tokio_rustls::TlsAcceptor, Arc<crate::tls::Certificate>)>,
     http2: bool,
     admin: Option<SocketAddr>,
 }
@@ -806,6 +806,12 @@ async fn serve_loop(listen: Listen, state: Arc<State>) -> Result<(), String> {
     if let Some((listener, _)) = admin {
         tokio::spawn(admin_loop(listener, state.clone()));
     }
+    // Looks for a renewed certificate until the runtime is dropped: through
+    // the drain too, since connections are still being accepted then.
+    let tls = tls.map(|(acceptor, certificate)| {
+        tokio::spawn(certificate.watch());
+        acceptor
+    });
     let protocols = Arc::new(Protocols::build(http2));
 
     // `max_concurrency` bounds requests handed to a worker, which is not the

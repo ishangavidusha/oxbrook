@@ -181,10 +181,19 @@ app.run(host="0.0.0.0", port=443,
 
 The certificate file holds the chain, the server's own certificate first, as
 Let's Encrypt's `fullchain.pem` does; the key is PKCS#8, PKCS#1 or SEC1 PEM.
-Both are read once, when the server starts, and checked against each other: a
+Both are read when the server starts and checked against each other: a
 missing file, an empty one or a key that belongs to another certificate stops
 the server with a message naming the file, before it binds. TLS 1.2 and 1.3
 are served; nothing older.
+
+**A renewed certificate needs no restart.** The server looks at both files
+once a minute, and when either has changed it reads the pair again and serves
+it to every new connection; connections already open keep the certificate
+they were made with. A pair that does not load is not used: a certificate
+whose key has not been written yet, or files that have gone, leave the
+current certificate in place and are tried again at the next look, with a
+line on standard error saying why. Renewing in place, as certbot and most
+ACME clients do, is enough.
 
 With TLS, the port speaks HTTPS only. A plain `http://` request to it fails,
 so redirecting HTTP to HTTPS takes a second listener or a proxy.
@@ -228,10 +237,8 @@ to it, and a handler with `cancel_on_disconnect=False` is not cancelled at all;
 counting handlers until they actually end keeps one connection from starting
 more of them than its share.
 
-Not supported: reloading a renewed certificate without a restart, client
-certificates, HTTP/3, and the `Upgrade: h2c` handshake from HTTP/1.1. A
-certificate renewed on disk takes effect at the next start; with `--reload` in
-development, `--reload-include '*.pem'` does that.
+Not supported: client certificates, HTTP/3, and the `Upgrade: h2c` handshake
+from HTTP/1.1.
 
 ## In front of it
 

@@ -50,6 +50,11 @@ DEFAULT_MAX_BODY = 16 * 1024 * 1024
 #: server would accept over HTTP and could not be changed.
 DEFAULT_MAX_MESSAGE = 16 * 1024 * 1024
 
+#: Seconds between looks at the TLS certificate and key for a renewal. A
+#: certificate is renewed weeks before it expires, so a minute's delay costs
+#: nothing, and a look is two `stat` calls.
+_TLS_POLL = 60.0
+
 
 class App:
     """The application: its routes, middleware, lifespans and server settings.
@@ -919,7 +924,9 @@ class App:
 
         `tls_cert` and `tls_key` are PEM files, the certificate chain with the
         server's certificate first and its private key. Given both, the server
-        speaks HTTPS only; they are read once, at startup.
+        speaks HTTPS only. They are checked at startup, then looked at once a
+        minute: a renewed pair is served to new connections without a
+        restart, and a pair that does not load leaves the current one in use.
 
         `http2` serves HTTP/2 alongside HTTP/1.1: negotiated through ALPN over
         TLS, and recognised by its opening bytes on a plain connection, where
@@ -994,7 +1001,8 @@ class App:
         if (tls_cert is None) != (tls_key is None):
             raise ValueError("tls_cert and tls_key are needed together")
         admin = self._admin(host, port, admin_port, admin_host)
-        tls = None if tls_cert is None else (os.fspath(tls_cert), os.fspath(tls_key))
+        tls = None if tls_cert is None else \
+            (os.fspath(tls_cert), os.fspath(tls_key), _TLS_POLL)
         self._serving_tls = tls is not None
         workers = workers or default_workers()
         self.workers = workers
