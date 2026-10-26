@@ -112,7 +112,7 @@ build-verbosity = 1
 # can only resolve to the wheel. Which suites, and the order, is in the runner;
 # it runs them itself because Windows has no shell loop to write here.
 test-sources = ["tests"]
-test-requires = ["httpx[http2]", "cryptography", "websockets"]
+test-requires = ["httpx[http2]", "websockets"]
 test-command = "python tests/run.py --wheel"
 
 [tool.cibuildwheel.windows]

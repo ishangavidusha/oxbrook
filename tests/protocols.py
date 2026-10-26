@@ -32,8 +32,6 @@ The idle cases take about half a minute, run side by side.
 """
 import asyncio
 import contextlib
-import datetime
-import ipaddress
 import socket
 import ssl
 import sys
@@ -43,16 +41,13 @@ import time
 import warnings
 from pathlib import Path
 
+import _certs
 import h2.config
 import h2.connection
 import h2.events
 import h2.exceptions
 import httpx
 import oxbrook._app
-from cryptography import x509
-from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import ec
-from cryptography.x509.oid import NameOID
 from oxbrook import CORS, SSE, App, BodyStream, Request, Response
 from oxbrook.testing import TestClient
 
@@ -67,39 +62,8 @@ def check(cond: bool, msg: str) -> None:
 # ---------------------------------------------------------------------------
 # certificates
 # ---------------------------------------------------------------------------
-def issue(directory: Path, name: str) -> tuple[Path, Path]:
-    """A self-signed certificate for 127.0.0.1 and localhost, and its key."""
-    key = ec.generate_private_key(ec.SECP256R1())
-    subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, f"oxbrook {name}")])
-    now = datetime.datetime.now(datetime.UTC)
-    cert = (
-        x509.CertificateBuilder()
-        .subject_name(subject)
-        .issuer_name(subject)
-        .public_key(key.public_key())
-        .serial_number(x509.random_serial_number())
-        .not_valid_before(now - datetime.timedelta(hours=1))
-        .not_valid_after(now + datetime.timedelta(days=1))
-        .add_extension(
-            x509.SubjectAlternativeName(
-                [x509.DNSName("localhost"), x509.IPAddress(ipaddress.ip_address("127.0.0.1"))]
-            ),
-            critical=False,
-        )
-        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
-        .sign(key, hashes.SHA256())
-    )
-    cert_path = directory / f"{name}.crt"
-    key_path = directory / f"{name}.key"
-    cert_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
-    key_path.write_bytes(
-        key.private_bytes(
-            serialization.Encoding.PEM,
-            serialization.PrivateFormat.PKCS8,
-            serialization.NoEncryption(),
-        )
-    )
-    return cert_path, key_path
+# Made with the standard library: see _certs.py for why.
+issue = _certs.issue
 
 
 # ---------------------------------------------------------------------------
@@ -431,8 +395,7 @@ def served(port: int) -> bytes:
 
 
 def der(path: Path) -> bytes:
-    return x509.load_pem_x509_certificate(path.read_bytes()).public_bytes(
-        serialization.Encoding.DER)
+    return ssl.PEM_cert_to_DER_cert(path.read_text())
 
 
 def certificate_renewal(certs: Path) -> None:
