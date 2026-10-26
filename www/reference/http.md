@@ -1,5 +1,5 @@
 ---
-description: API reference for Request, Response, Reply, forms and uploads, BodyStream, CORS and Compression.
+description: API reference for Request, Response, Reply, forms and uploads, BodyStream and Part, CORS and Compression.
 ---
 
 # Requests and responses
@@ -19,6 +19,8 @@ description: API reference for Request, Response, Reply, forms and uploads, Body
 ::: oxbrook.Form
 
 ::: oxbrook.BodyStream
+
+::: oxbrook.Part
 
 ::: oxbrook.CORS
 

@@ -7,6 +7,10 @@ release does not; changes that break existing code are listed under
 
 ## Unreleased
 
+- **Multipart uploads can be streamed.** `body.parts()` on a `BodyStream`
+  reads `multipart/form-data` a part at a time as it arrives, so a large file
+  goes to disk without the body or the file being held in memory. It uses the
+  same parser as `request.form()` and answers with the same statuses.
 - **Wheels for Alpine Linux.** musllinux 1.2 wheels for x86-64 and ARM, on
   both interpreter builds, so `pip install oxbrook` on Alpine no longer needs
   a Rust toolchain.

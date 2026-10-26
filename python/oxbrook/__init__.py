@@ -9,7 +9,7 @@ from importlib.metadata import PackageNotFoundError as _NotInstalled
 from importlib.metadata import version as _version
 
 from ._app import App
-from ._bodies import BodyStream
+from ._bodies import BodyStream, Part
 from ._capabilities import Capability, CapabilityError
 from ._compression import Compression
 from ._core import Request
@@ -60,6 +60,7 @@ __all__ = [
     "JsonFormatter",
     "Message",
     "Metrics",
+    "Part",
     "RateLimit",
     "RedisBackend",
     "Reply",

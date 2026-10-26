@@ -135,6 +135,61 @@ async def twice(request: Request, body: BodyStream):
     return {"first": len(first), "second": len(second), "same": first == second}
 
 
+@app.post("/parts")
+async def parts(request: Request, body: BodyStream):
+    seen_parts, slow = [], request.header("x-slow") is not None
+    async for part in body.parts(max_parts=int(request.header("x-max-parts") or 1000)):
+        entry = {"name": part.name, "filename": part.filename,
+                 "content_type": part.content_type, "headers": part.headers}
+        if request.header("x-skip"):
+            seen_parts.append(entry)
+            continue
+        if part.filename is None:
+            entry["text"] = await part.text()
+        else:
+            digest, size, count = hashlib.sha256(), 0, 0
+            async for chunk in part:
+                digest.update(chunk)
+                size += len(chunk)
+                count += 1
+                if slow:
+                    await asyncio.sleep(0.001)
+            entry.update(bytes=size, sha=digest.hexdigest(), chunks=count)
+        seen_parts.append(entry)
+    return seen_parts
+
+
+@app.post("/parts-stale")
+async def parts_stale(_: Request, body: BodyStream):
+    stream = body.parts()
+    first = await stream.__anext__()
+    await stream.__anext__()
+    try:
+        await first.read()
+    except RuntimeError:
+        return {"stale": "refused"}
+    return {"stale": "read"}
+
+
+@app.post("/parts-buffered")
+async def parts_buffered(request: Request):
+    return [[p.name, await p.text()] async for p in request.stream().parts()]
+
+
+@app.post("/form-of")
+async def form_of(request: Request):
+    form = request.form()
+    out = []
+    for name, value in form.multi_items():
+        if isinstance(value, UploadFile):
+            out.append({"name": name, "filename": value.filename,
+                        "content_type": value.content_type,
+                        "sha": hashlib.sha256(value.data).hexdigest()})
+        else:
+            out.append({"name": name, "text": value})
+    return out
+
+
 def chunks(total: int, size: int = 64 * 1024, pause: float = 0.0):
     sent = 0
     while sent < total:
@@ -326,6 +381,105 @@ def openapi_describes_bodies(client: TestClient) -> None:
 # ---------------------------------------------------------------------------
 # streaming
 # ---------------------------------------------------------------------------
+def multipart(fields, files, boundary="b0und4ry", chunk=64 * 1024):
+    """A multipart body as a generator: fields as (name, text), files as
+    (name, filename, content_type, size), each file `size` bytes of a pattern."""
+    def gen():
+        for name, text in fields:
+            yield (f"--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n"
+                   .encode() + text + b"\r\n")
+        for name, filename, content_type, size in files:
+            yield (f"--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"; "
+                   f"filename=\"{filename}\"\r\nContent-Type: {content_type}\r\n"
+                   f"X-Extra: yes\r\n\r\n").encode()
+            sent = 0
+            while sent < size:
+                n = min(chunk, size - sent)
+                yield pattern(sent, n)
+                sent += n
+            yield b"\r\n"
+        yield f"--{boundary}--\r\n".encode()
+    return gen, {"content-type": f"multipart/form-data; boundary={boundary}"}
+
+
+def pattern(offset: int, n: int) -> bytes:
+    # Not all one byte, so a part cut or shifted anywhere changes the digest.
+    block = bytes(range(251)) * (n // 251 + 2)
+    start = offset % 251
+    return block[start:start + n]
+
+
+def parts_stream(client: TestClient) -> None:
+    """I-055: a multipart upload read a part at a time, never held whole."""
+    size = 48 * MB
+    gen, headers = multipart([("title", b"holiday"), ("note", b"caf\xc3\xa9 \xff")],
+                             [("photo", "a.jpg", "image/jpeg", size)])
+    before = peak_rss()
+    r = client.post("/parts", content=gen(), headers={**headers, "x-slow": "1"}, timeout=120)
+    grew = peak_rss() - before
+    got = r.json() if r.status_code == 200 else r.text
+    expected_sha = hashlib.sha256(pattern(0, size)).hexdigest()
+    check(r.status_code == 200 and [p["name"] for p in got] == ["title", "note", "photo"],
+          f"parts answered {r.status_code} {str(got)[:300]}")
+    if r.status_code != 200:
+        return
+    check(got[0]["text"] == "holiday" and got[1]["text"] == "café \ufffd",
+          f"fields read as {got[0].get('text')!r}, {got[1].get('text')!r}")
+    photo = got[2]
+    check(photo["bytes"] == size and photo["sha"] == expected_sha,
+          f"a {size // MB} MB part arrived as {photo['bytes']} bytes, digest match "
+          f"{photo['sha'] == expected_sha}")
+    check(photo["chunks"] > 1, "a 48 MB part arrived in one chunk: it was collected first")
+    check(photo["filename"] == "a.jpg" and photo["content_type"] == "image/jpeg"
+          and photo["headers"].get("x-extra") == "yes",
+          f"the part's metadata read as {photo}")
+    check(grew < 32 * MB,
+          f"a {size // MB} MB multipart upload to a slow reader grew the process by "
+          f"{grew // MB} MB; the body is being held instead of streamed")
+
+    # Same parser as request.form(): the same body reads the same both ways,
+    # cut into pieces small enough to split every boundary and header.
+    gen, headers = multipart([("a", b"1"), ("a", b"2"), ("bad", b"\xff\xfe")],
+                             [("f", "x.bin", "application/octet-stream", 5000)], chunk=7)
+    whole = b"".join(gen())
+    streamed = client.post("/parts", content=(whole[i:i + 7] for i in range(0, len(whole), 7)),
+                           headers=headers).json()
+    formed = client.post("/form-of", content=whole, headers=headers).json()
+    as_form = [{"name": p["name"], "text": p["text"]} if p["filename"] is None else
+               {"name": p["name"], "filename": p["filename"],
+                "content_type": p["content_type"], "sha": p["sha"]} for p in streamed]
+    check(as_form == formed, f"streamed parts {as_form} differ from request.form() {formed}")
+
+    skipped = client.post("/parts", content=whole, headers={**headers, "x-skip": "1"})
+    names = [p["name"] for p in skipped.json()] if skipped.status_code == 200 else None
+    check(names == ["a", "a", "bad", "f"],
+          f"parts left unread were not skipped: {skipped.status_code} {skipped.text[:200]}")
+    stale = client.post("/parts-stale", content=whole, headers=headers).json()
+    check(stale == {"stale": "refused"}, f"reading a part after moving on gave {stale}")
+    # The fields alone, so the body is small enough for an ordinary route.
+    fields_only = whole[:whole.index(b'--b0und4ry\r\nContent-Disposition: form-data; name="f"')]
+    buffered = client.post("/parts-buffered", content=fields_only + b"--b0und4ry--\r\n",
+                           headers=headers)
+    expected = [["a", "1"], ["a", "2"], ["bad", "\ufffd\ufffd"]]
+    check(buffered.status_code == 200 and buffered.json() == expected,
+          f"parts of a buffered body read as {buffered.status_code} {buffered.text[:200]}")
+
+
+def parts_refuse_what_they_cannot_read(client: TestClient) -> None:
+    gen, headers = multipart([("a", b"1"), ("b", b"2"), ("c", b"3")], [])
+    whole = b"".join(gen())
+    for label, content, sent, status in (
+        ("not multipart", b"a=1", {"content-type": "application/x-www-form-urlencoded"}, 415),
+        ("no content type", b"x", {}, 415),
+        ("no boundary", whole, {"content-type": "multipart/form-data"}, 400),
+        ("cut short", whole[:-30], headers, 400),
+        ("no parts at all", b"just bytes", headers, 400),
+        ("too many parts", whole, {**headers, "x-max-parts": "2"}, 413),
+    ):
+        r = client.post("/parts", content=content, headers=sent)
+        check(r.status_code == status, f"{label}: answered {r.status_code}, expected {status}")
+
+
 def streams_arrive_intact(client: TestClient) -> None:
     payload = 24 * MB
     body = client.put("/upload", content=chunks(payload)).json()
@@ -463,7 +617,8 @@ def main() -> None:
         for step in (forms_parse, forms_bind, forms_refuse_what_they_cannot_read,
                      openapi_describes_bodies, streams_arrive_intact,
                      slow_reader_is_backpressured, nothing_is_read_before_asked,
-                     two_reads_at_once_both_finish):
+                     two_reads_at_once_both_finish, parts_stream,
+                     parts_refuse_what_they_cannot_read):
             try:
                 step(client)
                 print(f"  {step.__name__}: ok")

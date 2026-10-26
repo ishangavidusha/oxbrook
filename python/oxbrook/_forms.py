@@ -22,7 +22,8 @@ Or bind the fields to a pydantic model, validated into a `422` like a JSON body:
 Both `application/x-www-form-urlencoded` and `multipart/form-data` are parsed
 in Rust, on the worker thread, only when a handler asks. A file is held in
 memory: the whole body is already bounded by `max_body`. For uploads larger
-than that, read the raw body incrementally with `BodyStream`.
+than that, take a `BodyStream` and read the form a part at a time with
+`body.parts()`.
 """
 
 from collections.abc import Iterator, Mapping

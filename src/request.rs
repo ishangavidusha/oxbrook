@@ -472,9 +472,13 @@ impl Request {
     fn stream<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let reader = self._reader(py)?;
         let buffered = PyBytes::new(py, self.filled.get().unwrap_or(&self.body));
+        let content_type = self
+            .headers
+            .get(hyper::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok());
         py.import("oxbrook._bodies")?
             .getattr("BodyStream")?
-            .call1((reader, buffered))
+            .call1((reader, buffered, content_type))
     }
 
     fn __repr__(&self) -> String {

@@ -5,7 +5,7 @@ Three ways to receive something other than JSON:
 | need | use |
 |---|---|
 | an HTML form, or a small file upload | `request.form()`, or a model bound with `Form()` |
-| an upload larger than `max_body`, or one to refuse before it arrives | a `BodyStream` argument |
+| an upload larger than `max_body`, or one to refuse before it arrives | a `BodyStream` argument, and `body.parts()` for a multipart form |
 | the raw bytes of an ordinary body | `request.body` |
 
 ## Reading a form
@@ -55,7 +55,8 @@ A multipart part with a filename is an `UploadFile`:
     onto a directory without sanitising it first.
 
 A form is held in memory while it is read, like any other body, and is bounded
-by `max_body`. For files larger than that, use a `BodyStream`.
+by `max_body`. For files larger than that, use a `BodyStream` and
+[read the form a part at a time](#streaming-a-multipart-upload).
 
 ## Binding a form to a model
 
@@ -147,6 +148,46 @@ over; a handler still reading gets `HTTPError(400)`.
 On a route without a `BodyStream`, `request.stream()` yields the
 already-collected body once, so code that reads a stream works on both. On a
 streaming route, `request.body` is empty.
+
+## Streaming a multipart upload
+
+A browser uploads a file as `multipart/form-data`, with the file between the
+form's other fields. `body.parts()` parses that as it arrives, so each file can
+go to disk chunk by chunk:
+
+```python
+@app.post("/uploads")
+async def upload(request: Request, body: BodyStream):
+    fields, stored = {}, []
+    async for part in body.parts():
+        if part.filename is None:
+            fields[part.name] = await part.text()
+            continue
+        with open(storage_path(part.filename), "wb") as out:
+            async for chunk in part:
+                out.write(chunk)
+        stored.append(part.filename)
+    return {"fields": fields, "stored": stored}
+```
+
+| `Part` | |
+|---|---|
+| `name` | the form field's name |
+| `filename` | the file's name as the client sent it, or `None` for an ordinary field |
+| `content_type` | the part's declared type, or `None` |
+| `headers` | the part's own headers, names lowercased |
+| `async for chunk in part` | the data, as it arrives |
+| `await part.read()` | the rest of the data, held in memory |
+| `await part.text()` | the rest decoded, undecodable bytes replaced |
+
+Parts arrive in the order the client sent them, and a part's data is readable
+only until the next part is asked for: whatever is left unread then is skipped,
+and reading the old part raises `RuntimeError`. The parser is the one
+`request.form()` uses, so a body is accepted or refused the same way either
+way, with the same statuses: `415` for a body that is not multipart, `400` for
+a malformed one or one that ends early, and `413` past `max_parts`
+(`body.parts(max_parts=50)`). `max_body` and `request_timeout` apply to the
+whole body as they do to any stream.
 
 A route that binds a form with `Form()` can be an [agent tool](../agents.md),
 as long as the form has no files: the model's fields become the tool's
