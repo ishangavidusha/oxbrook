@@ -83,6 +83,7 @@ jobs:
           - { label: macos arm64, os: macos-15 }
           - { label: macos x86-64, os: macos-15-intel }
           - { label: windows x86-64, os: windows-latest }
+          - { label: windows arm64, os: windows-11-arm }
     timeout-minutes: 60
     env:
       PYTHONUNBUFFERED: "1"
@@ -123,13 +124,13 @@ jobs:
           for tag in cp314-cp314 cp314-cp314t; do
             for platform in manylinux_2_28_x86_64 manylinux_2_28_aarch64 \
                             musllinux_1_2_x86_64 musllinux_1_2_aarch64 macosx_*_arm64 \
-                            macosx_*_x86_64 win_amd64; do
+                            macosx_*_x86_64 win_amd64 win_arm64; do
               ls dist/oxbrook-$version-$tag-*$platform*.whl > /dev/null || {
                 echo "::error::missing $tag $platform"; exit 1; }
             done
           done
           ls dist/oxbrook-$version.tar.gz
-          test "$(ls dist | wc -l)" -eq 15
+          test "$(ls dist | wc -l)" -eq 17
 
   testpypi:
     name: publish to TestPyPI

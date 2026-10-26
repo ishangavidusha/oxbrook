@@ -116,10 +116,11 @@ test-requires = ["httpx[http2]", "cryptography", "websockets"]
 test-command = "python tests/run.py --wheel"
 
 [tool.cibuildwheel.windows]
-# 64-bit only. Windows' default here is "the native architecture and 32-bit
-# x86", and a 32-bit wheel is one nobody asked for whose test dependencies have
-# no wheels of their own.
-archs = ["AMD64"]
+# The runner's own architecture only: x86-64 on one runner, ARM64 on the
+# other, each tested where it was built. Windows' default here adds 32-bit
+# x86, a wheel nobody asked for whose test dependencies have no wheels of
+# their own.
+archs = ["native"]
 
 [tool.cibuildwheel.linux]
 before-all = "curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal"
