@@ -913,13 +913,17 @@ async fn serve_loop(listen: Listen, state: Arc<State>) -> Result<(), String> {
                         None => connection(stream, &protocols, state, slot, peer).await,
                         // Bounded like request headers: a client that connects
                         // and never finishes the handshake holds a slot too.
-                        Some(acceptor) => {
+                        // Boxed because a task is as large as its largest
+                        // branch: inline, the handshake made every plain
+                        // connection's task 7.2 KiB where it needs 2.4.
+                        Some(acceptor) => Box::pin(async move {
                             if let Ok(Ok(stream)) =
                                 tokio::time::timeout(IDLE, acceptor.accept(stream)).await
                             {
                                 connection(stream, &protocols, state, slot, peer).await;
                             }
-                        }
+                        })
+                        .await,
                     }
                 });
             }

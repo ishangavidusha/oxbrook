@@ -156,6 +156,31 @@ backlog where a client's own connect timeout governs it. Health probes wait
 there too, unless they have [a port of their
 own](guide/health.md#a-port-of-their-own).
 
+### Many open streams
+
+An open SSE stream or WebSocket is a request still being served, so it holds
+one of its worker's `max_concurrency` slots until it closes, as well as its
+connection's place under `max_connections`. At the defaults the server holds
+2,048 connections in all, and each worker loop at most 1,024 streams before
+its new requests are answered `503`. A server meant to hold many raises both:
+
+```python
+app.run(max_concurrency=8192, max_connections=32768)
+```
+
+Memory is what sets the real ceiling. Measured on macOS (arm64, free-threaded
+build), the server's resident memory grows by about:
+
+| connection | memory, idle |
+|---|---|
+| keep-alive, between requests | 33 KiB |
+| open SSE stream | 43 KiB |
+| open WebSocket | 43 KiB |
+
+growing linearly, so ten thousand open streams take about 450 MiB. Raise the
+process's file-descriptor limit (`ulimit -n`) to match: each connection is one
+descriptor.
+
 Request headers have fixed limits, past which the answer is `431 Request
 Header Fields Too Large`:
 

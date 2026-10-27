@@ -49,6 +49,10 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--port", type=int, default=8000)
     p.add_argument("--workers", type=int, default=None)
+    # An open stream holds a concurrency slot for as long as it lasts, so
+    # bench/idle.py raises this to hold more streams than the default allows.
+    p.add_argument("--max-concurrency", type=int, default=1024)
     a = p.parse_args()
     # Publishing a large batch is one long request; streams hold connections.
-    app.run(port=a.port, workers=a.workers, request_timeout=0, max_connections=16384)
+    app.run(port=a.port, workers=a.workers, request_timeout=0, max_connections=16384,
+            max_concurrency=a.max_concurrency)

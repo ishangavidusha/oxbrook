@@ -259,6 +259,14 @@ pub async fn drive<S>(
     shared.mark_closed();
 }
 
+/// What tungstenite reads into. Its default is 128 KiB, and it zero-fills the
+/// spare capacity before every read, so an idle socket kept 128 KiB of touched
+/// pages: about 156 KiB a connection all told, where 16 KiB echoes at the same
+/// rate for small and 64 KiB messages alike. A frame larger than this still
+/// arrives whole; the buffer is reserved to the frame's length once its header
+/// is read.
+const READ_BUFFER: usize = 16 * 1024;
+
 /// Wrap an upgraded connection and run it to completion.
 ///
 /// `max_message` caps a single incoming message. Without it tungstenite's own
@@ -274,7 +282,8 @@ pub async fn serve<S>(
 {
     let config = WebSocketConfig::default()
         .max_message_size(Some(max_message))
-        .max_frame_size(Some(max_message));
+        .max_frame_size(Some(max_message))
+        .read_buffer_size(READ_BUFFER);
     let stream = WebSocketStream::from_raw_socket(io, Role::Server, Some(config)).await;
     drive(stream, shared, outgoing).await;
 }

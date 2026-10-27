@@ -7,6 +7,10 @@ release does not; changes that break existing code are listed under
 
 ## Unreleased
 
+- **Idle WebSockets use a quarter of the memory.** An open socket held a
+  128 KiB read buffer from its first message on; it now holds 16 KiB, at the
+  same echo throughput. An idle WebSocket costs the server about 43 KiB
+  rather than 156, and a plain connection about 5 KiB less than before.
 - **WebSockets over HTTP/2.** The server offers RFC 8441's extended
   `CONNECT`, so a browser on an HTTP/2 connection opens a socket as another
   stream instead of a separate HTTP/1.1 connection. Handlers see the same
