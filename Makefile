@@ -4,7 +4,7 @@ FT_PY  := 3.14.7+freethreaded
 # recorded before benchmarks ever left it. Anywhere else, uv fetches its own.
 GIL_PY := $(shell test -x /opt/homebrew/bin/python3.14 && echo /opt/homebrew/bin/python3.14 || echo 3.14)
 
-.PHONY: image-bench bench-auth bench-imbalance bench-streams bench-protocols bench-container machine bench-collect venvs build build-ft build-gil docs docs-serve coverage coverage-rust lint run bench bench-gil bench-cpu bench-cpu-gil sweep sweep-gil bench-all verify verify-gil up down logs image stack stack-down clean
+.PHONY: image-bench bench-auth bench-imbalance bench-streams bench-protocols bench-container machine bench-collect venvs build build-ft build-gil docs docs-serve coverage coverage-run coverage-rust coverage-all build-cov rust-report lint run bench bench-gil bench-cpu bench-cpu-gil sweep sweep-gil bench-all verify verify-gil up down logs image stack stack-down clean
 
 venvs:
 	uv venv --python $(FT_PY) .venv
@@ -114,6 +114,10 @@ COVERAGE_MIN := 85
 # Paths are absolute because the CLI suite's processes run from a temporary
 # project directory, and subprocess measurement (pyproject) follows them there.
 coverage: build-ft
+	@$(MAKE) --no-print-directory coverage-run
+
+# The suites under coverage.py, against whatever extension is installed in .venv.
+coverage-run:
 	@.venv/bin/python tests/durable.py --check
 	@.venv/bin/python tests/database.py --check
 	@.venv/bin/python tests/mongo.py --check
@@ -141,27 +145,49 @@ coverage: build-ft
 # Built into target-cov/ and rebuilt release at the end, so this never leaves an
 # unoptimised extension installed for the next benchmark to measure.
 LLVM_BIN := $(shell rustc --print sysroot)/lib/rustlib/$(shell rustc -vV | sed -n 's/^host: //p')/bin
+# Regions, as llvm-cov counts them. 93.3% when the floor was set (2026-10-27).
+RUST_COVERAGE_MIN := 90
+RUST_IGNORE := '(/.cargo/|/rustc/|library/std)'
+# The instrumented build is the free-threaded one; the GIL venv's sits beside it.
+COV_OBJECT = $(wildcard python/oxbrook/_core.cpython-314t*.so)
 
-coverage-rust:
-	@rm -rf target-cov/prof target-cov/html && mkdir -p target-cov/prof
-	CARGO_TARGET_DIR=target-cov RUSTFLAGS="-Cinstrument-coverage" \
-		VIRTUAL_ENV=$(CURDIR)/.venv .venv/bin/maturin develop
+coverage-rust: build-cov
 	@for s in $(SUITES); do \
 		LLVM_PROFILE_FILE="$(CURDIR)/target-cov/prof/%p-%m.profraw" \
 			.venv/bin/python tests/$$s.py >/dev/null 2>&1 || echo "suite failed: $$s"; \
 	done
+	@$(MAKE) --no-print-directory rust-report
+	@echo "restoring the release build"
+	@$(MAKE) --no-print-directory build-ft
+
+# Both halves from one run of the suites, which is how CI measures them: the
+# extension is built instrumented and the suites run under coverage.py, so the
+# job does not run everything twice. Fails on either floor.
+coverage-all: build-cov
+	@LLVM_PROFILE_FILE="$(CURDIR)/target-cov/prof/%p-%m.profraw" \
+		$(MAKE) --no-print-directory coverage-run
+	@$(MAKE) --no-print-directory rust-report
+
+build-cov:
+	@rm -rf target-cov/prof target-cov/html && mkdir -p target-cov/prof
+	CARGO_TARGET_DIR=target-cov RUSTFLAGS="-Cinstrument-coverage" \
+		VIRTUAL_ENV=$(CURDIR)/.venv .venv/bin/maturin develop
+
+rust-report:
 	@$(LLVM_BIN)/llvm-profdata merge -sparse target-cov/prof/*.profraw \
 		-o target-cov/oxbrook.profdata
 	@$(LLVM_BIN)/llvm-cov report --instr-profile=target-cov/oxbrook.profdata \
-		--object python/oxbrook/_core.cpython-314t-darwin.so \
-		--ignore-filename-regex='(/.cargo/|/rustc/|library/std)'
+		--object $(COV_OBJECT) --ignore-filename-regex=$(RUST_IGNORE)
 	@$(LLVM_BIN)/llvm-cov show --instr-profile=target-cov/oxbrook.profdata \
-		--object python/oxbrook/_core.cpython-314t-darwin.so \
-		--format=html --output-dir=target-cov/html \
-		--ignore-filename-regex='(/.cargo/|/rustc/|library/std)'
+		--object $(COV_OBJECT) --ignore-filename-regex=$(RUST_IGNORE) \
+		--format=html --output-dir=target-cov/html
 	@echo "html report: target-cov/html/index.html"
-	@echo "restoring the release build"
-	@$(MAKE) --no-print-directory build-ft
+	@$(LLVM_BIN)/llvm-cov export --summary-only --instr-profile=target-cov/oxbrook.profdata \
+		--object $(COV_OBJECT) --ignore-filename-regex=$(RUST_IGNORE) \
+		| .venv/bin/python -c "import json, sys; \
+			pct = json.load(sys.stdin)['data'][0]['totals']['regions']['percent']; \
+			print(f'rust region coverage {pct:.2f}%, floor $(RUST_COVERAGE_MIN)%'); \
+			sys.exit(pct < $(RUST_COVERAGE_MIN))"
 
 # What CI enforces, runnable before pushing. Rust formatting and lints, then
 # the Python linter. `ruff format` is deliberately not run: see pyproject.

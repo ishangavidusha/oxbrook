@@ -104,12 +104,15 @@ Coverage of both halves:
 
 ```bash
 make coverage        # Python, branch coverage, fails under 85%
-make coverage-rust   # Rust, via LLVM instrumentation
+make coverage-rust   # Rust, via LLVM instrumentation, fails under 90% of regions
+make coverage-all    # both from one run of the suites, as CI does
 ```
 
-`coverage-rust` needs `rustup component add llvm-tools-preview`. It builds an
-instrumented extension, runs the suites against it, and rebuilds release
-afterwards so a benchmark never measures the instrumented build.
+The Rust half needs `rustup component add llvm-tools-preview`. `coverage-rust`
+builds an instrumented extension, runs the suites against it, and rebuilds
+release afterwards so a benchmark never measures the instrumented build.
+`coverage-all` leaves the instrumented build installed; `make build` restores
+release.
 
 ```bash
 make up            # redis, postgres and keycloak

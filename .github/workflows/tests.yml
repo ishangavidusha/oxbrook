@@ -43,11 +43,12 @@ jobs:
       matrix:
         include:
           # The free-threaded leg runs under coverage, so the suites are not
-          # executed twice just to measure them.
+          # executed twice just to measure them: coverage.py for the Python
+          # half and an instrumented extension for the Rust half, in one run.
           - label: free-threaded 3.14t
             python: 3.14t
             venv: .venv
-            target: coverage
+            target: coverage-all
           - label: GIL 3.14
             python: "3.14"
             venv: .venv-gil
@@ -111,14 +112,19 @@ jobs:
         run: docker compose up -d keycloak
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          # llvm-profdata and llvm-cov, for the Rust half of the coverage leg.
+          components: llvm-tools
 
       # Keyed by interpreter. The two legs of this matrix run on the same
       # runner image, and a shared cache hands one leg the other's build: on
       # Windows that is a module linked against the interpreter the other leg
-      # used, which then cannot be imported at all.
+      # used, which then cannot be imported at all. The coverage leg builds
+      # into target-cov/, so that is the directory its cache keeps.
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.python }}
+          workspaces: ". -> ${{ matrix.target == 'coverage-all' && 'target-cov' || 'target' }}"
 
       # One cache per interpreter. A cache key is written once, by whichever
       # leg saves first, so a shared one held only the faster leg's packages
@@ -153,7 +159,9 @@ jobs:
       # Not a benchmark — a shared CI machine cannot be measured, and the real
       # harness refuses to try. This only says whether dispatch still serves
       # under concurrency, and gives the Windows leg's number something from
-      # the same runner class to sit beside.
+      # the same runner class to sit beside. On the coverage leg the extension
+      # is the instrumented debug build, so that leg's figure only says it
+      # serves; the GIL leg's is the release build's.
       - name: Throughput sanity check
         run: ${{ matrix.venv }}/bin/python bench/smoke.py --seconds 3
 
@@ -165,12 +173,14 @@ jobs:
           docker compose ps -a
           docker compose logs --tail 80 keycloak
 
-      - name: Upload the coverage report
-        if: matrix.target == 'coverage'
+      - name: Upload the coverage reports
+        if: matrix.target == 'coverage-all'
         uses: actions/upload-artifact@v7
         with:
           name: coverage-html
-          path: htmlcov
+          path: |
+            htmlcov
+            target-cov/html
           retention-days: 14
 
   # Windows is a development platform for this project, not a deployment one,
