@@ -165,15 +165,42 @@ def the_example_serves() -> None:
         check(r.status_code == 201, "deleting a note did not free its title")
 
 
+class Raised(logging.Handler):
+    """What a handler raised, for a failure message: the suite silences the
+    log, and a 500 says nothing about its cause."""
+
+    def __init__(self) -> None:
+        super().__init__(logging.ERROR)
+        self.seen: list[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if record.exc_info and record.exc_info[1] is not None:
+            exc = record.exc_info[1]
+            self.seen.append(f"{type(exc).__module__}.{type(exc).__qualname__}: {exc}"[:300])
+
+
 def a_title_is_unique_under_a_race() -> None:
     example = load_example("race")
-    with TestClient(example.app, workers=WORKERS) as c:
-        results = concurrently(c, [("POST", "/notes", {"title": "same", "body": str(n)})
-                                   for n in range(8)])
-        codes = sorted(r.status_code for r in results)
-        check(codes == [201] + [409] * 7,
-              f"eight creates racing for one title answered {codes}, not one 201")
-        check(len(c.get("/notes").json()) == 1, "a race for one title left more than one note")
+    log, raised = logging.getLogger("oxbrook"), Raised()
+    level = log.level
+    log.setLevel(logging.ERROR)
+    log.addHandler(raised)
+    try:
+        with TestClient(example.app, workers=WORKERS) as c:
+            results = concurrently(c, [("POST", "/notes", {"title": "same", "body": str(n)})
+                                       for n in range(8)])
+            codes = sorted(r.status_code for r in results)
+            # Seen once (I-154): every loser answered 500 in a full coverage
+            # run, and never again in dozens of reruns. The cause goes in the
+            # message, so the next one explains itself.
+            check(codes == [201] + [409] * 7,
+                  f"eight creates racing for one title answered {codes}, not one 201"
+                  + "".join(f"\n      raised {r}" for r in sorted(set(raised.seen))))
+            check(len(c.get("/notes").json()) == 1,
+                  "a race for one title left more than one note")
+    finally:
+        log.removeHandler(raised)
+        log.setLevel(level)
 
 
 def a_raising_request_writes_nothing() -> None:
