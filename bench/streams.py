@@ -24,6 +24,7 @@ a client limit as a server one:
 """
 import argparse
 import asyncio
+import json
 import multiprocessing as mp
 import os
 import resource
@@ -196,6 +197,53 @@ def measure_ws(connections: int, seconds: float, procs: int, size: int) -> dict:
     }
 
 
+def wsload() -> Path:
+    """Build the Rust echo client (bench/wsload) and return its path."""
+    target = ROOT / "target" / "wsload"
+    subprocess.run(["cargo", "build", "--release", "--quiet", "--manifest-path",
+                    str(ROOT / "bench" / "wsload" / "Cargo.toml"), "--target-dir", str(target)],
+                   check=True)
+    return target / "release" / "wsload"
+
+
+def measure_ws_rust(binary: Path, connections: int, seconds: float, threads: int,
+                    size: int) -> dict:
+    """The same echo, from a Rust client: one process, `threads` runtime threads.
+
+    A Python client spends most of a core per ~40k round trips, so above a
+    hundred connections it measured itself. This one costs a fraction of that,
+    which leaves the server as the side that runs out.
+    """
+    before = resource.getrusage(resource.RUSAGE_CHILDREN)
+    started = time.monotonic()
+    proc = subprocess.Popen([str(binary), f"ws://127.0.0.1:{PORT}/echo", str(connections),
+                             str(seconds), str(size), str(threads)],
+                            stdout=subprocess.PIPE, text=True)
+    with httpx.Client(base_url=BASE, timeout=60) as http:
+        if proc.stdout.readline().strip() != "measuring":
+            raise SystemExit("wsload did not start")
+        cpu_before = http.get("/cpu").json()["cpu"]
+        report = json.loads(proc.stdout.readline())
+        cpu_after = http.get("/cpu").json()["cpu"]
+    proc.wait(timeout=60)
+    wall = time.monotonic() - started
+    after = resource.getrusage(resource.RUSAGE_CHILDREN)
+    client_cpu = (after.ru_utime - before.ru_utime) + (after.ru_stime - before.ru_stime)
+    trips = report["round_trips"]
+    return {
+        "connections": connections,
+        "seconds": report["seconds"],
+        "payload_bytes": size,
+        "round_trips": trips,
+        "round_trips_per_s": trips / report["seconds"],
+        "server_cpu_ms_per_1000": (cpu_after - cpu_before) * 1000 / max(trips, 1) * 1000,
+        "client": "rust",
+        "client_procs": threads,
+        # Over the client's whole life, connecting included, so slightly low.
+        "client_cores": client_cpu / wall,
+    }
+
+
 # ---------------------------------------------------------------------------
 def wait_port(proc, timeout=20.0):
     deadline = time.time() + timeout
@@ -225,6 +273,10 @@ def main():
     ap.add_argument("--connections", type=int, nargs="*", default=[10, 100, 1000])
     ap.add_argument("--seconds", type=float, default=5.0)
     ap.add_argument("--size", type=int, default=64)
+    ap.add_argument("--ws-client", choices=["python", "rust"], default="python",
+                    help="rust: bench/wsload, for the server's ceiling rather than the client's")
+    ap.add_argument("--ws-threads", type=int, default=2,
+                    help="runtime threads for the rust client")
     ap.add_argument("--strict", action="store_true",
                     help="refuse to measure when the host fails preflight")
     args = ap.parse_args()
@@ -260,8 +312,12 @@ def main():
 
         print(f"\nWebSocket echo, {args.size}-byte message, {args.seconds:.0f}s per scenario")
         print(f"{'conns':>6}{'trips/s':>11}{'srv cpu ms/1k':>15}{'client cores':>14}")
+        binary = wsload() if args.ws_client == "rust" else None
         for conns in args.connections:
-            row = measure_ws(conns, args.seconds, args.client_procs, args.size)
+            if binary:
+                row = measure_ws_rust(binary, conns, args.seconds, args.ws_threads, args.size)
+            else:
+                row = measure_ws(conns, args.seconds, args.client_procs, args.size)
             ws_rows.append(row)
             print(f"{conns:>6}{row['round_trips_per_s']:>11.0f}"
                   f"{row['server_cpu_ms_per_1000']:>15.1f}{row['client_cores']:>14.2f}"

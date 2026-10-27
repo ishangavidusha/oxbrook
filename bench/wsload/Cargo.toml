@@ -1,0 +1,17 @@
+[package]
+name = "wsload"
+version = "0.1.0"
+edition = "2021"
+description = "WebSocket echo load generator for bench/streams.py"
+publish = false
+
+# Its own workspace, so building it never touches the extension crate above.
+[workspace]
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "macros"] }
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+
+[profile.release]
+codegen-units = 1
